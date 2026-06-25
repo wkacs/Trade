@@ -3,7 +3,9 @@ import path from "path";
 
 export default defineConfig({
   resolve: {
-    alias: { "@": path.resolve(__dirname, "./src") },
+    alias: {
+      "@": path.join(process.cwd(), "src"),
+    },
   },
   test: {
     environment: "node",
