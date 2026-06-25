@@ -1,0 +1,33 @@
+# dependencies
+node_modules
+.pnp
+.pnp.js
+
+# next.js
+.next
+out
+build
+
+# env
+.env
+.env.local
+.env*.local
+
+# misc
+.DS_Store
+*.pem
+.vscode/
+
+# db
+drizzle/meta/_journal.json.bak
+
+# ml artifacts
+*.txt LightGBM-model*
+ml_model.txt
+model.json
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
