@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CryptoPanicCollector } from "@/lib/collectors/cryptopanic";
 
 describe("CryptoPanicCollector", () => {
-  beforeEach(() => vi.stubGlobal("fetch", vi.fn()));
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
 
   it("híreket sentiment-té normalizál", async () => {
     (global.fetch as any).mockResolvedValue({

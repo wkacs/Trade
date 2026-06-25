@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RSSCollector } from "@/lib/collectors/rss";
 
 describe("RSSCollector", () => {
-  beforeEach(() => vi.stubGlobal("fetch", vi.fn()));
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
 
   it("RSS XML-t DataPoint-tá alakít", async () => {
     const xml = `<?xml version="1.0"?><rss><channel>

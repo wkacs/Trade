@@ -25,8 +25,8 @@ export class RSSCollector implements DataCollector {
         const res = await fetch(src.url);
         if (!res.ok) continue;
         const xml = await res.text();
-        const items = xml.matchAll(
-          /<item>[\s\S]*?<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>/g,
+        const items = Array.from(
+          xml.matchAll(/<item>[\s\S]*?<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>/g),
         );
         for (const m of items) {
           out.push({

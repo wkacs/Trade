@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { WhaleAlertCollector } from "@/lib/collectors/whalealert";
 
 describe("WhaleAlertCollector", () => {
-  beforeEach(() => vi.stubGlobal("fetch", vi.fn()));
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
 
   it("nagy tranzakciókat irányként normalizál", async () => {
     (global.fetch as any).mockResolvedValue({
