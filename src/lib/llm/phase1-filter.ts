@@ -30,6 +30,7 @@ export async function shouldDecide(events: DataPoint[]): Promise<Phase1Result> {
     ...(e.news ? { t: e.news.title, sent: e.news.sentiment } : {}),
     ...(e.whale ? { amt: e.whale.amountUsd, dir: e.whale.direction } : {}),
     ...(e.rss ? { t: e.rss.title, src: e.rss.source } : {}),
+    ...(e.sentiment ? { fng: e.sentiment.value, lbl: e.sentiment.classification } : {}),
   }));
   const fallback: Phase1Result = {
     shouldDecide: false,

@@ -3,6 +3,8 @@ import { CoinGeckoCollector } from "@/lib/collectors/coingecko";
 import { CryptoPanicCollector } from "@/lib/collectors/cryptopanic";
 import { WhaleAlertCollector } from "@/lib/collectors/whalealert";
 import { RSSCollector } from "@/lib/collectors/rss";
+import { BinanceOHLCCollector } from "@/lib/collectors/binance";
+import { FearGreedCollector } from "@/lib/collectors/feargreed";
 import { buildFeatures } from "@/lib/ml/features";
 import { predict } from "@/lib/ml/predictor";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
@@ -53,11 +55,14 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   const positions = dbState?.positions ?? [];
   const dayPnlPct = dbState?.dayPnlPct ?? 0;
 
-  // 2) Collectors — kulcs nélküliek mindig (CoinGecko ár + ingyenes RSS hír-kontextus),
-  // a kulcsosak csak ha van token. Az RSS adja az AI-nak a hír-kontextust díjmentesen.
+  // 2) Collectors — kulcs nélküliek mindig: CoinGecko (aktuális ár), Binance (OHLC
+  // gyertyák az ML-hez), RSS (hír-kontextus), Fear & Greed (piaci hangulat).
+  // A kulcsosak (CryptoPanic/WhaleAlert) csak ha van token.
   const collectors: DataCollector[] = [
     new CoinGeckoCollector([...COIN_UNIVERSE]),
+    new BinanceOHLCCollector([...COIN_UNIVERSE]),
     new RSSCollector(RSS_SOURCES),
+    new FearGreedCollector(),
   ];
   if (process.env.CRYPTOPANIC_TOKEN)
     collectors.push(new CryptoPanicCollector(process.env.CRYPTOPANIC_TOKEN, [...COIN_UNIVERSE]));
@@ -66,12 +71,17 @@ export async function runTick(input: TickInput): Promise<TickResult> {
 
   const events = await collectAll(collectors);
 
-  // 3) ML signals
+  // Az LLM-nek tisztított nézet: a Binance nyers gyertyák (24×3 ár-pont) az ML-t
+  // etetik, de a prompt-ot nem terheljük velük. Az LLM az aktuális árat (CoinGecko),
+  // a hírt (RSS) és a hangulatot (Fear & Greed) látja + az ML-jeleket.
+  const llmEvents = events.filter((e) => e.source !== "binance");
+
+  // 3) ML signals — a TELJES events-ből (a Binance idősorral) számol valódi feature-t
   const features = buildFeatures(events);
   const mlSignals = await predict(features);
 
   // 4) Phase-1: érdemes-e dönteni? (GLM-4-Flash, ingyenes, minden órában)
-  const phase1 = await shouldDecide(events);
+  const phase1 = await shouldDecide(llmEvents);
 
   // Alapértelmezett döntés: HOLD a phase-1 összegzésével.
   // Ha phase-1 nemet mond, NEM hívjuk a phase-2-t — ez a ciklus 90%-a.
@@ -85,9 +95,9 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   };
 
   if (phase1.shouldDecide) {
-    // 5) Phase-2: GLM-5.2 strukturált döntés érveléssel
+    // 5) Phase-2: GLM-5.2 strukturált döntés érveléssel (tisztított LLM-nézet)
     const phase2 = await decide({
-      events,
+      events: llmEvents,
       mlSignals,
       portfolio: { cashUsd, positions: positions.map((p) => ({ symbol: p.symbol, qty: p.qty, entryPrice: 0 })) },
     });
