@@ -73,29 +73,27 @@ export async function initPortfolio(
 }
 
 /**
- * Mai napi P&L % kiszámítása (a mai tranzakciókból).
- * Egyszerűsített: csak a realized SELL bevételeket számolja a nap elejéhez képest.
- * A teljes (realized + unrealized) P&L egy későbbi feladat.
+ * P&L % a kezdőtőkéhez mérve (a circuit breaker bemenete). Equity ≈ készpénz +
+ * nyitott pozíciók belépési áron. Friss/kiegyensúlyozott számlán ~0.
+ * NOTE: belépési áron értékel (nem mark-to-market); a valódi NAPI P&L-hez aktuális ár
+ * + napi equity-snapshot kellene — későbbi finomítás.
  */
 export async function computeDayPnlPct(): Promise<number> {
   const db = getDb();
   if (!db) return 0;
 
   try {
-    const startOfDay = new Date();
-    startOfDay.setUTCHours(0, 0, 0, 0);
-
-    const todayTrades = await db.query.trades.findMany();
-    const todaySells = todayTrades.filter(
-      (t) => new Date(t.executedAt) >= startOfDay && t.side === "SELL",
-    );
-
-    // Naiv: SELL bevételek összege / kezdőtőke
-    // A valós számítás az entry-vs-exit ár különbségből áll.
     const portfolio = await db.query.portfolios.findFirst();
-    if (!portfolio) return 0;
-    const sellsTotal = todaySells.reduce((s, t) => s + t.amountUsd, 0);
-    return sellsTotal / portfolio.initialCapitalUsd - 1;
+    if (!portfolio || !portfolio.initialCapitalUsd) return 0;
+
+    // A régi "sells/initial - 1" képlet -100%-ot adott, ha aznap nem volt SELL, és így a
+    // napi circuit breaker MINDEN tickben HOLD-ra kényszerített → a bot sosem kereskedett.
+    const open = await db.query.positions.findMany({
+      where: isNull(schema.positions.closedAt),
+    });
+    const positionsValue = open.reduce((s, p) => s + p.qty * p.entryPrice, 0);
+    const equity = portfolio.cashUsd + positionsValue;
+    return equity / portfolio.initialCapitalUsd - 1;
   } catch {
     return 0;
   }
