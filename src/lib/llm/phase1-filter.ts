@@ -6,6 +6,10 @@ const SYSTEM = `Te egy kripto-trading asszisztens első szűrő fázisa vagy.
 A feladat: eldönteni, hogy az elmúlt órában történt-e olyan érdemi esemény
 (hír, whale-mozgás, jelentős árváltozás), ami indokolná egy BUY/SELL döntést.
 
+FONTOS: az extrém alacsony piaci hangulat (Fear & Greed index < 25) — különösen
+jelentős áreséssel együtt — CSELEKVÉSRE ÉRDEMES esemény (potenciális halmozási/BUY
+lehetőség), NEM automatikus HOLD. Az extrém félelmet ne értékeld „nyugodt órának".
+
 Válaszolj KIZÁRÓLAG ezzel a JSON-objektummal, pontosan ezekkel a mezőnevekkel,
 semmilyen extra szöveg vagy mező nélkül:
 {

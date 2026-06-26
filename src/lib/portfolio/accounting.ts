@@ -13,7 +13,24 @@ import type { Trade } from "@/lib/types";
 
 export interface PortfolioState {
   cashUsd: number;
-  positions: { symbol: string; qty: number; valueUsd: number }[];
+  /**
+   * Kezdőtőke (a portfolios sorból). Szükséges a mark-to-market napi P&L
+   * számításához: dayPnlPct = totalEquityNow/initialCapitalUsd - 1.
+   * Lásd profit-cycle spec kiegészítés (MTM, §A).
+   */
+  initialCapitalUsd: number;
+  /**
+   * Nyitott pozíciók. Az id/entryPrice/stopPrice a kód-alapú profit-ciklushoz
+   * (stop-loss/take-profit) kell — lásd profit-cycle spec §3.1/§3.4.
+   */
+  positions: {
+    id: string;
+    symbol: string;
+    qty: number;
+    entryPrice: number;
+    stopPrice: number;
+    valueUsd: number;
+  }[];
   totalEquity: () => number;
   dayPnlPct: number;
 }
@@ -32,14 +49,21 @@ export async function loadPortfolioState(): Promise<PortfolioState | null> {
     if (!portfolio) return null;
 
     const positionsWithValue = positions.map((p) => ({
+      id: p.id,
       symbol: p.symbol,
       qty: p.qty,
-      valueUsd: p.qty * p.entryPrice, // egyszerűsített; a valós érték az aktuális árral
+      entryPrice: p.entryPrice,
+      stopPrice: p.stopPrice,
+      // Belépési áron értékeljük betöltéskor — a tick.ts felülírja aktuális
+      // árral (mark-to-market), amint megvannak a prices. Lásd spec §A.
+      valueUsd: p.qty * p.entryPrice,
     }));
     const cashUsd = portfolio.cashUsd;
+    const initialCapitalUsd = portfolio.initialCapitalUsd;
 
     return {
       cashUsd,
+      initialCapitalUsd,
       positions: positionsWithValue,
       totalEquity: () =>
         cashUsd + positionsWithValue.reduce((s, p) => s + p.valueUsd, 0),
@@ -228,4 +252,33 @@ async function firstPortfolioId(db: Db): Promise<string | null> {
     .from(schema.portfolios)
     .limit(1);
   return row?.id ?? null;
+}
+
+/**
+ * Frissíti egy pozíció stopPrice-t — a görgő (trailing) stop túléli a tickeket,
+ * mert a tickenkénti ratchetelés eredményét a DB-be perzisztáljuk.
+ *
+ * Lásd: profit-cycle spec kiegészítés (trailing stop, §B). Az applyTrade mintáját
+ * követi: dbOverride a tesztelhetőségért, null/hiba esetén false, nem dob.
+ *
+ * @returns true ha a frissítés megtörtént, false ha nem volt DB / hiba.
+ */
+export async function setStopPrice(
+  positionId: string,
+  stopPriceUsd: number,
+  dbOverride?: Db | null,
+): Promise<boolean> {
+  const db = dbOverride !== undefined ? dbOverride : getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .update(schema.positions)
+      .set({ stopPrice: stopPriceUsd })
+      .where(eq(schema.positions.id, positionId));
+    return true;
+  } catch (e) {
+    console.error("[accounting] setStopPrice hiba:", e);
+    return false;
+  }
 }

@@ -7,6 +7,12 @@ export interface RiskContext {
   totalEquity: () => number;
   /** Mai napi P&L % (circuit breakerhez). Pozitív = nyereség, negatív = veszteség. */
   dayPnlPct?: number;
+  /**
+   * Hátralévő heti DCA-keret USD-ben. Ha megadva és ≤0, minden BUY HOLD-ra vált
+   * (a DCA és az AI vételi úton is érvényesül a heti limit). undefined = nincs ellenőrzés.
+   * Lásd spec §3.5.
+   */
+  weeklyBudgetRemainingUsd?: number;
 }
 
 /**
@@ -29,6 +35,21 @@ export function applyRisk(raw: RawDecision, ctx: RiskContext): Decision {
       action: "HOLD",
       overridden: true,
       overrideReason: `Napi circuit breaker aktiválódott (${(ctx.dayPnlPct! * 100).toFixed(1)}% < -3%)`,
+    };
+  }
+
+  // 1b) Heti DCA-keret: ha elfogyott, minden BUY HOLD-ra vált. Garantálja, hogy a heti
+  //     limit MINDEN vételi úton (AI és DCA is) érvényesül. Lásd spec §3.5.
+  if (
+    raw.action === "BUY" &&
+    ctx.weeklyBudgetRemainingUsd !== undefined &&
+    ctx.weeklyBudgetRemainingUsd <= 0
+  ) {
+    return {
+      ...base,
+      action: "HOLD",
+      overridden: true,
+      overrideReason: "Heti DCA-keret elfogyott",
     };
   }
 

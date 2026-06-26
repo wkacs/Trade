@@ -87,3 +87,45 @@ describe("applyRisk — kockázati limitek", () => {
     expect(result.timestamp).toBeGreaterThan(0);
   });
 });
+
+const sell = (symbol: string, amountPct: number): RawDecision => ({
+  action: "SELL",
+  symbol,
+  amountPct,
+  confidence: 0.8,
+  reasoning: "x",
+  model: "glm-5.2",
+});
+
+describe("applyRisk — heti DCA-keret limit (spec §3.5)", () => {
+  it("heti keret elfogyott (0) + BUY → HOLD", () => {
+    const result = applyRisk(buy("BTC", 0.1), { ...ctx(10000), weeklyBudgetRemainingUsd: 0 });
+    expect(result.action).toBe("HOLD");
+    expect(result.overridden).toBe(true);
+    expect(result.overrideReason).toMatch(/heti/i);
+  });
+
+  it("heti keret negatív + BUY → HOLD", () => {
+    const result = applyRisk(buy("BTC", 0.1), { ...ctx(10000), weeklyBudgetRemainingUsd: -5 });
+    expect(result.action).toBe("HOLD");
+    expect(result.overridden).toBe(true);
+  });
+
+  it("van még heti keret + BUY → átmegy (a heti limit nem blokkol)", () => {
+    const result = applyRisk(buy("BTC", 0.1), { ...ctx(10000), weeklyBudgetRemainingUsd: 100 });
+    expect(result.action).toBe("BUY");
+    expect(result.overridden).toBe(false);
+  });
+
+  it("heti keret nincs megadva (undefined) → a régi viselkedés (BUY átmegy)", () => {
+    const result = applyRisk(buy("BTC", 0.1), ctx(10000));
+    expect(result.action).toBe("BUY");
+    expect(result.overridden).toBe(false);
+  });
+
+  it("heti keret elfogyott + SELL → a SELL NEM blokkolt (csak a BUY-t korlátozza)", () => {
+    const result = applyRisk(sell("BTC", 0.1), { ...ctx(10000), weeklyBudgetRemainingUsd: 0 });
+    expect(result.action).toBe("SELL");
+    expect(result.overridden).toBe(false);
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyTrade } from "@/lib/portfolio/accounting";
+import { applyTrade, setStopPrice } from "@/lib/portfolio/accounting";
 import type { Trade } from "@/lib/types";
 import type { Db } from "@/db/client";
 
@@ -183,5 +183,25 @@ describe("applyTrade", () => {
     // lezárva: closedAt be van állítva, qty 0
     expect(updates[0].values.closedAt).toBeInstanceOf(Date);
     expect(updates[0].values.qty).toBe(0);
+  });
+});
+
+describe("setStopPrice", () => {
+  it("nincs DB esetén false-t ad vissza (nem perzisztál)", async () => {
+    const result = await setStopPrice("pos-1", 61750, null);
+    expect(result).toBe(false);
+  });
+
+  it("frissíti a pozíció stopPrice-t és true-t ad vissza", async () => {
+    const { db, ops } = makeMockDb([]);
+    const result = await setStopPrice("pos-1", 61750, db as unknown as Db);
+
+    expect(result).toBe(true);
+    // volt egy UPDATE a positions táblán, stopPrice = 61750
+    const updates = ops.filter(
+      (o) => o.kind === "update" && o.values && "stopPrice" in o.values,
+    );
+    expect(updates.length).toBe(1);
+    expect(updates[0].values.stopPrice).toBe(61750);
   });
 });

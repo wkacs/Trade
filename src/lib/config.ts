@@ -20,6 +20,27 @@ export const RISK_LIMITS: RiskLimits = {
   dailyLossCircuitBreakerPct: 0.03,
 };
 
+/**
+ * Profit-ciklus paraméterek (kód-alapú stop-loss + take-profit + fear-greedy DCA).
+ * Lásd: docs/superpowers/specs/2026-06-26-profit-cycle-design.md §3.7.
+ */
+export const PROFIT_CYCLE = {
+  /** Take-profit: ha a pozíció ennyit ért el (+15%), eladja a felét. */
+  takeProfitPct: 0.15,
+  /** DCA: Fear & Greed index ezen küszöb (≤25) alatt halmoz. */
+  dcaFgThreshold: 25,
+  /** DCA: heti költési keret a tőke hányadaként (5%). */
+  dcaWeeklyBudgetPct: 0.05,
+  /** DCA: egy vétel mérete a tőke hányadaként (2%). */
+  dcaBuyPct: 0.02,
+  /**
+   * DCA: ha egy coin 24h esése (abszolút értékben) ezt meghaladja (>8%), az
+   * „szabaduló zuhanás" — nem veszünk bele. Live-ra váltásnál a dcaBuyPct-t a
+   * broker minimum notional fölé kell emelni. Lásd spec §7.
+   */
+  dcaMax24hDropPct: 0.08,
+};
+
 /** Fix coin kosár USDT párban. Bővíthető a settings-en keresztül. Lásd spec §3.6. */
 export const COIN_UNIVERSE = ["BTC", "ETH", "SOL"] as const;
 export type CoinSymbol = (typeof COIN_UNIVERSE)[number];
