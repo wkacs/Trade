@@ -36,12 +36,16 @@ export function buildFeatures(prices: DataPoint[], windowHours = 4): MlFeatures[
     const mean = returns.reduce((s, r) => s + r, 0) / (returns.length || 1);
     const variance =
       returns.reduce((s, r) => s + (r - mean) ** 2, 0) / (returns.length || 1);
+    // volumeRatio: az utolsó gyertya volumene az ablak átlagához képest (>1 = felfutó forgalom).
+    const vols = sorted.map((p) => p.price!.volume24h ?? 0);
+    const meanVol = vols.reduce((s, v) => s + v, 0) / (vols.length || 1);
+    const lastVol = vols[vols.length - 1] ?? 0;
     out.push({
       symbol,
       return1h: (last - prev1h) / prev1h,
       return4h: (last - prev4h) / prev4h,
       volatility4h: Math.sqrt(variance),
-      volumeRatio: 1, // egyszerűsített; a tényleges átlag-történetből számolandó
+      volumeRatio: meanVol > 0 ? lastVol / meanVol : 1,
     });
   }
   return out;

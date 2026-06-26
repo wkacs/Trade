@@ -24,10 +24,9 @@ tsconfig.tsbuildinfo
 # db
 drizzle/meta/_journal.json.bak
 
-# ml artifacts
+# ml artifacts (a betanított src/lib/ml/model.json MOST a repó része — bundle-elve a Vercelre)
 *.txt LightGBM-model*
 ml_model.txt
-model.json
 
 # debug
 npm-debug.log*

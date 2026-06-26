@@ -1,52 +1,39 @@
-# ML modell tréning (külső Python script)
+# ML modell — TS-natív tréning + inferencia
 
-A LightGBM modell tréningét **külön Python környezetben** végezzük,
-a `raw_events` táblából kinyert történelmi adatokon. A betanított modellt
-JSON/ONNX formátumban mentjük, és a Vercel Blob Storage-ba töltjük.
+A modell **a meglévő Node/TS stack-ben** tanul és fut (nincs Python/natív dep),
+így a Vercel serverless bundle-be kerül, és end-to-end verifikálható.
 
-## Állapot
+## Áttekintés
 
-**Demo-fázis:** a `predictor.ts` jelenleg naiv heurisztikát használ:
-- pozitív 1h return + alacsony volatilitás → `"up"`
-- erősen negatív return → `"down"`
-- egyébként → `"flat"`
+- **Modell:** logisztikus regresszió a `next-hour up` irányra.
+- **Feature-ök** (a produkciós `buildFeatures`-ből, hogy tréning=inferencia konzisztens legyen):
+  `return1h`, `return4h`, `volatility4h`, `volumeRatio`.
+- **Tréning-adat:** Binance ingyenes történelmi gyertyák (~5000 óra/coin), 24-gyertyás
+  ablakkal — ugyanannyi, mint amit a `BinanceOHLCCollector` élesben gyűjt.
+- **Artifact:** `src/lib/ml/model.json` (súlyok + feature mean/std + metrikák) — a repóban,
+  bundle-elve. A `predictor.ts` ezt tölti be; ha hiányzik, naiv heurisztikára esik vissza.
 
-Ez elegendő az AI döntési lánc végpontoktól végpontig történő teszteléséhez.
-A valódi LightGBM modell csak a demo-fázis után jön, amikor már van elég
-történelmi adat a `raw_events` táblában.
+## Tréning (újratanítás)
 
-## Lépések (a demo-fázis után)
+```bash
+pnpm tsx scripts/train-model.ts
+```
+Letölti a Binance-történelmet, a `buildFeatures`-szel feature-t épít, idő-alapú
+train/test splittel tanít (a teszt a legfrissebb 20% = valódi out-of-sample),
+és kiírja az `src/lib/ml/model.json`-t + a metrikákat. Utána commit + push → a Vercel
+auto-deploy felviszi az új modellt.
 
-1. **Adatexport** — a `raw_events` táblából CoinGecko ár-történet:
-   ```bash
-   pnpm tsx scripts/export-raw-events.ts > ml_training_data.json
-   ```
+## Reális elvárás
 
-2. **Tréning Pythonnal:**
-   ```python
-   import lightgbm as lgb
-   import json
+Az intraday kripto-irány előrejelzése **nagyon nehéz**. Az első modell tipikusan
+**~52–53% out-of-sample pontosság** (AUC ~0.54) — **gyenge, de valódi** jel a véletlen
+felett. A modell egy **mean-reversion**-jellegű mintát tanult (magas friss return →
+inkább lefelé). A fő döntéshozó továbbra is a GLM; az ML-jel egy input a sok közül.
 
-   data = json.load(open("ml_training_data.json"))
-   # Feature-ök + címkék (1 órás forward return iránya) felépítése
-   # X_train, y_train, ...
+## Továbbfejlesztés (később)
 
-   params = {"objective": "binary", "metric": "auc", "verbosity": -1}
-   train_data = lgb.Dataset(X_train, label=y_train)
-   bst = lgb.train(params, train_data, num_rounds=100)
-   bst.save_model("model.json")
-   ```
-
-3. **Feltöltés** — a `model.json`-t töltsd fel a Vercel Blob Storage-ba,
-   és állítsd be a `ML_MODEL_URL` env-et.
-
-4. **Inferencia** — a `predictor.ts` implementálja a tree-walk-ot a JSON-ből,
-   vagy használjon ONNX runtime-ot.
-
-## Miért külön Python?
-
-- A Vercel szerverless környezet nehezen futtat natív LightGBM C++ kódot.
-- A tréning ritka (heti/havi), nem kell a web appban élnie.
-- A súlyok (artifact) elég, ha a prediction idején elérhetők.
-
-Lásd még: `docs/superpowers/specs/2026-06-25-ai-crypto-trader-design.md` §3.2.
+- Több feature (RSI, momentum több ablakon, order-book jelek).
+- Több coin / hosszabb történelem.
+- Gradiens-boosted modell (LightGBM Pythonban + JSON tree-walk inferencia), ha a
+  logisztikus plafont elérte — de csak ha a backteszt indokolja.
+- Mark-to-market napi P&L (a circuit breakerhez) aktuális árral.
