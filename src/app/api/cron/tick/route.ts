@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { runTick } from "@/lib/engine/tick";
 import { getDb, schema } from "@/db/client";
+import { evaluatePending } from "@/lib/portfolio/evaluate";
 
 // A tick több külső hívást tesz (collectors párhuzamosan + 1-2 LLM hívás + DB),
 // ezért megemeljük a függvény-időkorlátot (Vercelen a default 10s kevés lehet).
@@ -83,6 +84,14 @@ export async function POST(req: Request) {
             model: result.decision.model,
             overridden: result.decision.overridden,
             overrideReason: result.decision.overrideReason ?? null,
+            // Pillanatkép a későbbi „bejött volna?" kiértékeléshez: árak + az AI VALÓDI
+            // szándéka (rawAction, a Risk Manager előtt) — mintha tényleg kötött volna.
+            ref: {
+              prices: result.prices,
+              intent: result.rawAction,
+              intentSymbol: result.decision.symbol || null,
+              intentAmountPct: result.rawAmountPct,
+            },
           })
           .returning();
         decisionId = inserted?.id;
@@ -105,6 +114,10 @@ export async function POST(req: Request) {
         // applyTrade) perzisztálja a trade-et a pozícióhoz kötve, a cash és a pozíció
         // frissítésével együtt (ha van inicializált portfólió). A korábbi különálló
         // trades-insert dupla sort okozott — eltávolítva.
+
+        // Utólagos kiértékelés: a már „beérett" (≥~1h) korábbi döntéseket pontozzuk az
+        // aktuális árakkal — „bejött volna-e, ha tényleg kötött volna". Best-effort.
+        await evaluatePending(result.prices);
       } catch (e) {
         // DB hiba nem akasztja meg a választ — a döntés már megvan
         console.error("[cron/tick] mentés hiba:", e);

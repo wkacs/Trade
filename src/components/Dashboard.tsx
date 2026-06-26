@@ -10,6 +10,12 @@ interface PortfolioApi {
   portfolio: { cashUsd: number; initialCapitalUsd: number } | null;
   positions: { symbol: string; qty: number; entryPrice: number }[];
   recentTrades: unknown[];
+  performance?: {
+    evaluated: number;
+    actionable: number;
+    hitRate: number | null;
+    avgHypotheticalPnlPct: number;
+  };
   note?: string;
 }
 
@@ -32,6 +38,7 @@ export function Dashboard() {
   // Alapértelmezett demo állapot, ha nincs DB
   const cashUsd = portfolio?.portfolio?.cashUsd ?? 10000;
   const positions = portfolio?.positions ?? [];
+  const perf = portfolio?.performance;
 
   return (
     <main className="mx-auto max-w-5xl space-y-6 p-6">
@@ -49,6 +56,36 @@ export function Dashboard() {
         <div className="grid gap-6 lg:grid-cols-2">
           <PortfolioPanel cashUsd={cashUsd} positions={positions} />
           <AdminPanel />
+        </div>
+      )}
+
+      {perf && perf.evaluated > 0 && (
+        <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-gray-900">Bejött volna? (utólagos kiértékelés)</h2>
+          <p className="mt-1 text-xs text-gray-500">
+            A korábbi döntések szándéka utólag, az árak alapján — mintha tényleg kötött volna.
+          </p>
+          <div className="mt-4 grid grid-cols-3 gap-4">
+            <div>
+              <div className="text-xs text-gray-500">Találati arány</div>
+              <div className="text-xl font-semibold text-blue-600">
+                {perf.hitRate === null ? "—" : `${Math.round(perf.hitRate * 100)}%`}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">Átlag hipotetikus P&L</div>
+              <div className={`text-xl font-semibold ${perf.avgHypotheticalPnlPct >= 0 ? "text-green-700" : "text-red-600"}`}>
+                {perf.avgHypotheticalPnlPct >= 0 ? "+" : ""}
+                {perf.avgHypotheticalPnlPct.toFixed(2)}%
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">Kiértékelt / döntésre váró</div>
+              <div className="text-xl font-semibold text-gray-900">
+                {perf.actionable} / {perf.evaluated}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

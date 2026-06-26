@@ -25,6 +25,12 @@ export interface DecideInput {
     cashUsd: number;
     positions: { symbol: string; qty: number; entryPrice: number }[];
   };
+  /** A korábbi döntések utólagos eredménye („bejött volna?") — visszacsatolás az AI-nak. */
+  performance?: {
+    actionable: number;
+    hitRate: number | null;
+    avgHypotheticalPnlPct: number;
+  };
 }
 
 /**
@@ -43,6 +49,10 @@ export async function decide(input: DecideInput): Promise<Phase2Result> {
     ml: input.mlSignals,
     portfolio: input.portfolio,
     limits: { maxPositionPct: 0.2, maxConcurrent: 3 },
+    // Visszacsatolás: a korábbi döntéseid szándéka hány %-ban lett volna nyereséges
+    // (hitRate) és átlagosan mennyit hozott/vitt (avgHypotheticalPnlPct). Tanulj belőle,
+    // de a JELEN adat a döntő. null hitRate = még nincs elég kiértékelt döntés.
+    recentPerformance: input.performance ?? null,
   });
   const { data, raw } = await chatJson<Phase2Result>(
     process.env.LLM_MODEL_PHASE2 ?? "glm-5.2",

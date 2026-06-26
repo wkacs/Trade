@@ -20,6 +20,10 @@ vi.mock("@/lib/portfolio/accounting", () => ({
   loadPortfolioState: vi.fn().mockResolvedValue(null),
   applyTrade: vi.fn().mockResolvedValue({ positionId: null }),
 }));
+vi.mock("@/lib/portfolio/evaluate", () => ({
+  getPerformanceSummary: vi.fn().mockResolvedValue({ evaluated: 0, actionable: 0, hitRate: null, avgHypotheticalPnlPct: 0 }),
+  evaluatePending: vi.fn().mockResolvedValue({ evaluated: 0 }),
+}));
 
 import { collectAll } from "@/lib/collectors/base";
 import { shouldDecide } from "@/lib/llm/phase1-filter";

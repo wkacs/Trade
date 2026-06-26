@@ -70,6 +70,10 @@ export const decisions = pgTable("decisions", {
   model: varchar("model", { length: 32 }).notNull(),
   overridden: boolean("overridden").notNull().default(false),
   overrideReason: text("override_reason"),
+  /** Döntéskori pillanatkép a kiértékeléshez: { prices, intent (rawAction), intentSymbol, intentAmountPct }. */
+  ref: jsonb("ref"),
+  /** ~1h múlva kitöltött kiértékelés: { horizonHours, changePct, hypotheticalPnlPct, wouldProfit, ... }. */
+  outcome: jsonb("outcome"),
 });
 
 /** Amikor a Risk Manager módosított/elutasított egy döntést. */

@@ -16,6 +16,7 @@ import { BinanceBroker } from "@/lib/execution/binance-broker";
 import type { Broker } from "@/lib/execution/broker";
 import { COIN_UNIVERSE, RISK_LIMITS, RSS_SOURCES, REDDIT_SOURCES } from "@/lib/config";
 import { loadPortfolioState, applyTrade } from "@/lib/portfolio/accounting";
+import { getPerformanceSummary } from "@/lib/portfolio/evaluate";
 import type { Decision, Trade, DataPoint, RawDecision } from "@/lib/types";
 
 export interface TickInput {
@@ -32,6 +33,8 @@ export interface TickResult {
   /** A Risk Manager ELŐTTI eredeti döntés (risk_overrides naplózáshoz, ha overridden). */
   rawAction: RawDecision["action"];
   rawAmountPct: number;
+  /** Aktuális árak symbolonként (a döntés ref-jéhez + utólagos kiértékeléshez). */
+  prices: Record<string, number>;
 }
 
 /** Fallback demo tőke, ha nincs DB vagy nincs inicializált portfólió (pl. tesztek). */
@@ -84,6 +87,16 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   // a hírt (RSS) és a hangulatot (Fear & Greed) látja + az ML-jeleket.
   const llmEvents = events.filter((e) => e.source !== "binance");
 
+  // Aktuális ár symbolonként (a legfrissebb price-pont) — a döntés ref-jéhez + kiértékeléshez.
+  const prices: Record<string, number> = {};
+  const latestTs: Record<string, number> = {};
+  for (const e of events) {
+    if (e.kind === "price" && e.price && (latestTs[e.symbol] === undefined || e.timestamp > latestTs[e.symbol])) {
+      latestTs[e.symbol] = e.timestamp;
+      prices[e.symbol] = e.price.usd;
+    }
+  }
+
   // 3) ML signals — a TELJES events-ből (a Binance idősorral) számol valódi feature-t
   const features = buildFeatures(events);
   const mlSignals = await predict(features);
@@ -103,11 +116,18 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   };
 
   if (phase1.shouldDecide) {
-    // 5) Phase-2: GLM-5.2 strukturált döntés érveléssel (tisztított LLM-nézet)
+    // 5) Phase-2: GLM-5.2 strukturált döntés érveléssel (tisztított LLM-nézet).
+    // A korábbi döntések „bejött volna?" összegzése visszacsatolásként megy be.
+    const performance = await getPerformanceSummary();
     const phase2 = await decide({
       events: llmEvents,
       mlSignals,
       portfolio: { cashUsd, positions: positions.map((p) => ({ symbol: p.symbol, qty: p.qty, entryPrice: 0 })) },
+      performance: {
+        actionable: performance.actionable,
+        hitRate: performance.hitRate,
+        avgHypotheticalPnlPct: performance.avgHypotheticalPnlPct,
+      },
     });
     rawDecision = {
       action: phase2.action,
@@ -172,5 +192,6 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     // risk_overrides sort, ha a Risk Manager módosított/elutasított. Lásd spec §3.4.
     rawAction: rawDecision.action,
     rawAmountPct: rawDecision.amountPct,
+    prices,
   };
 }

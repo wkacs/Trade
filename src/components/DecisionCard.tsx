@@ -14,6 +14,14 @@ export interface DecisionRow {
   model?: string;
   overridden: boolean;
   overrideReason: string | null;
+  /** Utólagos kiértékelés (~1h múlva): „bejött volna?". null, amíg nincs kiértékelve. */
+  outcome?: {
+    horizonHours: number;
+    refSymbol: string | null;
+    changePct: number;
+    hypotheticalPnlPct: number;
+    wouldProfit: boolean | null;
+  } | null;
 }
 
 const ACTION_STYLE: Record<string, string> = {
@@ -50,6 +58,22 @@ export function DecisionCard({ d }: { d: DecisionRow }) {
       <p className="mt-2 text-sm text-gray-700">{d.reasoning}</p>
       {d.overridden && d.overrideReason && (
         <p className="mt-1 text-xs text-amber-700">→ {d.overrideReason}</p>
+      )}
+      {d.outcome && (
+        <p className="mt-1 text-xs">
+          {d.outcome.wouldProfit === null ? (
+            <span className="text-gray-500">
+              {d.outcome.horizonHours}h múlva: piac {d.outcome.changePct >= 0 ? "+" : ""}
+              {d.outcome.changePct.toFixed(2)}% (HOLD — semleges)
+            </span>
+          ) : (
+            <span className={d.outcome.wouldProfit ? "text-green-700" : "text-red-600"}>
+              {d.outcome.wouldProfit ? "✓ bejött volna" : "✗ nem jött volna be"} —{" "}
+              {d.outcome.refSymbol} {d.outcome.hypotheticalPnlPct >= 0 ? "+" : ""}
+              {d.outcome.hypotheticalPnlPct.toFixed(2)}% ({d.outcome.horizonHours}h)
+            </span>
+          )}
+        </p>
       )}
       <button
         onClick={() => setOpen(!open)}
