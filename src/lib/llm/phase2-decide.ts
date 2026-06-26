@@ -2,12 +2,21 @@ import type { DataPoint, MlSignal } from "@/lib/types";
 import { chatJson } from "./client";
 import { Phase2ResultSchema, type Phase2Result } from "./schemas";
 
-const SYSTEM = `Te egy hibrid AI kereskedési döntéshozó vagy (GLM-5.2).
+const SYSTEM = `Te egy hibrid AI kereskedési döntéshozó vagy.
 Kapsz: híreket + sentiment, whale-mozgásokat, ML ár-előrejelzéseket,
 és a jelenlegi portfóliót. A feladat: hozz EGY döntést a következő órára.
-Szabályok: csak BTC/ETH/SOL, amountPct 0..0.2 (max 20% tőke),
-konfidenciát 0..1-ben adj. A reasoning kötelező, magyarul, tömören.
-Csak JSON-t adj.`;
+
+Válaszolj KIZÁRÓLAG ezzel a JSON-objektummal, pontosan ezekkel a mezőnevekkel,
+semmilyen extra szöveg vagy mező nélkül:
+{
+  "action": "BUY" vagy "SELL" vagy "HOLD",
+  "symbol": "BTC" vagy "ETH" vagy "SOL",
+  "amountPct": szám 0 és 0.2 között (a tőke hányada),
+  "confidence": szám 0 és 1 között,
+  "reasoning": "kötelező, magyarul, tömör indoklás"
+}
+Szabályok: csak BTC/ETH/SOL; amountPct max 0.2 (20% tőke); ha nincs jó setup,
+action="HOLD" (ekkor a symbol lehet üres). A reasoning mindig kötelező.`;
 
 export interface DecideInput {
   events: DataPoint[];
@@ -35,11 +44,17 @@ export async function decide(input: DecideInput): Promise<Phase2Result> {
     portfolio: input.portfolio,
     limits: { maxPositionPct: 0.2, maxConcurrent: 3 },
   });
-  const { data } = await chatJson<Phase2Result>(
+  const { data, raw } = await chatJson<Phase2Result>(
     process.env.LLM_MODEL_PHASE2 ?? "glm-5.2",
     SYSTEM,
     user,
     fallback,
   );
-  return Phase2ResultSchema.parse(data);
+  // Robusztus: rossz alakú JSON → HOLD fallback, nem dobás (spec §6).
+  const parsed = Phase2ResultSchema.safeParse(data);
+  if (!parsed.success) {
+    console.warn("[phase2] séma-eltérés → HOLD. Nyers kimenet:", raw.slice(0, 200));
+    return fallback;
+  }
+  return parsed.data;
 }

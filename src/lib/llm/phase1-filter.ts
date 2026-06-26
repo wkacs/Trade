@@ -4,8 +4,16 @@ import { Phase1ResultSchema, type Phase1Result } from "./schemas";
 
 const SYSTEM = `Te egy kripto-trading asszisztens első szűrő fázisa vagy.
 A feladat: eldönteni, hogy az elmúlt órában történt-e olyan érdemi esemény
-(hír, whale-mozgás, jelentős árelésés), ami indokolná egy BUY/SELL döntést.
-Ha nincs semmi érdemes, shouldDecide=false. Csak JSON-t adj.`;
+(hír, whale-mozgás, jelentős árváltozás), ami indokolná egy BUY/SELL döntést.
+
+Válaszolj KIZÁRÓLAG ezzel a JSON-objektummal, pontosan ezekkel a mezőnevekkel,
+semmilyen extra szöveg vagy mező nélkül:
+{
+  "shouldDecide": true_vagy_false,
+  "summary": "rövid magyar összefoglaló az óráról",
+  "notableEvents": [ { "symbol": "BTC", "reason": "miért fontos" } ]
+}
+Ha nincs semmi érdemi: {"shouldDecide": false, "summary": "...", "notableEvents": []}.`;
 
 /**
  * Phase-1: GLM-4-Flash (ingyenes) minden órában. Ez a ciklus 90%-a.
@@ -28,11 +36,18 @@ export async function shouldDecide(events: DataPoint[]): Promise<Phase1Result> {
     summary: "LLM hiba, HOLD.",
     notableEvents: [],
   };
-  const { data } = await chatJson<Phase1Result>(
+  const { data, raw } = await chatJson<Phase1Result>(
     process.env.LLM_MODEL_PHASE1 ?? "glm-4-flash",
     SYSTEM,
     JSON.stringify(compact),
     fallback,
   );
-  return Phase1ResultSchema.parse(data);
+  // Robusztus: ha a modell rossz alakú JSON-t ad, HOLD-ra esünk vissza,
+  // nem dobunk (spec §6: sérült JSON → HOLD, sosem omlik össze a ciklus).
+  const parsed = Phase1ResultSchema.safeParse(data);
+  if (!parsed.success) {
+    console.warn("[phase1] séma-eltérés → HOLD. Nyers kimenet:", raw.slice(0, 200));
+    return fallback;
+  }
+  return parsed.data;
 }
