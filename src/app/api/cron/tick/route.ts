@@ -3,6 +3,12 @@ import { eq } from "drizzle-orm";
 import { runTick } from "@/lib/engine/tick";
 import { getDb, schema } from "@/db/client";
 
+// A tick több külső hívást tesz (collectors párhuzamosan + 1-2 LLM hívás + DB),
+// ezért megemeljük a függvény-időkorlátot (Vercelen a default 10s kevés lehet).
+export const maxDuration = 60;
+// Node runtime kell (neon, openai SDK, crypto) — nem Edge.
+export const runtime = "nodejs";
+
 /**
  * Vercel Cron célja — óránként hívódik. Lásd spec §4.
  *
