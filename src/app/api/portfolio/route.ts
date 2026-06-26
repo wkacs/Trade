@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 import { getDb, schema } from "@/db/client";
 import { desc } from "drizzle-orm";
 
+// Élő adat: minden kérésnél a DB-ből olvas, nem prerenderelhető build-időben.
+// Enélkül a Next.js statikusan cache-elné a build-kori (üres) pillanatképet,
+// és a dashboard sosem frissülne. Lásd spec §3.5.
+export const dynamic = "force-dynamic";
+
 /**
  * Jelenlegi portfólió-állapot (cash + nyitott pozíciók + friss tranzakciók).
  * Ha nincs DB kapcsolat (pl. lokális kulcsok nélkül), üres alapértelmezettel tér vissza.

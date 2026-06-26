@@ -58,4 +58,17 @@ describe("PaperBroker", () => {
     await broker.execute({ side: "SELL", symbol: "BTC", amountUsd: 1000, stopLossPct: 0.05 }, 60000);
     expect(st.cashUsd).toBe(9000);
   });
+
+  it("BUY nem költ többet a rendelkezésre álló cash-nél (nincs overdraw)", async () => {
+    const st = mkState(500); // csak $500 áll rendelkezésre
+    const broker = new PaperBroker(st);
+    // Az AI/engine $2000-t kérne, de a broker $500-ra vágja — a cash sosem megy negatívba
+    const trade = await broker.execute(
+      { side: "BUY", symbol: "BTC", amountUsd: 2000, stopLossPct: 0.05 },
+      60000,
+    );
+    expect(trade.amountUsd).toBe(500);
+    expect(st.cashUsd).toBe(0);
+    expect(st.cashUsd).toBeGreaterThanOrEqual(0);
+  });
 });

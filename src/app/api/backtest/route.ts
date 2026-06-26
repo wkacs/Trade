@@ -5,6 +5,10 @@ import { buildFeatures } from "@/lib/ml/features";
 import { predict } from "@/lib/ml/predictor";
 import type { DataPoint } from "@/lib/types";
 
+// Élő, DB-író route (backtests insert) — soha ne fusson le build-időben.
+// force-dynamic nélkül a Next.js a build során végrehajtaná és cache-elné.
+export const dynamic = "force-dynamic";
+
 /**
  * Egyszerű backtest: a raw_events táblán végigfut, ML jeleket generál,
  * és szimulált P&L-t számol. Lásd spec §3.5.

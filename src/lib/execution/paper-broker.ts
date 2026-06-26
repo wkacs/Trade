@@ -16,7 +16,14 @@ export class PaperBroker implements Broker {
   constructor(private state: PaperState) {}
 
   async execute(order: Order, currentPrice: number): Promise<Trade> {
-    const gross = order.amountUsd;
+    // BUY soha ne költsön többet a rendelkezésre álló készpénznél — nincs tőkeáttétel
+    // (leverage=1). Spec §3.3: a végrehajtási réteg is érvényesíti a limiteket. Enélkül
+    // egy túlméretezett order negatívba vihetné a cash-t (ezt a hibát éles demo-adat is
+    // megmutatta). Normál működésben (amountUsd ≤ 20% cash) a clamp nem aktiválódik.
+    const gross =
+      order.side === "BUY"
+        ? Math.min(order.amountUsd, Math.max(0, this.state.cashUsd))
+        : order.amountUsd;
     const feeUsd = gross * PAPER_FEE_PCT;
     const netUsd = gross - feeUsd;
     const qty = netUsd / currentPrice;
