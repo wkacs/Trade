@@ -10,6 +10,12 @@ vi.mock("@/lib/collectors/whalealert", () => ({ WhaleAlertCollector: vi.fn() }))
 vi.mock("@/lib/llm/phase1-filter", () => ({ shouldDecide: vi.fn() }));
 vi.mock("@/lib/llm/phase2-decide", () => ({ decide: vi.fn() }));
 vi.mock("@/lib/ml/predictor", () => ({ predict: vi.fn() }));
+// Portfólió-réteg mock: nincs DB → loadPortfolioState null (demo fallback),
+// applyTrade nem persistál (tick DB nélküli tesztelése). Így a 4 teszt determinisztikus.
+vi.mock("@/lib/portfolio/accounting", () => ({
+  loadPortfolioState: vi.fn().mockResolvedValue(null),
+  applyTrade: vi.fn().mockResolvedValue({ positionId: null }),
+}));
 
 import { collectAll } from "@/lib/collectors/base";
 import { shouldDecide } from "@/lib/llm/phase1-filter";

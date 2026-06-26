@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { eq } from "drizzle-orm";
 import { runTick } from "@/lib/engine/tick";
 import { getDb, schema } from "@/db/client";
 
@@ -27,13 +28,18 @@ export async function POST(req: Request) {
   ).padStart(2, "0")}-${String(now.getUTCHours()).padStart(2, "0")}`;
 
   // 3) Idempotencia: volt már döntés ezzel a tick_id-del?
+  // Low-level select-et használunk a relációs query API helyett, mert
+  // a sémában nincsenek relations() definiálva — a findFirst csendben
+  // undefined-ot adott, és a dedup sosem talált semmit.
   const db = getDb();
   if (db) {
     try {
-      const existing = await db.query.decisions.findFirst({
-        where: { tickId },
-      } as any);
-      if (existing) {
+      const existing = await db
+        .select({ id: schema.decisions.id })
+        .from(schema.decisions)
+        .where(eq(schema.decisions.tickId, tickId))
+        .limit(1);
+      if (existing.length > 0) {
         return NextResponse.json({
           ok: true,
           skipped: true,
@@ -75,18 +81,24 @@ export async function POST(req: Request) {
           .returning();
         decisionId = inserted?.id;
 
-        // Tranzakció mentése, ha volt
-        if (result.trade) {
-          await db.insert(schema.trades).values({
-            symbol: result.trade.symbol,
-            side: result.trade.side,
-            amountUsd: result.trade.amountUsd,
-            price: result.trade.price,
-            qty: result.trade.qty,
-            feeUsd: result.trade.feeUsd,
-            mode: result.trade.mode,
+        // Risk override naplózása — ha a Risk Manager módosította/elutasította a
+        // döntést. Lásd spec §3.4: „így látható, mikor akart az AI többet". Az eredeti
+        // (Risk Manager előtti) action/amountPct a tick eredményéből jön.
+        if (decisionId && result.decision.overridden) {
+          await db.insert(schema.riskOverrides).values({
+            decisionId,
+            originalAction: result.rawAction,
+            originalAmountPct: result.rawAmountPct,
+            finalAction: result.decision.action,
+            finalAmountPct: result.decision.amountPct ?? 0,
+            reason: result.decision.overrideReason ?? "",
           });
         }
+
+        // MEGJEGYZÉS: a tranzakciót NEM itt mentjük. A motor (engine/tick.ts →
+        // applyTrade) perzisztálja a trade-et a pozícióhoz kötve, a cash és a pozíció
+        // frissítésével együtt (ha van inicializált portfólió). A korábbi különálló
+        // trades-insert dupla sort okozott — eltávolítva.
       } catch (e) {
         // DB hiba nem akasztja meg a választ — a döntés már megvan
         console.error("[cron/tick] mentés hiba:", e);
