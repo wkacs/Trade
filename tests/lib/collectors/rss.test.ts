@@ -26,4 +26,27 @@ describe("RSSCollector", () => {
     const r = await c.collect();
     expect(r).toEqual([]);
   });
+
+  it("a címből coin-szimbólumot detektál, az általánosat a forrás alap-szimbólumára hagyja", async () => {
+    const xml = `<rss><channel>
+      <item><title>Solana ecosystem grows fast</title><link>https://x/1</link></item>
+      <item><title>Ethereum upgrade ships</title><link>https://x/2</link></item>
+      <item><title>SEC publishes new market guidance</title><link>https://x/3</link></item>
+    </channel></rss>`;
+    (global.fetch as any).mockResolvedValue({ ok: true, text: async () => xml });
+    const c = new RSSCollector([{ name: "CoinDesk", url: "https://x/rss", symbol: "CRYPTO" }]);
+    const r = await c.collect();
+    expect(r.map((d) => d.symbol)).toEqual(["SOL", "ETH", "CRYPTO"]);
+  });
+
+  it("CDATA-burkolt címet megtisztít", async () => {
+    const xml = `<rss><channel>
+      <item><title><![CDATA[Bitcoin hits new high]]></title><link>https://x/1</link></item>
+    </channel></rss>`;
+    (global.fetch as any).mockResolvedValue({ ok: true, text: async () => xml });
+    const c = new RSSCollector([{ name: "CoinDesk", url: "https://x/rss", symbol: "CRYPTO" }]);
+    const r = await c.collect();
+    expect(r[0].rss?.title).toBe("Bitcoin hits new high");
+    expect(r[0].symbol).toBe("BTC");
+  });
 });

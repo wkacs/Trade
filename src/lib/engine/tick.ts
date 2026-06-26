@@ -2,13 +2,14 @@ import { collectAll, type DataCollector } from "@/lib/collectors/base";
 import { CoinGeckoCollector } from "@/lib/collectors/coingecko";
 import { CryptoPanicCollector } from "@/lib/collectors/cryptopanic";
 import { WhaleAlertCollector } from "@/lib/collectors/whalealert";
+import { RSSCollector } from "@/lib/collectors/rss";
 import { buildFeatures } from "@/lib/ml/features";
 import { predict } from "@/lib/ml/predictor";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
 import { decide } from "@/lib/llm/phase2-decide";
 import { applyRisk } from "@/lib/risk/risk-manager";
 import { PaperBroker } from "@/lib/execution/paper-broker";
-import { COIN_UNIVERSE, RISK_LIMITS } from "@/lib/config";
+import { COIN_UNIVERSE, RISK_LIMITS, RSS_SOURCES } from "@/lib/config";
 import { loadPortfolioState, applyTrade } from "@/lib/portfolio/accounting";
 import type { Decision, Trade, DataPoint, RawDecision } from "@/lib/types";
 
@@ -52,8 +53,12 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   const positions = dbState?.positions ?? [];
   const dayPnlPct = dbState?.dayPnlPct ?? 0;
 
-  // 2) Collectors — csak azok, amikhez van kulcs / nem kell kulcs
-  const collectors: DataCollector[] = [new CoinGeckoCollector([...COIN_UNIVERSE])];
+  // 2) Collectors — kulcs nélküliek mindig (CoinGecko ár + ingyenes RSS hír-kontextus),
+  // a kulcsosak csak ha van token. Az RSS adja az AI-nak a hír-kontextust díjmentesen.
+  const collectors: DataCollector[] = [
+    new CoinGeckoCollector([...COIN_UNIVERSE]),
+    new RSSCollector(RSS_SOURCES),
+  ];
   if (process.env.CRYPTOPANIC_TOKEN)
     collectors.push(new CryptoPanicCollector(process.env.CRYPTOPANIC_TOKEN, [...COIN_UNIVERSE]));
   if (process.env.WHALEALERT_KEY)

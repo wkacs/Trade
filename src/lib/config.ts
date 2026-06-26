@@ -24,6 +24,16 @@ export const RISK_LIMITS: RiskLimits = {
 export const COIN_UNIVERSE = ["BTC", "ETH", "SOL"] as const;
 export type CoinSymbol = (typeof COIN_UNIVERSE)[number];
 
+/**
+ * Ingyenes, legális RSS hír-források (nem kell API kulcs). A gyűjtő a cikk címéből
+ * coin-szimbólumot (BTC/ETH/SOL) detektál; ami nem coin-specifikus, az "CRYPTO"
+ * általános piaci kontextusként kerül be. Lásd spec §3.1. Bővíthető további feedekkel.
+ */
+export const RSS_SOURCES = [
+  { name: "CoinDesk", url: "https://www.coindesk.com/arc/outboundfeeds/rss/", symbol: "CRYPTO" },
+  { name: "Cointelegraph", url: "https://cointelegraph.com/rss", symbol: "CRYPTO" },
+];
+
 export type TradingMode = "paper" | "live";
 
 /** Visszaadja a jelenlegi kereskedési módot (env-ből). Alapértelmezett: paper. */
