@@ -10,6 +10,7 @@ vi.mock("@/lib/collectors/whalealert", () => ({ WhaleAlertCollector: vi.fn() }))
 vi.mock("@/lib/collectors/rss", () => ({ RSSCollector: vi.fn() }));
 vi.mock("@/lib/collectors/binance", () => ({ BinanceOHLCCollector: vi.fn() }));
 vi.mock("@/lib/collectors/feargreed", () => ({ FearGreedCollector: vi.fn() }));
+vi.mock("@/lib/collectors/reddit", () => ({ RedditCollector: vi.fn() }));
 vi.mock("@/lib/llm/phase1-filter", () => ({ shouldDecide: vi.fn() }));
 vi.mock("@/lib/llm/phase2-decide", () => ({ decide: vi.fn() }));
 vi.mock("@/lib/ml/predictor", () => ({ predict: vi.fn() }));

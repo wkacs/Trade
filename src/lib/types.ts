@@ -1,9 +1,9 @@
 /** Egy adatgyűjtőtől érkező normalizált adatpont. */
 export interface DataPoint {
-  source: "coingecko" | "cryptopanic" | "whalealert" | "rss" | "binance" | "alternative";
+  source: "coingecko" | "cryptopanic" | "whalealert" | "rss" | "binance" | "alternative" | "reddit";
   symbol: string;
   timestamp: number; // epoch ms
-  kind: "price" | "news" | "whale" | "rss" | "sentiment";
+  kind: "price" | "news" | "whale" | "rss" | "sentiment" | "social";
   // Tartalom a kind-től függően:
   price?: { usd: number; volume24h: number; change24hPct: number };
   news?: { title: string; url: string; sentiment: "bullish" | "bearish" | "neutral" };
@@ -11,6 +11,8 @@ export interface DataPoint {
   rss?: { title: string; url: string; source: string };
   /** Piaci hangulat (Fear & Greed Index): value 0..100, classification szöveges címke. */
   sentiment?: { value: number; classification: string };
+  /** Közösségi poszt (Reddit): cím + felfutás (score = figyelem-jel) + subreddit. */
+  social?: { title: string; score: number; subreddit: string };
 }
 
 /** ML jelzések egy coinra, egy időpontban. */

@@ -34,6 +34,16 @@ export const RSS_SOURCES = [
   { name: "Cointelegraph", url: "https://cointelegraph.com/rss", symbol: "CRYPTO" },
 ];
 
+/**
+ * Ingyenes, kulcs nélküli Reddit közösségi források (publikus JSON). A gyűjtő a poszt
+ * címéből coin-szimbólumot detektál; a score = figyelem-jel. Lásd spec §3.1.
+ * Megj.: a Reddit datacenter-IP-t (Vercel) blokkolhat — lokálisan megbízható.
+ */
+export const REDDIT_SOURCES: { subreddit: string; sort: "hot" | "top" | "new" }[] = [
+  { subreddit: "CryptoCurrency", sort: "hot" },
+  { subreddit: "Bitcoin", sort: "hot" },
+];
+
 export type TradingMode = "paper" | "live";
 
 /** Visszaadja a jelenlegi kereskedési módot (env-ből). Alapértelmezett: paper. */

@@ -5,13 +5,16 @@ import { WhaleAlertCollector } from "@/lib/collectors/whalealert";
 import { RSSCollector } from "@/lib/collectors/rss";
 import { BinanceOHLCCollector } from "@/lib/collectors/binance";
 import { FearGreedCollector } from "@/lib/collectors/feargreed";
+import { RedditCollector } from "@/lib/collectors/reddit";
 import { buildFeatures } from "@/lib/ml/features";
 import { predict } from "@/lib/ml/predictor";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
 import { decide } from "@/lib/llm/phase2-decide";
 import { applyRisk } from "@/lib/risk/risk-manager";
 import { PaperBroker } from "@/lib/execution/paper-broker";
-import { COIN_UNIVERSE, RISK_LIMITS, RSS_SOURCES } from "@/lib/config";
+import { BinanceBroker } from "@/lib/execution/binance-broker";
+import type { Broker } from "@/lib/execution/broker";
+import { COIN_UNIVERSE, RISK_LIMITS, RSS_SOURCES, REDDIT_SOURCES } from "@/lib/config";
 import { loadPortfolioState, applyTrade } from "@/lib/portfolio/accounting";
 import type { Decision, Trade, DataPoint, RawDecision } from "@/lib/types";
 
@@ -68,6 +71,11 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     collectors.push(new CryptoPanicCollector(process.env.CRYPTOPANIC_TOKEN, [...COIN_UNIVERSE]));
   if (process.env.WHALEALERT_KEY)
     collectors.push(new WhaleAlertCollector(process.env.WHALEALERT_KEY, [...COIN_UNIVERSE]));
+  // Reddit OAuth-ot igényel (a kulcs nélküli JSON-t a Reddit 403-mal tiltja) — kulcs-gate.
+  if (process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET)
+    collectors.push(
+      new RedditCollector(process.env.REDDIT_CLIENT_ID, process.env.REDDIT_CLIENT_SECRET, REDDIT_SOURCES),
+    );
 
   const events = await collectAll(collectors);
 
@@ -119,35 +127,36 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     dayPnlPct,
   });
 
-  // 7) Execution — csak paper módban; live broker a 2. fázisban
+  // 7) Execution — a broker a mód szerint cserélődik (spec §3.3):
+  //    paper → PaperBroker (szimuláció), live → BinanceBroker (valódi Binance order).
+  //    A Risk Manager limitjei már a broker ELŐTT érvényesültek.
   let trade: Trade | null = null;
   let positionId: string | null = null;
-  if (input.paperMode && decision.action !== "HOLD" && decision.symbol) {
+  if (decision.action !== "HOLD" && decision.symbol) {
     const priceEvent = events.find(
       (e) => e.symbol === decision.symbol && e.kind === "price",
     );
     const price = priceEvent?.price?.usd;
     if (price) {
-      // PaperBroker a betöltött állapottal dolgozik (nem egy friss üres portfólióval)
-      const broker = new PaperBroker({
-        cashUsd,
-        positions: positions.map((p) => ({ symbol: p.symbol, qty: p.qty, valueUsd: p.valueUsd })),
-      });
-      trade = await broker.execute(
-        {
-          side: decision.action,
-          symbol: decision.symbol,
-          amountUsd: cashUsd * decision.amountPct,
-          stopLossPct: RISK_LIMITS.stopLossPct,
-        },
-        price,
-      );
+      const order = {
+        side: decision.action,
+        symbol: decision.symbol,
+        amountUsd: cashUsd * decision.amountPct,
+        stopLossPct: RISK_LIMITS.stopLossPct,
+      };
+      const broker: Broker = input.paperMode
+        ? new PaperBroker({
+            cashUsd,
+            positions: positions.map((p) => ({ symbol: p.symbol, qty: p.qty, valueUsd: p.valueUsd })),
+          })
+        : new BinanceBroker(process.env.BINANCE_API_KEY ?? "", process.env.BINANCE_API_SECRET ?? "");
+      trade = await broker.execute(order, price);
 
-      // 8) Perzisztencia — csak ha van valódi DB-állapot. A stopPrice = entry * (1 - stopLoss%),
-      // konzisztens a Risk Manager kötelező stop-lossával.
+      // 8) Perzisztencia — a DB-egyenleget mindkét módban frissítjük (live módban ez a
+      // valós Binance-számla TÜKRE; a stopPrice = entry * (1 - stopLoss%)).
       if (dbState && trade) {
         const stopPrice =
-          trade.side === "BUY" ? price * (1 - RISK_LIMITS.stopLossPct) : price;
+          trade.side === "BUY" ? trade.price * (1 - RISK_LIMITS.stopLossPct) : trade.price;
         const persisted = await applyTrade(trade, stopPrice);
         positionId = persisted?.positionId ?? null;
       }
