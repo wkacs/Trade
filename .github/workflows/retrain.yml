@@ -1,0 +1,44 @@
+name: weekly-retrain
+
+# Heti automatikus ML-újratanítás a legfrissebb Binance-adaton (regime-adaptáció).
+# Ha az új modell nem rosszabb a véletlennél (test AUC >= 0.5), commitolja az új
+# model.json-t → a Vercel auto-deploy felviszi. NEM kell secret (csak publikus Binance).
+on:
+  schedule:
+    - cron: "0 6 * * 1" # minden hétfő 06:00 UTC
+  workflow_dispatch: {} # kézi indítás is
+
+permissions:
+  contents: write # hogy vissza tudja pusholni a frissített model.json-t
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Újratanítás + minőség-kapu + commit
+        run: |
+          pnpm tsx scripts/train-model.ts
+          if node -e "process.exit(require('./src/lib/ml/model.json').metrics.testAuc >= 0.5 ? 0 : 1)"; then
+            if ! git diff --quiet src/lib/ml/model.json; then
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add src/lib/ml/model.json
+              git commit -m "chore(ml): heti automatikus újratanítás (friss Binance-adat)"
+              git push
+              echo "✅ Új modell deployolva."
+            else
+              echo "Nincs változás a modellben."
+            fi
+          else
+            echo "⚠ test AUC < 0.5 — a modellt NEM frissítjük (megtartjuk a régit)."
+            git checkout -- src/lib/ml/model.json
+          fi
