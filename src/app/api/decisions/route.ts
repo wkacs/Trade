@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { getDb, schema } from "@/db/client";
 import { desc } from "drizzle-orm";
 
+// Élő adat + query paramétert (limit) olvas → on-demand, nem prerenderelhető.
+export const dynamic = "force-dynamic";
+
 /**
  * AI döntések története (érveléssel együtt). Ez a „saját vélemény" idővonala.
  * Ha nincs DB, üres listát ad.

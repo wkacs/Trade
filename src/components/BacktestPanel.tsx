@@ -8,8 +8,7 @@ interface BacktestResult {
 }
 
 /**
- * Backtest panel — gombnyomásra futtat egy stratégiát a történelmi adatokon.
- * Lásd spec §3.5. Az /api/backtest route-t hívja.
+ * Backtest — a stratégia futtatása a történelmi adatokon. Lásd spec §3.5.
  */
 export function BacktestPanel() {
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -29,37 +28,36 @@ export function BacktestPanel() {
         setResult({ pnlPct: d.pnlPct, tradesCount: d.tradesCount });
       }
     } catch {
-      setNote("Backtest futtatása sikertelen.");
+      setNote("A backtest nem futott le. Próbáld újra.");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-      <h2 className="text-lg font-semibold text-gray-900">Backtest</h2>
-      <p className="mt-1 text-xs text-gray-500">
-        Teszteld az AI stratégiáját a történelmi adatokon, mielőtt valós módba váltanál.
+    <section className="rounded-xl border border-line bg-panel p-5">
+      <h2 className="font-display text-[11px] font-medium uppercase tracking-[0.2em] text-dim">
+        Backtest
+      </h2>
+      <p className="mt-1 font-sans text-xs text-dim">
+        Futtasd a stratégiát a történelmi adatokon, mielőtt élesre váltanál.
       </p>
       <button
         onClick={run}
         disabled={loading}
-        className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+        className="mt-3 rounded-lg border border-iris/30 bg-iris/10 px-3.5 py-1.5 font-mono text-xs text-irisBright transition-colors hover:bg-iris/20 disabled:opacity-50"
       >
-        {loading ? "Fut…" : "Backtest futtatása"}
+        {loading ? "fut…" : "futtatás"}
       </button>
       {result && (
-        <div className="mt-4 text-sm">
-          <div>
-            Eredmény:{" "}
-            <span className={result.pnlPct >= 0 ? "text-green-600" : "text-red-600"}>
-              {(result.pnlPct * 100).toFixed(2)}%
-            </span>
-          </div>
-          <div className="text-gray-500">Tranzakciók: {result.tradesCount}</div>
+        <div className="mt-4 flex items-baseline gap-4 font-mono text-sm">
+          <span className={result.pnlPct >= 0 ? "text-up" : "text-down"}>
+            {(result.pnlPct * 100).toFixed(2)}%
+          </span>
+          <span className="text-faint">{result.tradesCount} tranzakció</span>
         </div>
       )}
-      {note && <p className="mt-3 text-xs text-amber-600">{note}</p>}
-    </div>
+      {note && <p className="mt-3 font-mono text-[11px] text-amber-400/70">{note}</p>}
+    </section>
   );
 }

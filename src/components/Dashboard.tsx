@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { PortfolioPanel } from "./PortfolioPanel";
 import { DecisionsTimeline } from "./DecisionsTimeline";
 import { BacktestPanel } from "./BacktestPanel";
 import { AdminPanel } from "./AdminPanel";
+import model from "@/lib/ml/model.json";
 
 interface PortfolioApi {
   portfolio: { cashUsd: number; initialCapitalUsd: number } | null;
@@ -19,83 +20,141 @@ interface PortfolioApi {
   note?: string;
 }
 
+const fmtUsd = (n: number) => `$${n.toLocaleString("hu-HU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
 /**
- * A fő dashboard — egyetlen oldal, a döntés-érthetőség fókuszával.
- * Lásd spec §3.5. Betölti a portfóliót és összeállítja a paneleket.
+ * A fő konzol — egyetlen oldal, „műszerfal / döntés-napló". A bot lényege a látható
+ * AI-érvelés, ezért a döntés-napló a főszereplő. Lásd spec §3.5.
  */
 export function Dashboard() {
-  const [portfolio, setPortfolio] = useState<PortfolioApi | null>(null);
+  const [data, setData] = useState<PortfolioApi | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     fetch("/api/portfolio")
       .then((r) => r.json())
-      .then(setPortfolio)
-      .catch(() => setPortfolio(null))
+      .then(setData)
+      .catch(() => setData(null))
       .finally(() => setLoading(false));
   }, []);
 
-  // Alapértelmezett demo állapot, ha nincs DB
-  const cashUsd = portfolio?.portfolio?.cashUsd ?? 10000;
-  const positions = portfolio?.positions ?? [];
-  const perf = portfolio?.performance;
+  // Élő érzet: 60 mp-enként frissít (a tick óránként fut, de így sosem áll).
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 60_000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  const initial = data?.portfolio?.initialCapitalUsd ?? 0;
+  const cashUsd = data?.portfolio?.cashUsd ?? 0;
+  const positions = data?.positions ?? [];
+  const positionsValue = positions.reduce((s, p) => s + p.qty * p.entryPrice, 0);
+  const equity = cashUsd + positionsValue;
+  const pnlPct = initial > 0 ? (equity / initial - 1) * 100 : 0;
+  const perf = data?.performance;
+  const hasDb = !!data?.portfolio;
+  const auc = (model as { metrics?: { testAuc?: number } }).metrics?.testAuc ?? 0;
 
   return (
-    <main className="mx-auto max-w-5xl space-y-6 p-6">
-      <header>
-        <h1 className="text-2xl font-bold text-gray-900">AI Kereskedő Bot</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          Hibrid AI (LightGBM + GLM) által vezérelt kripto-trading ·{" "}
-          <span className="font-medium text-gray-700">demo (paper) mód</span>
-        </p>
-      </header>
-
-      {loading ? (
-        <p className="text-sm text-gray-400">Betöltés…</p>
-      ) : (
-        <div className="grid gap-6 lg:grid-cols-2">
-          <PortfolioPanel cashUsd={cashUsd} positions={positions} />
-          <AdminPanel />
-        </div>
-      )}
-
-      {perf && perf.evaluated > 0 && (
-        <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-gray-900">Bejött volna? (utólagos kiértékelés)</h2>
-          <p className="mt-1 text-xs text-gray-500">
-            A korábbi döntések szándéka utólag, az árak alapján — mintha tényleg kötött volna.
-          </p>
-          <div className="mt-4 grid grid-cols-3 gap-4">
-            <div>
-              <div className="text-xs text-gray-500">Találati arány</div>
-              <div className="text-xl font-semibold text-blue-600">
-                {perf.hitRate === null ? "—" : `${Math.round(perf.hitRate * 100)}%`}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500">Átlag hipotetikus P&L</div>
-              <div className={`text-xl font-semibold ${perf.avgHypotheticalPnlPct >= 0 ? "text-green-700" : "text-red-600"}`}>
-                {perf.avgHypotheticalPnlPct >= 0 ? "+" : ""}
-                {perf.avgHypotheticalPnlPct.toFixed(2)}%
-              </div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500">Kiértékelt / döntésre váró</div>
-              <div className="text-xl font-semibold text-gray-900">
-                {perf.actionable} / {perf.evaluated}
-              </div>
-            </div>
+    <div className="min-h-screen">
+      {/* ── Státusz-sáv: a rendszer szívverése ── */}
+      <header className="sticky top-0 z-10 border-b border-line bg-bg/80 backdrop-blur-md">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-3">
+          <div className="flex items-center gap-3">
+            <span className="pulse-dot h-2 w-2 rounded-full bg-iris" aria-hidden />
+            <span className="font-display text-sm font-bold tracking-[0.18em] text-ink">
+              AI&nbsp;KERESKEDŐ
+            </span>
+            <span className="rounded border border-iris/30 bg-iris/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest text-irisBright">
+              {hasDb ? "paper" : "offline"}
+            </span>
+          </div>
+          <div className="hidden items-center gap-5 font-mono text-[11px] text-faint sm:flex">
+            <span>
+              ML·AUC <span className="text-dim">{auc.toFixed(3)}</span>
+            </span>
+            <span className="text-line">/</span>
+            <span>
+              GLM <span className="text-dim">glm-4.7-flash</span>
+            </span>
+            <span className="text-line">/</span>
+            <span className="text-dim">{loading ? "betöltés…" : "élő · 60s"}</span>
           </div>
         </div>
-      )}
+      </header>
 
-      <DecisionsTimeline />
-      <BacktestPanel />
+      <main className="mx-auto max-w-6xl space-y-5 px-5 py-7">
+        {/* ── Műszer-readout: equity + P&L + találati arány ── */}
+        <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line md:grid-cols-4">
+          <Gauge label="Equity" value={hasDb ? fmtUsd(equity) : "—"} accent />
+          <Gauge
+            label="P&L (kezdőtőke)"
+            value={hasDb ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "—"}
+            tone={pnlPct >= 0 ? "up" : "down"}
+            muted={!hasDb || Math.abs(pnlPct) < 0.005}
+          />
+          <Gauge
+            label="Találati arány"
+            value={perf?.hitRate == null ? "—" : `${Math.round(perf.hitRate * 100)}%`}
+            sub={perf ? `${perf.actionable} kötés-szándék` : undefined}
+          />
+          <Gauge
+            label="Átlag hipo. P&L"
+            value={perf && perf.actionable > 0 ? `${perf.avgHypotheticalPnlPct >= 0 ? "+" : ""}${perf.avgHypotheticalPnlPct.toFixed(2)}%` : "—"}
+            tone={perf && perf.avgHypotheticalPnlPct >= 0 ? "up" : "down"}
+            muted={!perf || perf.actionable === 0}
+          />
+        </section>
 
-      <footer className="pt-4 text-center text-xs text-gray-400">
-        BTC · ETH · SOL (USDT) · konzervatív limitek · spec:{" "}
-        <code>docs/superpowers/specs/2026-06-25-ai-crypto-trader-design.md</code>
-      </footer>
-    </main>
+        {/* ── Portfólió (készpénz + pozíciók) ── */}
+        <PortfolioPanel cashUsd={cashUsd} positions={positions} hasDb={hasDb} />
+
+        {/* ── A főszereplő: a döntés-napló ── */}
+        <DecisionsTimeline />
+
+        {/* ── Másodlagos vezérlők ── */}
+        <div className="grid gap-5 lg:grid-cols-2">
+          <BacktestPanel />
+          <AdminPanel />
+        </div>
+
+        <footer className="pt-2 text-center font-mono text-[11px] text-faint">
+          BTC · ETH · SOL (USDT) &nbsp;·&nbsp; konzervatív limitek &nbsp;·&nbsp; hibrid: ML-jel + GLM-érvelés
+        </footer>
+      </main>
+    </div>
+  );
+}
+
+function Gauge({
+  label,
+  value,
+  sub,
+  accent,
+  tone,
+  muted,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  accent?: boolean;
+  tone?: "up" | "down";
+  muted?: boolean;
+}) {
+  const color = muted
+    ? "text-ink"
+    : accent
+      ? "text-irisBright"
+      : tone === "up"
+        ? "text-up"
+        : tone === "down"
+          ? "text-down"
+          : "text-ink";
+  return (
+    <div className="bg-panel px-5 py-4">
+      <div className="font-mono text-[10px] uppercase tracking-[0.15em] text-faint">{label}</div>
+      <div className={`mt-1.5 font-mono text-2xl tabular-nums ${color}`}>{value}</div>
+      {sub && <div className="mt-0.5 font-mono text-[10px] text-faint">{sub}</div>}
+    </div>
   );
 }

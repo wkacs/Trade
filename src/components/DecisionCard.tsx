@@ -14,7 +14,6 @@ export interface DecisionRow {
   model?: string;
   overridden: boolean;
   overrideReason: string | null;
-  /** Utólagos kiértékelés (~1h múlva): „bejött volna?". null, amíg nincs kiértékelve. */
   outcome?: {
     horizonHours: number;
     refSymbol: string | null;
@@ -24,64 +23,105 @@ export interface DecisionRow {
   } | null;
 }
 
-const ACTION_STYLE: Record<string, string> = {
-  BUY: "bg-green-100 text-green-700",
-  SELL: "bg-red-100 text-red-700",
-  HOLD: "bg-gray-100 text-gray-600",
+const STAMP: Record<string, string> = {
+  BUY: "border-up/40 bg-up/10 text-up",
+  SELL: "border-down/40 bg-down/10 text-down",
+  HOLD: "border-line bg-panel2 text-dim",
 };
 
 /**
- * Egy döntés kártyája: action badge, symbol, confidence, idő,
- * és — a projekt szíve — a teljes érvelés szövege.
- * Kibontható „Miért döntött így?" részlettel. Lásd spec §3.5.
+ * Egy napló-bejegyzés: action-stamp, symbol, bizonyosság-mérő, idő, az érvelés
+ * (humanista sans — az AI „hangja"), és — ha már beérett — a „bejött volna?" verdikt.
  */
-export function DecisionCard({ d }: { d: DecisionRow }) {
+export function DecisionCard({ d, latest }: { d: DecisionRow; latest?: boolean }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+    <article
+      className={`fade-up rounded-xl border bg-panel2 p-4 ${latest ? "border-iris/25" : "border-line"}`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
           <span
-            className={`rounded-full px-2 py-0.5 text-xs font-bold ${ACTION_STYLE[d.action]}`}
+            className={`rounded border px-2 py-0.5 font-mono text-[11px] font-medium tracking-wide ${STAMP[d.action]}`}
           >
             {d.action}
           </span>
-          {d.symbol && <span className="font-medium text-gray-900">{d.symbol}</span>}
+          {d.symbol && <span className="font-display text-sm text-ink">{d.symbol}</span>}
+          <Confidence v={d.confidence} />
           {d.overridden && (
-            <span className="text-xs text-amber-600">⚠ Risk Manager módosította</span>
+            <span className="font-mono text-[10px] uppercase tracking-wider text-amber-400/80">
+              risk-módosítva
+            </span>
           )}
         </div>
-        <div className="text-xs text-gray-500">
-          {new Date(d.ts).toLocaleString("hu-HU")} · {Math.round(d.confidence * 100)}%
-        </div>
+        <time className="shrink-0 font-mono text-[11px] text-faint">
+          {new Date(d.ts).toLocaleString("hu-HU", {
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </time>
       </div>
-      <p className="mt-2 text-sm text-gray-700">{d.reasoning}</p>
+
+      <p className="mt-2.5 font-sans text-[13.5px] leading-relaxed text-ink/90">{d.reasoning}</p>
+
       {d.overridden && d.overrideReason && (
-        <p className="mt-1 text-xs text-amber-700">→ {d.overrideReason}</p>
+        <p className="mt-1.5 font-mono text-[11px] text-amber-400/70">↳ {d.overrideReason}</p>
       )}
-      {d.outcome && (
-        <p className="mt-1 text-xs">
-          {d.outcome.wouldProfit === null ? (
-            <span className="text-gray-500">
-              {d.outcome.horizonHours}h múlva: piac {d.outcome.changePct >= 0 ? "+" : ""}
-              {d.outcome.changePct.toFixed(2)}% (HOLD — semleges)
-            </span>
-          ) : (
-            <span className={d.outcome.wouldProfit ? "text-green-700" : "text-red-600"}>
-              {d.outcome.wouldProfit ? "✓ bejött volna" : "✗ nem jött volna be"} —{" "}
-              {d.outcome.refSymbol} {d.outcome.hypotheticalPnlPct >= 0 ? "+" : ""}
-              {d.outcome.hypotheticalPnlPct.toFixed(2)}% ({d.outcome.horizonHours}h)
-            </span>
-          )}
-        </p>
-      )}
-      <button
-        onClick={() => setOpen(!open)}
-        className="mt-2 text-xs text-blue-600 hover:underline"
-      >
-        {open ? "Kevesebb" : "Miért döntött így?"}
-      </button>
+
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <Outcome outcome={d.outcome} />
+        <button
+          onClick={() => setOpen(!open)}
+          className="shrink-0 font-mono text-[11px] text-iris/80 transition-colors hover:text-irisBright"
+        >
+          {open ? "← kevesebb" : "miért döntött így?"}
+        </button>
+      </div>
+
       {open && <DecisionDetail d={d} />}
-    </div>
+    </article>
+  );
+}
+
+function Confidence({ v }: { v: number }) {
+  const pct = Math.round(v * 100);
+  return (
+    <span className="flex items-center gap-1.5" title={`bizonyosság ${pct}%`}>
+      <span className="h-1 w-10 overflow-hidden rounded-full bg-line">
+        <span className="block h-full rounded-full bg-iris/70" style={{ width: `${pct}%` }} />
+      </span>
+      <span className="font-mono text-[11px] tabular-nums text-faint">{(v).toFixed(2)}</span>
+    </span>
+  );
+}
+
+function Outcome({ outcome }: { outcome: DecisionRow["outcome"] }) {
+  if (!outcome) {
+    return (
+      <span className="font-mono text-[11px] text-faint">kiértékelés ~1h múlva…</span>
+    );
+  }
+  const { wouldProfit, hypotheticalPnlPct, changePct, refSymbol, horizonHours } = outcome;
+  if (wouldProfit === null) {
+    return (
+      <span className="font-mono text-[11px] text-dim">
+        {horizonHours}h: piac {changePct >= 0 ? "+" : ""}
+        {changePct.toFixed(2)}% — HOLD, semleges
+      </span>
+    );
+  }
+  return (
+    <span
+      className={`flex items-center gap-1.5 font-mono text-[11px] ${wouldProfit ? "text-up" : "text-down"}`}
+    >
+      <span>{wouldProfit ? "✓ bejött volna" : "✗ nem jött be"}</span>
+      <span className="text-faint">·</span>
+      <span className="tabular-nums">
+        {refSymbol} {hypotheticalPnlPct >= 0 ? "+" : ""}
+        {hypotheticalPnlPct.toFixed(2)}% ({horizonHours}h)
+      </span>
+    </span>
   );
 }

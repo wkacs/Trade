@@ -28,6 +28,10 @@ drizzle/meta/_journal.json.bak
 *.txt LightGBM-model*
 ml_model.txt
 
+# dev/diagnostics
+dev.log
+.playwright-mcp/
+
 # debug
 npm-debug.log*
 yarn-debug.log*
