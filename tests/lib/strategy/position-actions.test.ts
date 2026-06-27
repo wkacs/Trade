@@ -3,6 +3,8 @@ import { evaluatePosition, type PositionWithPrice } from "@/lib/strategy/positio
 
 // Degenerált band (mint élesben): low=high=close=ár.
 const at = (price: number) => ({ low: price, high: price, close: price });
+// Mai default take-profit (parity).
+const TP = { takeProfitPct: 0.15, takeProfitFraction: 0.5 };
 
 const pos = (over: Partial<PositionWithPrice>): PositionWithPrice => ({
   positionId: "pos-1",
@@ -18,59 +20,77 @@ const pos = (over: Partial<PositionWithPrice>): PositionWithPrice => ({
 
 describe("evaluatePosition — kód-alapú stop-loss + take-profit (candle-aware)", () => {
   it("low ≤ stopPrice → stop-loss, teljes SELL (qtyFraction 1.0)", () => {
-    const action = evaluatePosition(pos({ ...at(57000) }));
+    const action = evaluatePosition(pos({ ...at(57000) }), TP);
     expect(action.kind).toBe("stop-loss");
     expect(action).toMatchObject({ side: "SELL", qtyFraction: 1.0 });
     if (action.kind === "stop-loss") expect(action.triggerPrice).toBe(57000);
   });
 
   it("ár a stop alatt → stop-loss", () => {
-    const action = evaluatePosition(pos({ ...at(56000) }));
+    const action = evaluatePosition(pos({ ...at(56000) }), TP);
     expect(action.kind).toBe("stop-loss");
   });
 
   it("+15% nyereség (high) → take-profit, a pozíció FELE (qtyFraction 0.5)", () => {
-    const action = evaluatePosition(pos({ entryPrice: 60000, ...at(69000) })); // +15%
+    const action = evaluatePosition(pos({ entryPrice: 60000, ...at(69000) }), TP); // +15%
     expect(action.kind).toBe("take-profit");
     expect(action).toMatchObject({ side: "SELL", qtyFraction: 0.5 });
     if (action.kind === "take-profit") expect(action.triggerPrice).toBeCloseTo(69000, 6); // entry*1.15
   });
 
   it("+18% nyereség → take-profit", () => {
-    const action = evaluatePosition(pos({ entryPrice: 60000, ...at(70800) })); // +18%
+    const action = evaluatePosition(pos({ entryPrice: 60000, ...at(70800) }), TP); // +18%
     expect(action.kind).toBe("take-profit");
   });
 
   it("ha stop ÉS take-profit is fennáll → stop-loss elsőbbség", () => {
-    const action = evaluatePosition(pos({ entryPrice: 60000, ...at(70000), stopPrice: 71000 }));
+    const action = evaluatePosition(pos({ entryPrice: 60000, ...at(70000), stopPrice: 71000 }), TP);
     expect(action.kind).toBe("stop-loss");
   });
 
   it("+14.9% még nem ér el take-profitot → none", () => {
-    const action = evaluatePosition(pos({ entryPrice: 60000, ...at(68940) })); // +14.9%
+    const action = evaluatePosition(pos({ entryPrice: 60000, ...at(68940) }), TP); // +14.9%
     expect(action.kind).toBe("none");
   });
 
   it("stop felett, profit alatt → none", () => {
-    const action = evaluatePosition(pos({ entryPrice: 60000, ...at(61000) }));
+    const action = evaluatePosition(pos({ entryPrice: 60000, ...at(61000) }), TP);
     expect(action.kind).toBe("none");
   });
 
   // ── Intra-candle esetek (a backtest realizmus lényege) ──
   it("stop a gyertya LOW-jára tüzel, close a stop FÖLÖTT is", () => {
-    const a = evaluatePosition(pos({ entryPrice: 100, stopPrice: 95, low: 94, high: 101, close: 99 }));
+    const a = evaluatePosition(pos({ entryPrice: 100, stopPrice: 95, low: 94, high: 101, close: 99 }), TP);
     expect(a.kind).toBe("stop-loss");
     if (a.kind === "stop-loss") expect(a.triggerPrice).toBe(95);
   });
 
   it("take-profit a gyertya HIGH-jára tüzel (intra-candle)", () => {
-    const a = evaluatePosition(pos({ entryPrice: 100, stopPrice: 95, low: 100, high: 116, close: 105 }));
+    const a = evaluatePosition(pos({ entryPrice: 100, stopPrice: 95, low: 100, high: 116, close: 105 }), TP);
     expect(a.kind).toBe("take-profit");
     if (a.kind === "take-profit") expect(a.triggerPrice).toBeCloseTo(115, 6); // entry*(1+0.15)
   });
 
   it("stop ÉS TP egy gyertyán → a STOP nyer (konzervatív)", () => {
-    const a = evaluatePosition(pos({ entryPrice: 100, stopPrice: 96, low: 95, high: 116, close: 100 }));
+    const a = evaluatePosition(pos({ entryPrice: 100, stopPrice: 96, low: 95, high: 116, close: 100 }), TP);
     expect(a.kind).toBe("stop-loss");
+  });
+
+  // ── Configolható take-profit ──
+  it("takeProfitFraction 1.0 → a teljes pozíciót zárja", () => {
+    const a = evaluatePosition(pos({ entryPrice: 100, stopPrice: 95, low: 100, high: 116, close: 105 }), {
+      takeProfitPct: 0.15,
+      takeProfitFraction: 1.0,
+    });
+    expect(a.kind).toBe("take-profit");
+    if (a.kind === "take-profit") expect(a.qtyFraction).toBe(1.0);
+  });
+
+  it("takeProfitPct 0.30 → +16% még NEM elég", () => {
+    const a = evaluatePosition(pos({ entryPrice: 100, stopPrice: 95, low: 100, high: 116, close: 105 }), {
+      takeProfitPct: 0.3,
+      takeProfitFraction: 0.5,
+    });
+    expect(a.kind).toBe("none");
   });
 });

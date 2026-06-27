@@ -48,16 +48,19 @@ export function planProfitCycle(input: ProfitCycleInput): ProfitCyclePlan {
     // 1) Stop/TP az EREDETI (előző gyertyából hozott) stoppal — NINCS look-ahead.
     //    A ratchet (lent) csak a KÖVETKEZŐ gyertyára emeli a stopot, nem erre.
     //    Élesben low=close=spot, így a két sorrend egybeesik (a tick-tesztek zöldek).
-    const action = evaluatePosition({
-      positionId: p.id,
-      symbol: p.symbol,
-      qty: p.qty,
-      entryPrice: p.entryPrice,
-      stopPrice: p.stopPrice,
-      low: candle.low,
-      high: candle.high,
-      close: candle.close,
-    });
+    const action = evaluatePosition(
+      {
+        positionId: p.id,
+        symbol: p.symbol,
+        qty: p.qty,
+        entryPrice: p.entryPrice,
+        stopPrice: p.stopPrice,
+        low: candle.low,
+        high: candle.high,
+        close: candle.close,
+      },
+      { takeProfitPct: 0.15, takeProfitFraction: 0.5 },
+    );
     if (action.kind !== "none") {
       orders.push({
         kind: action.kind,

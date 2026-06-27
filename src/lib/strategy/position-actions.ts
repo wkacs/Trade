@@ -1,11 +1,9 @@
-import { PROFIT_CYCLE } from "@/lib/config";
-
 /**
  * Kód-alapú pozíció-kezelés: stop-loss + take-profit. Tiszta függvény — nincs DB,
  * nincs hálózat, determinisztikus, DB nélkül tesztelhető.
  * Candle-aware: a stop a gyertya LOW-jára, a TP a HIGH-jára tüzel (intra-candle).
- * Live: low=high=close=spot (degenerált band). Lásd backtest spec §5.
- * Lásd: docs/superpowers/specs/2026-06-26-profit-cycle-design.md §3.1.
+ * Live: low=high=close=spot (degenerált band). A take-profit szintje + frakciója configból.
+ * Lásd: docs/superpowers/specs/2026-06-27-strategy-tournament-design.md §5.
  */
 
 export interface PositionWithPrice {
@@ -21,18 +19,20 @@ export interface PositionWithPrice {
 
 export type PositionAction =
   | { kind: "none" }
-  | { kind: "stop-loss"; side: "SELL"; qtyFraction: 1.0; triggerPrice: number; reason: string }
-  | { kind: "take-profit"; side: "SELL"; qtyFraction: 0.5; triggerPrice: number; reason: string };
+  | { kind: "stop-loss"; side: "SELL"; qtyFraction: number; triggerPrice: number; reason: string }
+  | { kind: "take-profit"; side: "SELL"; qtyFraction: number; triggerPrice: number; reason: string };
 
 /**
  * Eldönti egy pozícióról, kell-e automatikus SELL.
  *  - low ≤ stopPrice → stop-loss (TELJES pozíció), triggerPrice = stopPrice.
- *  - high alapú nyereség ≥ takeProfitPct (+15%) → take-profit (a pozíció FELE),
- *    triggerPrice = entry*(1+tp).
- *  - a stop-loss ELSŐBBSÉGET élvez, ha mindkettő fennáll (konzervatív: ugyanazon a
- *    gyertyán a stop nyer).
+ *  - high alapú nyereség ≥ tp.takeProfitPct → take-profit (a config szerinti frakció),
+ *    triggerPrice = entry*(1+tp%).
+ *  - a stop-loss ELSŐBBSÉGET élvez (konzervatív: ugyanazon a gyertyán a stop nyer).
  */
-export function evaluatePosition(p: PositionWithPrice): PositionAction {
+export function evaluatePosition(
+  p: PositionWithPrice,
+  tp: { takeProfitPct: number; takeProfitFraction: number },
+): PositionAction {
   // Stop-loss elsőbbség: a tőke védelme megelőzi a nyereség-realizálást.
   if (p.low <= p.stopPrice) {
     return {
@@ -44,16 +44,16 @@ export function evaluatePosition(p: PositionWithPrice): PositionAction {
     };
   }
 
-  const tpTrigger = p.entryPrice * (1 + PROFIT_CYCLE.takeProfitPct);
+  const tpTrigger = p.entryPrice * (1 + tp.takeProfitPct);
   if (p.high >= tpTrigger) {
     return {
       kind: "take-profit",
       side: "SELL",
-      qtyFraction: 0.5,
+      qtyFraction: tp.takeProfitFraction,
       triggerPrice: tpTrigger,
-      reason: `Take-profit: ${p.symbol} high elérte +${(PROFIT_CYCLE.takeProfitPct * 100).toFixed(
-        0,
-      )}% → a pozíció felének realizálása`,
+      reason: `Take-profit: ${p.symbol} high elérte +${(tp.takeProfitPct * 100).toFixed(0)}% → ${(
+        tp.takeProfitFraction * 100
+      ).toFixed(0)}% realizálás`,
     };
   }
 
