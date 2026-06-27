@@ -17,7 +17,9 @@ export function getDb(): Db | null {
   if (_db) return _db;
   const url = process.env.DATABASE_URL;
   if (!url) return null;
-  const sql = neon(url);
+  // fetchOptions no-store: a Neon HTTP-driver fetch-eket a Next.js NE cache-elje
+  // (különben a dashboard elavult DB-adatot mutat a force-dynamic ellenére is).
+  const sql = neon(url, { fetchOptions: { cache: "no-store" } });
   _db = drizzle(sql, { schema });
   return _db;
 }
