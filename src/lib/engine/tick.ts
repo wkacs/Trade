@@ -19,6 +19,9 @@ import { loadPortfolioState, applyTrade, setStopPrice } from "@/lib/portfolio/ac
 import { getPerformanceSummary } from "@/lib/portfolio/evaluate";
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { planProfitCycle } from "@/lib/engine/profit-cycle";
+import { DEFAULT_STRATEGY } from "@/lib/strategy/config";
+import { computeAtr } from "@/lib/strategy/atr";
+import { passesTrendFilter } from "@/lib/strategy/entry-filter";
 import type { Decision, Trade, DataPoint, RawDecision } from "@/lib/types";
 
 export interface TickInput {
@@ -263,21 +266,45 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       if (px !== undefined) candles[p.symbol] = { low: px, high: px, close: px };
     }
 
-    const plan = planProfitCycle({
-      positions: workingPositions.map((p) => ({
-        id: p.id,
-        symbol: p.symbol,
-        qty: p.qty,
-        entryPrice: p.entryPrice,
-        stopPrice: p.stopPrice,
-      })),
-      candles,
-      fearGreedValue,
-      coinChanges,
-      weeklyBudgetRemainingUsd: weeklyRemaining,
-      totalEquity: totalEquityNow(),
-      stopLossPct: RISK_LIMITS.stopLossPct,
-    });
+    // Per-symbol ATR + trend-flag a Binance OHLC events-ből (a buildFeatures is ezt eszi).
+    // A DataPoint csak price.usd-t hordoz → close-only buffer (high=low=close). A default
+    // stopMode:"fixed"+entryFilter:"off" miatt ez NEM befolyásolja a live viselkedést (parity).
+    const ohlcBySymbol: Record<string, { high: number; low: number; close: number }[]> = {};
+    for (const e of events) {
+      if (e.source === "binance" && e.kind === "price" && e.price) {
+        (ohlcBySymbol[e.symbol] ??= []).push({ high: e.price.usd, low: e.price.usd, close: e.price.usd });
+      }
+    }
+    const atrBySymbol: Record<string, number> = {};
+    const trendOkBySymbol: Record<string, boolean> = {};
+    for (const sym of COIN_UNIVERSE) {
+      const buf = ohlcBySymbol[sym] ?? [];
+      atrBySymbol[sym] = computeAtr(buf, DEFAULT_STRATEGY.atrPeriod);
+      trendOkBySymbol[sym] = passesTrendFilter(
+        buf.map((b) => b.close),
+        DEFAULT_STRATEGY.entryFilterSmaPeriod,
+      );
+    }
+
+    const plan = planProfitCycle(
+      {
+        positions: workingPositions.map((p) => ({
+          id: p.id,
+          symbol: p.symbol,
+          qty: p.qty,
+          entryPrice: p.entryPrice,
+          stopPrice: p.stopPrice,
+        })),
+        candles,
+        fearGreedValue,
+        coinChanges,
+        weeklyBudgetRemainingUsd: weeklyRemaining,
+        totalEquity: totalEquityNow(),
+        atrBySymbol,
+        trendOkBySymbol,
+      },
+      DEFAULT_STRATEGY,
+    );
 
     // Trailing-stop ratchet perzisztálása + munka-állapot frissítése (túléli a tickeket).
     for (const u of plan.stopUpdates) {
