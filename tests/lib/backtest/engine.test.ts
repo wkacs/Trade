@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { runBacktest } from "@/lib/backtest/engine";
+import { DEFAULT_STRATEGY } from "@/lib/strategy/config";
 import type { HistoryFrame, BacktestConfig } from "@/lib/backtest/types";
 
 const H = 3600_000;
@@ -26,6 +27,15 @@ describe("runBacktest", () => {
     expect(result.equityCurve).toHaveLength(3);
     expect(result.metrics.totalReturnPct).toBeGreaterThan(0);
     expect(result.config.initialCapitalUsd).toBe(10000);
+  });
+
+  it("ATR-stop konfiggal is lefut (nem dob), és ad eredményt", () => {
+    const history: HistoryFrame[] = [
+      frame(0, { o: 100, h: 100, l: 100, c: 100 }, 20),
+      frame(1, { o: 100, h: 110, l: 95, c: 105 }, 50),
+    ];
+    const r = runBacktest(history, cfg, { ...DEFAULT_STRATEGY, stopMode: "atr", atrMult: 2 });
+    expect(r.equityCurve).toHaveLength(2);
   });
 
   it("stop-loss zuhanásnál → lezárt trade + legalább egy trade", () => {
