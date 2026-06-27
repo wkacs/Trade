@@ -33,7 +33,7 @@ export function DecisionsTimeline() {
     <section className="rounded-xl border border-line bg-panel p-5">
       <div className="flex items-baseline justify-between gap-3">
         <div>
-          <h2 className="font-display text-[11px] font-medium uppercase tracking-[0.2em] text-iris">
+          <h2 className="font-display text-[11px] font-medium uppercase tracking-[0.2em] text-accent">
             Döntés-napló
           </h2>
           <p className="mt-1 font-sans text-xs text-dim">
@@ -50,9 +50,9 @@ export function DecisionsTimeline() {
 
       {!loading && !error && (
         <div className="relative mt-5">
-          {/* a szívverés-szál: frissen iris, lefelé (régebbi) elhalványul */}
+          {/* a szívverés-szál: frissen accent, lefelé (régebbi) elhalványul */}
           <div
-            className="absolute bottom-2 left-2 top-2 w-px bg-gradient-to-b from-iris/50 via-line to-transparent"
+            className="absolute bottom-2 left-2 top-2 w-px bg-gradient-to-b from-accent/50 via-line to-transparent"
             aria-hidden
           />
           <ol className="space-y-3">
@@ -61,7 +61,7 @@ export function DecisionsTimeline() {
                 <span
                   className={
                     i === 0
-                      ? "pulse-dot absolute left-2 top-4 h-2.5 w-2.5 -translate-x-1/2 rounded-full bg-iris"
+                      ? "pulse-dot absolute left-2 top-4 h-2.5 w-2.5 -translate-x-1/2 rounded-full bg-accent"
                       : "absolute left-2 top-4 h-2 w-2 -translate-x-1/2 rounded-full bg-line ring-2 ring-bg"
                   }
                   aria-hidden

@@ -54,7 +54,7 @@ export function AdminPanel() {
               mode === m
                 ? m === "live"
                   ? "border-down/50 bg-down/10 text-down"
-                  : "border-iris/40 bg-iris/10 text-irisBright"
+                  : "border-accent/40 bg-accent/10 text-accentBright"
                 : "border-line bg-panel2 text-faint hover:text-dim"
             }`}
           >
@@ -72,7 +72,7 @@ export function AdminPanel() {
           <input
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
-            className="mt-2 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-xs text-ink placeholder:text-faint focus:border-iris/50"
+            className="mt-2 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-xs text-ink placeholder:text-faint focus:border-accent/50"
             placeholder="I-UNDERSTAND-THE-RISK"
           />
         </div>

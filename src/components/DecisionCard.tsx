@@ -37,7 +37,7 @@ export function DecisionCard({ d, latest }: { d: DecisionRow; latest?: boolean }
   const [open, setOpen] = useState(false);
   return (
     <article
-      className={`fade-up rounded-xl border bg-panel2 p-4 ${latest ? "border-iris/25" : "border-line"}`}
+      className={`fade-up rounded-xl border bg-panel2 p-4 ${latest ? "border-accent/25" : "border-line"}`}
     >
       <div className="flex items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
@@ -74,7 +74,7 @@ export function DecisionCard({ d, latest }: { d: DecisionRow; latest?: boolean }
         <Outcome outcome={d.outcome} />
         <button
           onClick={() => setOpen(!open)}
-          className="shrink-0 font-mono text-[11px] text-iris/80 transition-colors hover:text-irisBright"
+          className="shrink-0 font-mono text-[11px] text-accent/80 transition-colors hover:text-accentBright"
         >
           {open ? "← kevesebb" : "miért döntött így?"}
         </button>
@@ -90,7 +90,7 @@ function Confidence({ v }: { v: number }) {
   return (
     <span className="flex items-center gap-1.5" title={`bizonyosság ${pct}%`}>
       <span className="h-1 w-10 overflow-hidden rounded-full bg-line">
-        <span className="block h-full rounded-full bg-iris/70" style={{ width: `${pct}%` }} />
+        <span className="block h-full rounded-full bg-accent/70" style={{ width: `${pct}%` }} />
       </span>
       <span className="font-mono text-[11px] tabular-nums text-faint">{(v).toFixed(2)}</span>
     </span>

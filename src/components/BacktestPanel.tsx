@@ -55,7 +55,7 @@ export function BacktestPanel() {
       <button
         onClick={run}
         disabled={loading}
-        className="mt-3 rounded-lg border border-iris/30 bg-iris/10 px-3.5 py-1.5 font-mono text-xs text-irisBright transition-colors hover:bg-iris/20 disabled:opacity-50"
+        className="mt-3 rounded-lg border border-accent/30 bg-accent/10 px-3.5 py-1.5 font-mono text-xs text-accentBright transition-colors hover:bg-accent/20 disabled:opacity-50"
       >
         {loading ? "fut…" : "futtatás"}
       </button>

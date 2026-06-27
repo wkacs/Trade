@@ -61,11 +61,11 @@ export function Dashboard() {
       <header className="sticky top-0 z-10 border-b border-line bg-bg/80 backdrop-blur-md">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-3">
           <div className="flex items-center gap-3">
-            <span className="pulse-dot h-2 w-2 rounded-full bg-iris" aria-hidden />
+            <span className="pulse-dot h-2 w-2 rounded-full bg-accent" aria-hidden />
             <span className="font-display text-sm font-bold tracking-[0.18em] text-ink">
               AI&nbsp;KERESKEDŐ
             </span>
-            <span className="rounded border border-iris/30 bg-iris/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest text-irisBright">
+            <span className="rounded border border-accent/30 bg-accent/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest text-accentBright">
               {hasDb ? "paper" : "offline"}
             </span>
           </div>
@@ -144,7 +144,7 @@ function Gauge({
   const color = muted
     ? "text-ink"
     : accent
-      ? "text-irisBright"
+      ? "text-accentBright"
       : tone === "up"
         ? "text-up"
         : tone === "down"
