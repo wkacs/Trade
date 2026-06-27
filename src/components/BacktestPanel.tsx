@@ -3,12 +3,16 @@
 import { useState } from "react";
 
 interface BacktestResult {
-  pnlPct: number;
+  totalReturnPct: number;
+  sharpe: number;
+  maxDrawdownPct: number;
+  hitRate: number;
   tradesCount: number;
 }
 
 /**
- * Backtest — a stratégia futtatása a történelmi adatokon. Lásd spec §3.5.
+ * Backtest — a kód-profit-ciklus futtatása a történelmi Binance-adaton, gyertya-fill
+ * szimulációval. A valós motort hívja (/api/backtest). Lásd backtest spec.
  */
 export function BacktestPanel() {
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -21,11 +25,17 @@ export function BacktestPanel() {
     try {
       const r = await fetch("/api/backtest");
       const d = await r.json();
-      if (d.note) {
-        setNote(d.note);
+      if (d.error) {
+        setNote("A backtest nem futott le. Próbáld újra.");
         setResult(null);
       } else {
-        setResult({ pnlPct: d.pnlPct, tradesCount: d.tradesCount });
+        setResult({
+          totalReturnPct: d.totalReturnPct,
+          sharpe: d.sharpe,
+          maxDrawdownPct: d.maxDrawdownPct,
+          hitRate: d.hitRate,
+          tradesCount: d.tradesCount,
+        });
       }
     } catch {
       setNote("A backtest nem futott le. Próbáld újra.");
@@ -40,7 +50,7 @@ export function BacktestPanel() {
         Backtest
       </h2>
       <p className="mt-1 font-sans text-xs text-dim">
-        Futtasd a stratégiát a történelmi adatokon, mielőtt élesre váltanál.
+        Futtasd a kód-profit-ciklust a történelmi adatokon, mielőtt élesre váltanál.
       </p>
       <button
         onClick={run}
@@ -50,14 +60,25 @@ export function BacktestPanel() {
         {loading ? "fut…" : "futtatás"}
       </button>
       {result && (
-        <div className="mt-4 flex items-baseline gap-4 font-mono text-sm">
-          <span className={result.pnlPct >= 0 ? "text-up" : "text-down"}>
-            {(result.pnlPct * 100).toFixed(2)}%
-          </span>
-          <span className="text-faint">{result.tradesCount} tranzakció</span>
+        <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-2 font-mono text-sm">
+          <Metric label="hozam" value={`${(result.totalReturnPct * 100).toFixed(2)}%`} good={result.totalReturnPct >= 0} />
+          <Metric label="Sharpe" value={result.sharpe.toFixed(2)} good={result.sharpe >= 0} />
+          <Metric label="max DD" value={`-${(result.maxDrawdownPct * 100).toFixed(1)}%`} good={false} />
+          <Metric label="hit rate" value={`${(result.hitRate * 100).toFixed(0)}%`} />
+          <span className="col-span-2 text-faint">{result.tradesCount} lezárt trade</span>
         </div>
       )}
       {note && <p className="mt-3 font-mono text-[11px] text-amber-400/70">{note}</p>}
     </section>
+  );
+}
+
+function Metric({ label, value, good }: { label: string; value: string; good?: boolean }) {
+  const color = good === undefined ? "text-fg" : good ? "text-up" : "text-down";
+  return (
+    <span className="flex items-baseline justify-between gap-2">
+      <span className="text-faint text-xs">{label}</span>
+      <span className={color}>{value}</span>
+    </span>
   );
 }

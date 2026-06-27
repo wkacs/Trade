@@ -1,75 +1,41 @@
 import { NextResponse } from "next/server";
-import { getDb, schema } from "@/db/client";
-import { asc } from "drizzle-orm";
-import { buildFeatures } from "@/lib/ml/features";
-import { predict } from "@/lib/ml/predictor";
-import type { DataPoint } from "@/lib/types";
+import { loadHistory } from "@/lib/backtest/data";
+import { runBacktest } from "@/lib/backtest/engine";
+import { COIN_UNIVERSE } from "@/lib/config";
 
-// Élő, DB-író route (backtests insert) — soha ne fusson le build-időben.
-// force-dynamic nélkül a Next.js a build során végrehajtaná és cache-elné.
+// Hálózati fetch (Binance/F&G) + nehéz számítás — ne fusson build-időben.
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+export const runtime = "nodejs";
 
 /**
- * Egyszerű backtest: a raw_events táblán végigfut, ML jeleket generál,
- * és szimulált P&L-t számol. Lásd spec §3.5.
+ * Backtest a valódi motorral: a kód-profit-ciklust futtatja a Binance-historyn,
+ * gyertya-fill szimulációval, és metrikákat ad vissza (Sharpe/maxDD/hit-rate).
+ * A korábbi naív confidence-súly vázlatot váltja. Lásd backtest spec.
  *
- * Ez a vázlat — amíg nincs elegendő történelmi adat, naiv becslést ad.
- * A valós stratégia a demo-fázis után finomítandó.
+ * Query: ?pages=N (klines-lapok/symbol, default 3) &slippage=BPS (default 5).
  */
-export async function GET() {
-  const db = getDb();
-  if (!db) {
-    return NextResponse.json({
-      pnlPct: 0,
-      tradesCount: 0,
-      note: "DATABASE_URL hiányzik — backtest nem futtatható.",
-    });
-  }
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const pages = Number(url.searchParams.get("pages") ?? 3);
+  const slippageBps = Number(url.searchParams.get("slippage") ?? 5);
 
   try {
-    const rows = await db.query.rawEvents.findMany({
-      orderBy: asc(schema.rawEvents.ts),
+    const history = await loadHistory([...COIN_UNIVERSE], pages);
+    const result = runBacktest(history, {
+      symbols: [...COIN_UNIVERSE],
+      initialCapitalUsd: 10000,
+      feePct: 0.001,
+      slippageBps,
     });
-    // A DB sorokat DataPoint-tá alakítjuk a feature builder számára
-    const events: DataPoint[] = rows.map((r) => ({
-      source: r.source as DataPoint["source"],
-      symbol: r.symbol,
-      timestamp: new Date(r.ts).getTime(),
-      kind: r.kind as DataPoint["kind"],
-      ...((r.payload as object) ?? {}),
-    }));
-
-    const features = buildFeatures(events);
-    const signals = await predict(features);
-
-    // Naív backtest: "up" jel → vettünk volna; számoljuk a szimulált P&L-t.
-    let pnlPct = 0;
-    let tradesCount = signals.length;
-    for (const s of signals) {
-      if (s.direction1h === "up") pnlPct += s.confidence * 0.01;
-      else if (s.direction1h === "down") pnlPct -= s.confidence * 0.01;
-    }
-
-    let backtestId: string | undefined;
-    try {
-      const [saved] = await db
-        .insert(schema.backtests)
-        .values({
-          strategy: "naive-ml-signal",
-          startTs: rows[0]?.ts ?? new Date(),
-          endTs: rows[rows.length - 1]?.ts ?? new Date(),
-          resultPnlPct: pnlPct,
-          tradesCount,
-        })
-        .returning();
-      backtestId = saved?.id;
-    } catch (e) {
-      console.error("[api/backtest] mentés hiba:", e);
-    }
-
-    return NextResponse.json({ pnlPct, tradesCount, backtestId });
+    return NextResponse.json({
+      ...result.metrics,
+      framesCount: history.length,
+      from: result.from,
+      to: result.to,
+    });
   } catch (e) {
     console.error("[api/backtest]", e);
-    return NextResponse.json({ pnlPct: 0, tradesCount: 0, error: "DB hiba" }, { status: 500 });
+    return NextResponse.json({ error: "backtest hiba", detail: String(e) }, { status: 500 });
   }
 }
