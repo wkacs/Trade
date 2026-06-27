@@ -45,18 +45,15 @@ export function planProfitCycle(input: ProfitCycleInput): ProfitCyclePlan {
     const candle = input.candles[p.symbol];
     if (!candle) continue;
 
-    // 1) Trailing ratchet a close-szal (nincs look-ahead).
-    const newStop = ratchetStop(p.stopPrice, candle.close, input.stopLossPct);
-    const effectiveStop = Math.max(p.stopPrice, newStop);
-    if (newStop > p.stopPrice) stopUpdates.push({ positionId: p.id, newStop });
-
-    // 2) Stop/TP a candle-band-del (a ratchetelt stoppal).
+    // 1) Stop/TP az EREDETI (előző gyertyából hozott) stoppal — NINCS look-ahead.
+    //    A ratchet (lent) csak a KÖVETKEZŐ gyertyára emeli a stopot, nem erre.
+    //    Élesben low=close=spot, így a két sorrend egybeesik (a tick-tesztek zöldek).
     const action = evaluatePosition({
       positionId: p.id,
       symbol: p.symbol,
       qty: p.qty,
       entryPrice: p.entryPrice,
-      stopPrice: effectiveStop,
+      stopPrice: p.stopPrice,
       low: candle.low,
       high: candle.high,
       close: candle.close,
@@ -71,6 +68,10 @@ export function planProfitCycle(input: ProfitCycleInput): ProfitCyclePlan {
         reason: action.reason,
       });
     }
+
+    // 2) Trailing ratchet a close-szal → a KÖVETKEZŐ gyertya stopja (perzisztálandó).
+    const newStop = ratchetStop(p.stopPrice, candle.close, input.stopLossPct);
+    if (newStop > p.stopPrice) stopUpdates.push({ positionId: p.id, newStop });
   }
 
   // 3) Fear-greedy DCA.
