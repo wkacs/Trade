@@ -15,6 +15,8 @@ vi.mock("@/lib/ml/predictor", () => ({ predict: vi.fn() }));
 vi.mock("@/lib/portfolio/accounting", () => ({
   loadPortfolioState: vi.fn(),
   applyTrade: vi.fn().mockResolvedValue({ positionId: "persisted-id" }),
+  // A trailing-stop perzisztálását a tick a setStopPrice-on át hívja — a mockban is kell.
+  setStopPrice: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/lib/portfolio/evaluate", () => ({
   getPerformanceSummary: vi
@@ -28,7 +30,7 @@ import { collectAll } from "@/lib/collectors/base";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
 import { decide } from "@/lib/llm/phase2-decide";
 import { predict } from "@/lib/ml/predictor";
-import { loadPortfolioState, applyTrade } from "@/lib/portfolio/accounting";
+import { loadPortfolioState, applyTrade, setStopPrice } from "@/lib/portfolio/accounting";
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { runTick } from "@/lib/engine/tick";
 import type { DataPoint } from "@/lib/types";
@@ -187,7 +189,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     expect(result.decision.overrideReason).toMatch(/circuit breaker|napi/i);
   });
 
-  it("TRAILING STOP: ár felmegy (stop ratchetel) → visszaesik ÚJ stopra → SL tüzel a nyereségen", async () => {
+  it("TRAILING STOP ratchet: emelkedő árnál a stop felfelé kúszik (setStopPrice), de nem tüzel", async () => {
     // BTC pozíció: 0.01 qty @ entry 60000, stopPrice = 57000 (entry -5%).
     (loadPortfolioState as any).mockResolvedValue(
       stateWith(
@@ -196,19 +198,39 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
         10000, // initialCapitalUsd
       ),
     );
-    // Egyetlen tick: az ár előbb felmeggy 65000-re (ratchet: 65000*0.95=61750 > 57000),
-    // majd a mock csak az utolsó ár-pontot látja. A trailing-stop tesztnél úgy állítjuk,
-    // hogy az aktuális ár 61000 — ami a ratchetelt 61750 stop ALATT van → SL tüzel.
-    // (A ratchetStop még a stop-ellenőrzés ELŐTT fut, így a stop 61750 lesz,
-    //  és a 61000-es ár < 61750 → stop-loss, nem az eredeti 57000-en.)
-    (collectAll as any).mockResolvedValue([price("BTC", 61000, 1), fearGreed(60)]);
+    // Ár 65000-re emelkedett → ratchet: stop = 65000*0.95 = 61750 (> 57000).
+    // 65000 > 61750, így EBBEN a tickben NEM tüzel a stop — csak a stop kúszik felljebb.
+    (collectAll as any).mockResolvedValue([price("BTC", 65000, 5), fearGreed(60)]);
 
     const result = await runTick({ tickId: "2026-06-26-17", paperMode: true });
 
+    // Nincs stop-loss most (az ár a ratchetelt stop felett van)...
+    expect(result.cycleActions.find((a) => a.kind === "stop-loss")).toBeUndefined();
+    // ...de a stop felljebb kúszott és perzisztálódott: setStopPrice(p.id, 61750).
+    const calls = (setStopPrice as any).mock.calls;
+    expect(calls.length).toBe(1);
+    expect(calls[0][1]).toBeCloseTo(61750, 0);
+  });
+
+  it("TRAILING STOP védelem: a már ratchetelt (magasabb) stopra visszaeső ár NYERESÉGESEN zár", async () => {
+    // A stop egy KORÁBBI tickben már 61750-re kúszott (entry 60000 felett); most az ár
+    // 61000-re esik vissza → 61000 ≤ 61750 → stop-loss tüzel, de még nyereségben.
+    (loadPortfolioState as any).mockResolvedValue(
+      stateWith(
+        [{ id: "p1", symbol: "BTC", qty: 0.01, entryPrice: 60000, stopPrice: 61750, valueUsd: 600 }],
+        9400,
+        10000,
+      ),
+    );
+    (collectAll as any).mockResolvedValue([price("BTC", 61000, -2), fearGreed(60)]);
+
+    const result = await runTick({ tickId: "2026-06-26-18", paperMode: true });
+
+    // Stop-loss tüzel a magasabb (trailing) stopon — a belépő (60000) FELETT zár → védi a nyereséget.
     const stop = result.cycleActions.find((a) => a.kind === "stop-loss");
     expect(stop).toBeTruthy();
-    // A SELL az ratchetelt (magasabb) stop miatt történt, megvédve a nyereséget:
-    // a belépő 60000 felett vagyunk (61000 > 60000), tehát a pozíció nyereséges,
-    // de a trailing stop mégis lezárja — épp ez a trailing célja.
+    expect(stop).toMatchObject({ side: "SELL", symbol: "BTC" });
+    // a ratchet nem mozdult tovább (61000*0.95 = 57950 < 61750), így setStopPrice nem hívódott
+    expect((setStopPrice as any).mock.calls.length).toBe(0);
   });
 });
