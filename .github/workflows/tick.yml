@@ -1,7 +1,9 @@
 name: hourly-tick
 
-# Óránként meghívja a Vercel /api/cron/tick endpointot — így a (napi limites Hobby)
-# Vercel cron helyett óránként fut a tick. A CRON_SECRET a repo Secrets-ből jön.
+# Óránként lefuttatja a tick-et a GitHub-RUNNERBEN (nem a Vercelen) — így NINCS a
+# Vercel Hobby 60s maxDuration limit, ami cold-starton 504-et okozott (kimaradt tickek).
+# A runner közvetlenül a Neon DB ellen dolgozik. Kötelező secretek: lásd lent.
+#
 # A GitHub ütemezett workflow a DEFAULT branch-en (master) fut, és ~60 nap commit-mentes
 # inaktivitás után letiltódik (egy commit újraaktiválja).
 on:
@@ -9,12 +11,37 @@ on:
     - cron: "7 * * * *" # minden óra :07-kor (UTC)
   workflow_dispatch: {} # kézi indítás is a GitHub UI-ról
 
+# Ne fusson két tick egyszerre (egy lassú futás ne lapolódjon a következőre).
+concurrency:
+  group: hourly-tick
+  cancel-in-progress: false
+
 jobs:
   tick:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger tick
-        run: |
-          curl -fsS -X POST "https://trade-beryl-six.vercel.app/api/cron/tick" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -w "\nHTTP %{http_code}\n"
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Tick futtatása (runner-oldal, nincs 60s limit)
+        env:
+          # KÖTELEZŐ:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL_PHASE1: ${{ secrets.LLM_MODEL_PHASE1 }}
+          LLM_MODEL_PHASE2: ${{ secrets.LLM_MODEL_PHASE2 }}
+          # BIZTONSÁG: "paper" — SOHA ne "live", amíg nem validáltad a backtesttel!
+          TRADING_MODE: ${{ secrets.TRADING_MODE }}
+          # OPCIONÁLIS (nélkülük is fut):
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+          WHALEALERT_KEY: ${{ secrets.WHALEALERT_KEY }}
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+        run: pnpm tsx scripts/tick.ts
