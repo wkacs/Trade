@@ -17,10 +17,8 @@ import type { Broker } from "@/lib/execution/broker";
 import { COIN_UNIVERSE, RISK_LIMITS, RSS_SOURCES, REDDIT_SOURCES } from "@/lib/config";
 import { loadPortfolioState, applyTrade, setStopPrice } from "@/lib/portfolio/accounting";
 import { getPerformanceSummary } from "@/lib/portfolio/evaluate";
-import { evaluatePosition } from "@/lib/strategy/position-actions";
-import { evaluateDca } from "@/lib/strategy/fear-greedy";
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
-import { ratchetStop } from "@/lib/strategy/trailing-stop";
+import { planProfitCycle } from "@/lib/engine/profit-cycle";
 import type { Decision, Trade, DataPoint, RawDecision } from "@/lib/types";
 
 export interface TickInput {
@@ -241,48 +239,10 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   };
 
   if (dbState) {
-    // 1+2) Stop-loss + take-profit minden nyitott pozícióra (a stop elsőbbséget élvez).
-    //      A stop-loss felszabadít cash-t, ami a DCA-nál hasznosul — ezért fut előbb.
-    for (const p of [...workingPositions]) {
-      const currentPrice = prices[p.symbol];
-      if (currentPrice === undefined) continue;
-
-      // TRAILING STOP (ratchet): az értékelés ELŐTT kússzon a stop felfelé, ha az ár
-      // emelkedett — így egy későbbi visszaesés a MAGASABB stopon tüzel, és védi a már
-      // megszerzett nyereséget (nem csak a belépő -5%-án). A ratchet eredményét a DB-be
-      // is perzisztáljuk (setStopPrice), hogy a következő ticknél is éljen. Lásd spec §B.
-      const newStop = ratchetStop(p.stopPrice, currentPrice, RISK_LIMITS.stopLossPct);
-      if (newStop > p.stopPrice) {
-        p.stopPrice = newStop;
-        await setStopPrice(p.id, newStop);
-      }
-
-      const action = evaluatePosition({
-        positionId: p.id,
-        symbol: p.symbol,
-        qty: p.qty,
-        entryPrice: p.entryPrice,
-        stopPrice: p.stopPrice,
-        // Live: csak a spot ismert → degenerált band (low=high=close).
-        low: currentPrice,
-        high: currentPrice,
-        close: currentPrice,
-      });
-      if (action.kind === "none") continue;
-      const sellQty = p.qty * action.qtyFraction;
-      const trade = await executeCycleOrder("SELL", p.symbol, { qty: sellQty }, action.triggerPrice);
-      if (trade)
-        cycleActions.push({
-          kind: action.kind,
-          side: "SELL",
-          symbol: p.symbol,
-          amountUsd: trade.amountUsd,
-          qty: trade.qty,
-        });
-    }
-
-    // 3) Fear-greedy DCA — kötelező vétel, ha a piac érték-alul (F&G ≤ küszöb).
+    // KÓD-ALAPÚ PROFIT-CIKLUS a közös, tiszta planProfitCycle()-lel — a backtest UGYANEZT
+    // hívja, így nincs drift. A planner DÖNT (ratchet→stop/TP→DCA); a végrehajtás itt marad.
     weeklyRemaining = await remainingWeeklyBudget(totalEquityNow());
+
     const fgEvent = events.find((e) => e.kind === "sentiment" && e.sentiment);
     const fearGreedValue = fgEvent?.sentiment?.value ?? null;
     // A 24h változás a CoinGecko ár-pontból jön (a kosár coinjaira, symbolonként egyszer).
@@ -295,28 +255,57 @@ export async function runTick(input: TickInput): Promise<TickResult> {
           (COIN_UNIVERSE as readonly string[]).includes(e.symbol),
       )
       .map((e) => ({ symbol: e.symbol, change24hPct: e.price!.change24hPct }));
-    const dca = evaluateDca({
+
+    // Live candle-band: low=high=close=aktuális ár (csak a spot ismert).
+    const candles: Record<string, { low: number; high: number; close: number }> = {};
+    for (const p of workingPositions) {
+      const px = prices[p.symbol];
+      if (px !== undefined) candles[p.symbol] = { low: px, high: px, close: px };
+    }
+
+    const plan = planProfitCycle({
+      positions: workingPositions.map((p) => ({
+        id: p.id,
+        symbol: p.symbol,
+        qty: p.qty,
+        entryPrice: p.entryPrice,
+        stopPrice: p.stopPrice,
+      })),
+      candles,
       fearGreedValue,
       coinChanges,
       weeklyBudgetRemainingUsd: weeklyRemaining,
       totalEquity: totalEquityNow(),
+      stopLossPct: RISK_LIMITS.stopLossPct,
     });
-    if (dca.shouldAccumulate && dca.symbol) {
-      const px = prices[dca.symbol];
-      if (px) {
-        const trade = await executeCycleOrder("BUY", dca.symbol, { amountUsd: dca.amountUsd }, px);
-        if (trade) {
-          cycleActions.push({
-            kind: "dca",
-            side: "BUY",
-            symbol: dca.symbol,
-            amountUsd: trade.amountUsd,
-            qty: trade.qty,
-          });
-          // Egy tickon belül ne vegyen duplán: a DCA után az AI BUY-ja a CSÖKKENTETT
-          // keretet lássa a Risk Manager heti-limit kapujában. Lásd spec §3.4.
-          weeklyRemaining -= trade.amountUsd;
-        }
+
+    // Trailing-stop ratchet perzisztálása + munka-állapot frissítése (túléli a tickeket).
+    for (const u of plan.stopUpdates) {
+      const pos = workingPositions.find((p) => p.id === u.positionId);
+      if (pos) pos.stopPrice = u.newStop;
+      await setStopPrice(u.positionId, u.newStop);
+    }
+
+    // Orderek végrehajtása: a SELL-ek ELŐBB (a felszabaduló cash a DCA-nak hasznosul).
+    const sells = plan.orders.filter((o) => o.side === "SELL");
+    const buys = plan.orders.filter((o) => o.side === "BUY");
+    for (const o of [...sells, ...buys]) {
+      const px = prices[o.symbol];
+      if (px === undefined) continue;
+      const trade =
+        o.side === "SELL"
+          ? await executeCycleOrder("SELL", o.symbol, { qty: o.qty }, o.triggerPrice ?? px)
+          : await executeCycleOrder("BUY", o.symbol, { amountUsd: o.amountUsd }, px);
+      if (trade) {
+        cycleActions.push({
+          kind: o.kind,
+          side: o.side,
+          symbol: o.symbol,
+          amountUsd: trade.amountUsd,
+          qty: trade.qty,
+        });
+        // A DCA után az AI BUY-ja a CSÖKKENTETT heti keretet lássa a Risk Manager kapujában.
+        if (o.side === "BUY") weeklyRemaining -= trade.amountUsd;
       }
     }
   }
