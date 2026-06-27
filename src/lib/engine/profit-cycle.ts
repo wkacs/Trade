@@ -78,12 +78,15 @@ export function planProfitCycle(input: ProfitCycleInput): ProfitCyclePlan {
   }
 
   // 3) Fear-greedy DCA.
-  const dca = evaluateDca({
-    fearGreedValue: input.fearGreedValue,
-    coinChanges: input.coinChanges,
-    weeklyBudgetRemainingUsd: input.weeklyBudgetRemainingUsd,
-    totalEquity: input.totalEquity,
-  });
+  const dca = evaluateDca(
+    {
+      fearGreedValue: input.fearGreedValue,
+      coinChanges: input.coinChanges,
+      weeklyBudgetRemainingUsd: input.weeklyBudgetRemainingUsd,
+      totalEquity: input.totalEquity,
+    },
+    { dcaFgThreshold: 25, dcaMax24hDropPct: 0.08, dcaBuyPct: 0.02, entryFilter: "off" },
+  );
   if (dca.shouldAccumulate && dca.symbol) {
     orders.push({
       kind: "dca",
