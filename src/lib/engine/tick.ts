@@ -263,11 +263,14 @@ export async function runTick(input: TickInput): Promise<TickResult> {
         qty: p.qty,
         entryPrice: p.entryPrice,
         stopPrice: p.stopPrice,
-        currentPrice,
+        // Live: csak a spot ismert → degenerált band (low=high=close).
+        low: currentPrice,
+        high: currentPrice,
+        close: currentPrice,
       });
       if (action.kind === "none") continue;
       const sellQty = p.qty * action.qtyFraction;
-      const trade = await executeCycleOrder("SELL", p.symbol, { qty: sellQty }, currentPrice);
+      const trade = await executeCycleOrder("SELL", p.symbol, { qty: sellQty }, action.triggerPrice);
       if (trade)
         cycleActions.push({
           kind: action.kind,
