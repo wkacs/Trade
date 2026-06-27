@@ -1,3 +1,4 @@
+import type { StrategyConfig } from "@/lib/strategy/config";
 import { evaluatePosition } from "@/lib/strategy/position-actions";
 import { evaluateDca } from "@/lib/strategy/fear-greedy";
 import { ratchetStop } from "@/lib/strategy/trailing-stop";
@@ -29,15 +30,19 @@ export interface ProfitCycleInput {
   coinChanges: { symbol: string; change24hPct: number }[];
   weeklyBudgetRemainingUsd: number;
   totalEquity: number;
-  stopLossPct: number;
+  /** Per-symbol ATR (a hívó számolja). atr módban a stop-távolsághoz; fixed módban ignorált. */
+  atrBySymbol: Record<string, number>;
+  /** Per-symbol trend-flag (close ≥ SMA). trend módban a DCA-jogosultsághoz; off módban ignorált. */
+  trendOkBySymbol: Record<string, boolean>;
 }
 
 /**
- * A kód-alapú profit-ciklus DÖNTÉS-része, tisztán (nincs IO/DB/Date.now).
- * Sorrend (a runTick tükre): trailing ratchet (close-alapú) → stop/TP → DCA.
- * A hívó hajtja végre az ordereket (cash/pozíció-mutáció) + perzisztálja a stopUpdate-eket.
+ * A kód-alapú profit-ciklus DÖNTÉS-része, tisztán (nincs IO/DB/Date.now). A stratégiát
+ * a `config` (StrategyConfig) vezérli. Sorrend (a runTick tükre): stop/TP az eredeti
+ * stoppal → trailing ratchet (mód szerint) → DCA (szűrővel).
+ * A hívó hajtja végre az ordereket + perzisztálja a stopUpdate-eket.
  */
-export function planProfitCycle(input: ProfitCycleInput): ProfitCyclePlan {
+export function planProfitCycle(input: ProfitCycleInput, config: StrategyConfig): ProfitCyclePlan {
   const orders: PlannedOrder[] = [];
   const stopUpdates: StopUpdate[] = [];
 
@@ -46,8 +51,6 @@ export function planProfitCycle(input: ProfitCycleInput): ProfitCyclePlan {
     if (!candle) continue;
 
     // 1) Stop/TP az EREDETI (előző gyertyából hozott) stoppal — NINCS look-ahead.
-    //    A ratchet (lent) csak a KÖVETKEZŐ gyertyára emeli a stopot, nem erre.
-    //    Élesben low=close=spot, így a két sorrend egybeesik (a tick-tesztek zöldek).
     const action = evaluatePosition(
       {
         positionId: p.id,
@@ -59,7 +62,7 @@ export function planProfitCycle(input: ProfitCycleInput): ProfitCyclePlan {
         high: candle.high,
         close: candle.close,
       },
-      { takeProfitPct: 0.15, takeProfitFraction: 0.5 },
+      { takeProfitPct: config.takeProfitPct, takeProfitFraction: config.takeProfitFraction },
     );
     if (action.kind !== "none") {
       orders.push({
@@ -72,20 +75,32 @@ export function planProfitCycle(input: ProfitCycleInput): ProfitCyclePlan {
       });
     }
 
-    // 2) Trailing ratchet a close-szal → a KÖVETKEZŐ gyertya stopja (perzisztálandó).
-    const newStop = ratchetStop(p.stopPrice, candle.close, input.stopLossPct);
+    // 2) Trailing ratchet → a KÖVETKEZŐ gyertya stopja. Mód szerint a stop-távolság:
+    //    atr → close − atrMult*ATR; fixed → close*(1−stopLossPct). Csak felfelé kúszik.
+    const atr = input.atrBySymbol[p.symbol] ?? 0;
+    const candidate =
+      config.stopMode === "atr" && atr > 0
+        ? candle.close - config.atrMult * atr
+        : candle.close * (1 - config.stopLossPct);
+    const newStop = ratchetStop(p.stopPrice, candidate, 0); // pct=0 → max(prevStop, candidate)
     if (newStop > p.stopPrice) stopUpdates.push({ positionId: p.id, newStop });
   }
 
-  // 3) Fear-greedy DCA.
+  // 3) Fear-greedy DCA (config + belépő-szűrő).
   const dca = evaluateDca(
     {
       fearGreedValue: input.fearGreedValue,
       coinChanges: input.coinChanges,
       weeklyBudgetRemainingUsd: input.weeklyBudgetRemainingUsd,
       totalEquity: input.totalEquity,
+      trendOkBySymbol: input.trendOkBySymbol,
     },
-    { dcaFgThreshold: 25, dcaMax24hDropPct: 0.08, dcaBuyPct: 0.02, entryFilter: "off" },
+    {
+      dcaFgThreshold: config.dcaFgThreshold,
+      dcaMax24hDropPct: config.dcaMax24hDropPct,
+      dcaBuyPct: config.dcaBuyPct,
+      entryFilter: config.entryFilter,
+    },
   );
   if (dca.shouldAccumulate && dca.symbol) {
     orders.push({
