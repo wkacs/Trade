@@ -352,16 +352,23 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     };
   }
 
-  // 6) Risk Manager — a limitek érvényesítése az AI döntése felett. A munka-állapot
-  //    (a profit-ciklus után frissített cash/pozíciók) + a maradék heti DCA-keret megy be,
-  //    így a heti limit az AI BUY-jára is érvényesül (spec §3.5).
-  const decision = applyRisk(rawDecision, {
-    cashUsd,
-    positions: workingPositions,
-    totalEquity: totalEquityNow,
-    dayPnlPct,
-    weeklyBudgetRemainingUsd: weeklyRemaining,
-  });
+  // 6) Risk Manager — a limitek érvényesítése az AI döntése felett (max pozíció %, max
+  //    egyidejű pozíció, napi circuit breaker). A heti DCA-keret már NEM gátolja az AI
+  //    BUY-t (csak a DCA-t a planner-ben) → nincs HOLD-fagyás. Lásd tournament spec §6.
+  const decision = applyRisk(
+    rawDecision,
+    {
+      cashUsd,
+      positions: workingPositions,
+      totalEquity: totalEquityNow,
+      dayPnlPct,
+    },
+    {
+      maxPositionPct: RISK_LIMITS.maxPositionPct,
+      maxConcurrentPositions: RISK_LIMITS.maxConcurrentPositions,
+      dailyLossCircuitBreakerPct: RISK_LIMITS.dailyLossCircuitBreakerPct,
+    },
+  );
 
   // 7) Execution — a broker a mód szerint cserélődik (spec §3.3):
   //    paper → PaperBroker (szimuláció), live → BinanceBroker (valódi Binance order).

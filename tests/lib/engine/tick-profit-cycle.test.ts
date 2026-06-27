@@ -133,7 +133,9 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     expect(result.cycleActions.find((a) => a.kind === "dca")).toBeUndefined();
   });
 
-  it("AI BUY-t a heti limit HOLD-ra váltja, ha a keret elfogyott", async () => {
+  it("a heti DCA-keret NEM gátolja az AI BUY-t (fagyás-fix)", async () => {
+    // A heti-keret kapu kikerült az AI-BUY ágból: az AI saját döntése átmegy akkor is,
+    // ha a DCA-keret elfogyott (csak a DCA-t fékezi a keret). Lásd tournament spec §6.
     (loadPortfolioState as any).mockResolvedValue(stateWith([], 1000));
     (remainingWeeklyBudget as any).mockResolvedValue(0);
     (collectAll as any).mockResolvedValue([price("BTC", 60000, 1), fearGreed(60)]);
@@ -147,9 +149,8 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     });
 
     const result = await runTick({ tickId: "2026-06-26-14", paperMode: true });
-    expect(result.decision.action).toBe("HOLD");
-    expect(result.decision.overridden).toBe(true);
-    expect(result.decision.overrideReason).toMatch(/heti/i);
+    expect(result.decision.action).toBe("BUY");
+    expect(result.decision.overridden).toBe(false);
   });
 
   it("nincs profit-ciklus akció, ha nincs pozíció és F&G magas", async () => {
