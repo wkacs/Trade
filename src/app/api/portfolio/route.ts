@@ -31,7 +31,10 @@ export async function GET() {
     });
     // „Bejött volna?" összesítő — best-effort (hiba/oszlop hiánya esetén üres summary).
     const performance = await getPerformanceSummary();
-    return NextResponse.json({ portfolio, positions: openPositions, recentTrades, performance });
+    return NextResponse.json(
+      { portfolio, positions: openPositions, recentTrades, performance },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (e) {
     console.error("[api/portfolio]", e);
     return NextResponse.json(

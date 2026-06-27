@@ -21,7 +21,7 @@ export async function GET(req: Request) {
       limit: Math.min(limit, 200),
       orderBy: desc(schema.decisions.ts),
     });
-    return NextResponse.json({ decisions: rows });
+    return NextResponse.json({ decisions: rows }, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     console.error("[api/decisions]", e);
     return NextResponse.json({ decisions: [], error: "DB hiba" }, { status: 500 });

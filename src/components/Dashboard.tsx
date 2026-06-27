@@ -5,40 +5,52 @@ import { PortfolioPanel } from "./PortfolioPanel";
 import { DecisionsTimeline } from "./DecisionsTimeline";
 import { BacktestPanel } from "./BacktestPanel";
 import { AdminPanel } from "./AdminPanel";
-import model from "@/lib/ml/model.json";
+import { TickerStrip } from "./TickerStrip";
+import { RiskPanel, type RiskConfig } from "./RiskPanel";
+import { TradeBlotter, type BlotterTrade } from "./TradeBlotter";
+import { MarketPanel, type MlSignalView, type PerfView } from "./MarketPanel";
 
 interface PortfolioApi {
   portfolio: { cashUsd: number; initialCapitalUsd: number } | null;
-  positions: { symbol: string; qty: number; entryPrice: number }[];
-  recentTrades: unknown[];
-  performance?: {
-    evaluated: number;
-    actionable: number;
-    hitRate: number | null;
-    avgHypotheticalPnlPct: number;
-  };
+  positions: { symbol: string; qty: number; entryPrice: number; stopPrice?: number }[];
+  recentTrades: BlotterTrade[];
+  performance?: PerfView;
   note?: string;
 }
 
-const fmtUsd = (n: number) => `$${n.toLocaleString("hu-HU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+interface MarketApi {
+  prices: Record<string, { usd: number; change24hPct: number }>;
+  fearGreed: { value: number; classification: string } | null;
+  signals: MlSignalView[];
+  weeklyBudgetRemainingUsd: number | null;
+  mlAuc: number | null;
+  config: RiskConfig | null;
+}
+
+const fmtUsd = (n: number) =>
+  `$${n.toLocaleString("hu-HU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 /**
- * A fő konzol — egyetlen oldal, „műszerfal / döntés-napló". A bot lényege a látható
- * AI-érvelés, ezért a döntés-napló a főszereplő. Lásd spec §3.5.
+ * A fő konzol — sűrű „trading terminál": sok élő adat az API-ból (árak, F&G, ML-jel,
+ * pozíciók élő P&L-lel, döntés-napló teljes érveléssel, kockázati limitek, trade-napló).
  */
 export function Dashboard() {
   const [data, setData] = useState<PortfolioApi | null>(null);
+  const [market, setMarket] = useState<MarketApi | null>(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(() => {
-    fetch("/api/portfolio")
+    fetch("/api/portfolio", { cache: "no-store" })
       .then((r) => r.json())
       .then(setData)
       .catch(() => setData(null))
       .finally(() => setLoading(false));
+    fetch("/api/market", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((m) => (m.error ? null : setMarket(m)))
+      .catch(() => setMarket(null));
   }, []);
 
-  // Élő érzet: 60 mp-enként frissít (a tick óránként fut, de így sosem áll).
   useEffect(() => {
     load();
     const id = setInterval(load, 60_000);
@@ -48,30 +60,44 @@ export function Dashboard() {
   const initial = data?.portfolio?.initialCapitalUsd ?? 0;
   const cashUsd = data?.portfolio?.cashUsd ?? 0;
   const positions = data?.positions ?? [];
-  const positionsValue = positions.reduce((s, p) => s + p.qty * p.entryPrice, 0);
+  const prices = market?.prices;
+  // Equity élő áron (ha van market), különben belépési áron.
+  const positionsValue = positions.reduce(
+    (s, p) => s + (prices?.[p.symbol]?.usd ?? p.entryPrice) * p.qty,
+    0,
+  );
   const equity = cashUsd + positionsValue;
   const pnlPct = initial > 0 ? (equity / initial - 1) * 100 : 0;
   const perf = data?.performance;
   const hasDb = !!data?.portfolio;
-  const auc = (model as { metrics?: { testAuc?: number } }).metrics?.testAuc ?? 0;
+  const fg = market?.fearGreed;
 
   return (
     <div className="min-h-screen">
-      {/* ── Státusz-sáv: a rendszer szívverése ── */}
-      <header className="sticky top-0 z-10 border-b border-line bg-bg/80 backdrop-blur-md">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-3">
+      {/* ── Command bar ── */}
+      <header className="sticky top-0 z-10 border-b border-line bg-bg/85 backdrop-blur-md">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-3">
           <div className="flex items-center gap-3">
             <span className="pulse-dot h-2 w-2 rounded-full bg-accent" aria-hidden />
             <span className="font-display text-sm font-bold tracking-[0.18em] text-ink">
-              AI&nbsp;KERESKEDŐ
+              AI&nbsp;▸&nbsp;TRADER
             </span>
             <span className="rounded border border-accent/30 bg-accent/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest text-accentBright">
               {hasDb ? "paper" : "offline"}
             </span>
           </div>
-          <div className="hidden items-center gap-5 font-mono text-[11px] text-faint sm:flex">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-faint">
+            {fg && (
+              <span>
+                F&amp;G{" "}
+                <span className={fg.value <= 25 ? "text-down" : fg.value >= 75 ? "text-up" : "text-dim"}>
+                  {fg.value} · {fg.classification}
+                </span>
+              </span>
+            )}
+            <span className="text-line">/</span>
             <span>
-              ML·AUC <span className="text-dim">{auc.toFixed(3)}</span>
+              ML·AUC <span className="text-dim">{market?.mlAuc?.toFixed(3) ?? "—"}</span>
             </span>
             <span className="text-line">/</span>
             <span>
@@ -83,37 +109,57 @@ export function Dashboard() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl space-y-5 px-5 py-7">
-        {/* ── Műszer-readout: equity + P&L + találati arány ── */}
-        <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line md:grid-cols-4">
+      <main className="mx-auto max-w-7xl space-y-4 px-5 py-6">
+        {/* ── Ticker ── */}
+        {prices && <TickerStrip prices={prices} />}
+
+        {/* ── KPI readout ── */}
+        <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-3 lg:grid-cols-6">
           <Gauge label="Equity" value={hasDb ? fmtUsd(equity) : "—"} accent />
           <Gauge
-            label="P&L (kezdőtőke)"
+            label="P&L (kezdő)"
             value={hasDb ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "—"}
             tone={pnlPct >= 0 ? "up" : "down"}
             muted={!hasDb || Math.abs(pnlPct) < 0.005}
           />
+          <Gauge label="Készpénz" value={hasDb ? fmtUsd(cashUsd) : "—"} />
+          <Gauge label="Pozíciók" value={hasDb ? String(positions.length) : "—"} />
           <Gauge
             label="Találati arány"
             value={perf?.hitRate == null ? "—" : `${Math.round(perf.hitRate * 100)}%`}
-            sub={perf ? `${perf.actionable} kötés-szándék` : undefined}
+            sub={perf ? `${perf.actionable} szándék` : undefined}
           />
           <Gauge
             label="Átlag hipo. P&L"
-            value={perf && perf.actionable > 0 ? `${perf.avgHypotheticalPnlPct >= 0 ? "+" : ""}${perf.avgHypotheticalPnlPct.toFixed(2)}%` : "—"}
+            value={
+              perf && perf.actionable > 0
+                ? `${perf.avgHypotheticalPnlPct >= 0 ? "+" : ""}${perf.avgHypotheticalPnlPct.toFixed(2)}%`
+                : "—"
+            }
             tone={perf && perf.avgHypotheticalPnlPct >= 0 ? "up" : "down"}
             muted={!perf || perf.actionable === 0}
           />
         </section>
 
-        {/* ── Portfólió (készpénz + pozíciók) ── */}
-        <PortfolioPanel cashUsd={cashUsd} positions={positions} hasDb={hasDb} />
+        {/* ── Fő rács: döntés-konzol (széles) + pozíciók/kockázat ── */}
+        <div className="grid gap-4 lg:grid-cols-3">
+          <div className="lg:col-span-2">
+            <DecisionsTimeline />
+          </div>
+          <div className="space-y-4">
+            <PortfolioPanel cashUsd={cashUsd} positions={positions} hasDb={hasDb} prices={prices} />
+            <RiskPanel config={market?.config ?? null} weeklyBudgetRemainingUsd={market?.weeklyBudgetRemainingUsd ?? null} />
+          </div>
+        </div>
 
-        {/* ── A főszereplő: a döntés-napló ── */}
-        <DecisionsTimeline />
+        {/* ── Trade-napló + ML-jel/teljesítmény ── */}
+        <div className="grid gap-4 lg:grid-cols-2">
+          <TradeBlotter trades={data?.recentTrades ?? []} />
+          <MarketPanel signals={market?.signals ?? []} mlAuc={market?.mlAuc ?? null} performance={perf} />
+        </div>
 
-        {/* ── Másodlagos vezérlők ── */}
-        <div className="grid gap-5 lg:grid-cols-2">
+        {/* ── Backtest + admin ── */}
+        <div className="grid gap-4 lg:grid-cols-2">
           <BacktestPanel />
           <AdminPanel />
         </div>
@@ -151,9 +197,9 @@ function Gauge({
           ? "text-down"
           : "text-ink";
   return (
-    <div className="bg-panel px-5 py-4">
+    <div className="bg-panel px-4 py-3.5">
       <div className="font-mono text-[10px] uppercase tracking-[0.15em] text-faint">{label}</div>
-      <div className={`mt-1.5 font-mono text-2xl tabular-nums ${color}`}>{value}</div>
+      <div className={`mt-1 font-mono text-xl tabular-nums ${color}`}>{value}</div>
       {sub && <div className="mt-0.5 font-mono text-[10px] text-faint">{sub}</div>}
     </div>
   );
