@@ -53,4 +53,18 @@ describe("runBacktest", () => {
     expect(result.metrics.totalReturnPct).toBe(0);
     expect(result.equityCurve).toHaveLength(0);
   });
+
+  it("momentum BE: a breakout-történeten piacra lép; OFF mellett nem (F&G semleges)", () => {
+    // 55 frame, szigorúan emelkedő close → minden frame új csúcs; F&G 50 → nincs DCA.
+    const history: HistoryFrame[] = Array.from({ length: 55 }, (_, i) =>
+      frame(i, { o: 100 + i, h: 100 + i, l: 100 + i, c: 100 + i }, 50),
+    );
+    const off = runBacktest(history, cfg, { ...DEFAULT_STRATEGY, momentumEnabled: false });
+    const on = runBacktest(history, cfg, { ...DEFAULT_STRATEGY, momentumEnabled: true });
+    // OFF: se DCA (F&G 50 > 20), se momentum → soha nem lép piacra.
+    expect(off.metrics.exposurePct).toBe(0);
+    // ON: a breakout (lookback 48) után nyit pozíciót → van kitettség és pozitív hozam.
+    expect(on.metrics.exposurePct).toBeGreaterThan(0);
+    expect(on.metrics.totalReturnPct).toBeGreaterThan(0);
+  });
 });

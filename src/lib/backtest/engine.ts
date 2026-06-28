@@ -10,6 +10,7 @@ import { simulateFill } from "./fill-sim";
 import { computeMetrics } from "./metrics";
 import { computeAtr } from "@/lib/strategy/atr";
 import { passesTrendFilter } from "@/lib/strategy/entry-filter";
+import { passesMomentum } from "@/lib/strategy/momentum";
 import { DEFAULT_STRATEGY, type StrategyConfig } from "@/lib/strategy/config";
 
 interface SimPosition {
@@ -64,6 +65,7 @@ export function runBacktest(
     // Per-symbol ATR + trend-flag a gördülő bufferből.
     const atrBySymbol: Record<string, number> = {};
     const trendOkBySymbol: Record<string, boolean> = {};
+    const momentumOkBySymbol: Record<string, boolean> = {};
     for (const sym of config.symbols) {
       const k = frame.candles[sym];
       if (!k) continue;
@@ -71,10 +73,9 @@ export function runBacktest(
       buf.push({ high: k.high, low: k.low, close: k.close });
       if (buf.length > 300) buf.shift();
       atrBySymbol[sym] = computeAtr(buf, strategy.atrPeriod);
-      trendOkBySymbol[sym] = passesTrendFilter(
-        buf.map((b) => b.close),
-        strategy.entryFilterSmaPeriod,
-      );
+      const closes = buf.map((b) => b.close);
+      trendOkBySymbol[sym] = passesTrendFilter(closes, strategy.entryFilterSmaPeriod);
+      momentumOkBySymbol[sym] = passesMomentum(closes, strategy.momentumSmaPeriod, strategy.momentumLookback);
     }
 
     // Heti DCA-keret: dcaWeeklyBudgetPct * equity − az utolsó 7 nap BUY-jai.
@@ -114,6 +115,7 @@ export function runBacktest(
         totalEquity,
         atrBySymbol,
         trendOkBySymbol,
+        momentumOkBySymbol,
       },
       strategy,
     );
