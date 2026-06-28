@@ -5,6 +5,6 @@ CREATE TABLE IF NOT EXISTS "tick_runs" (
 	"process" jsonb NOT NULL
 );
 --> statement-breakpoint
-ALTER TABLE "decisions" ADD COLUMN "ref" jsonb;--> statement-breakpoint
-ALTER TABLE "decisions" ADD COLUMN "outcome" jsonb;--> statement-breakpoint
-ALTER TABLE "trades" ADD COLUMN "origin" varchar(12);
+ALTER TABLE "decisions" ADD COLUMN IF NOT EXISTS "ref" jsonb;--> statement-breakpoint
+ALTER TABLE "decisions" ADD COLUMN IF NOT EXISTS "outcome" jsonb;--> statement-breakpoint
+ALTER TABLE "trades" ADD COLUMN IF NOT EXISTS "origin" varchar(12);
