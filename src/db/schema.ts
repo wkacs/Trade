@@ -55,6 +55,15 @@ export const trades = pgTable("trades", {
   feeUsd: real("fee_usd").notNull(),
   mode: varchar("mode", { length: 8 }).notNull(),
   executedAt: timestamp("executed_at", { withTimezone: true }).defaultNow().notNull(),
+  origin: varchar("origin", { length: 12 }), // dca|stop-loss|take-profit|ai|manual (nullable: régi sorok)
+});
+
+/** Tickenkénti teljes folyamat-napló (átláthatóság): inputok + lánc + akciók. */
+export const tickRuns = pgTable("tick_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  ts: timestamp("ts", { withTimezone: true }).defaultNow().notNull(),
+  tickId: varchar("tick_id", { length: 16 }).notNull(), // YYYY-MM-DD-HH
+  process: jsonb("process").notNull(), // TickProcess (lásd src/lib/engine/tick-process.ts)
 });
 
 /** AI döntések + érvelés (a rendszer szíve). */
