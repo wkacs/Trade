@@ -35,8 +35,10 @@ export interface CycleAction {
   kind: "stop-loss" | "take-profit" | "dca";
   side: "BUY" | "SELL";
   symbol: string;
-  amountUsd: number;
-  qty: number;
+  /** SELL-nél a végrehajtás után töltődik (terv-állapotban hiányozhat). */
+  amountUsd?: number;
+  /** BUY-nál a végrehajtás után töltődik (terv-állapotban hiányozhat). */
+  qty?: number;
 }
 
 export interface TickResult {
