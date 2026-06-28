@@ -25,10 +25,13 @@ export const RISK_LIMITS: RiskLimits = {
  * Lásd: docs/superpowers/specs/2026-06-26-profit-cycle-design.md §3.7.
  */
 export const PROFIT_CYCLE = {
-  /** Take-profit: ha a pozíció ennyit ért el (+15%), eladja a felét. */
-  takeProfitPct: 0.15,
-  /** DCA: Fear & Greed index ezen küszöb (≤25) alatt halmoz. */
-  dcaFgThreshold: 25,
+  /**
+   * Take-profit: ha a pozíció ennyit ért el (+10%), eladja a teljes pozíciót.
+   * Hangolva 2026-06-28 (Approach A robust tournament): 15%/fél → 10%/teljes.
+   */
+  takeProfitPct: 0.1,
+  /** DCA: Fear & Greed index ezen küszöb (≤20) alatt halmoz. Hangolva: 25 → 20. */
+  dcaFgThreshold: 20,
   /** DCA: heti költési keret a tőke hányadaként (5%). */
   dcaWeeklyBudgetPct: 0.05,
   /** DCA: egy vétel mérete a tőke hányadaként (2%). */

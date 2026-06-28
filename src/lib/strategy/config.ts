@@ -17,19 +17,26 @@ export interface StrategyConfig {
   dailyLossCircuitBreakerPct: number;
 }
 
-/** A MAI viselkedés (parity) — a live ezt használja, a tournament ettől tér el. */
+/**
+ * A live stratégia — a tick ezt használja, a tournament ettől tér el.
+ * Hangolva 2026-06-28 (Approach A robust tournament #1 nyertese, IS Sharpe 1.93 /
+ * OOS 2.60, mindkét ablakban pozitív): a korábbi „mai" parity-defaulthoz képest
+ * a trend-szűrő BE, a take-profit 10%/teljes (volt 15%/fél), a DCA fear-kapu FG20
+ * (volt 25). A stop, a DCA-méret és a heti keret változatlan (nincs kockázat-növelés).
+ * Lásd: docs/superpowers/specs/2026-06-28-strategy-tuning-design.md.
+ */
 export const DEFAULT_STRATEGY: StrategyConfig = {
   stopMode: "fixed",
   stopLossPct: 0.05,
   atrMult: 2,
   atrPeriod: 14,
-  takeProfitPct: 0.15,
-  takeProfitFraction: 0.5,
-  dcaFgThreshold: 25,
+  takeProfitPct: 0.1,
+  takeProfitFraction: 1.0,
+  dcaFgThreshold: 20,
   dcaBuyPct: 0.02,
   dcaWeeklyBudgetPct: 0.05,
   dcaMax24hDropPct: 0.08,
-  entryFilter: "off",
+  entryFilter: "trend",
   entryFilterSmaPeriod: 24,
   maxPositionPct: 0.2,
   maxConcurrentPositions: 3,

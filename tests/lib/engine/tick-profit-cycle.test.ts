@@ -88,11 +88,11 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     expect(sells.length).toBe(1);
   });
 
-  it("TAKE-PROFIT: +15% → a pozíció FELÉNEK SELL-je", async () => {
+  it("TAKE-PROFIT: a +10% küszöb felett a TELJES pozíció SELL-je (hangolt: TP 10%/teljes)", async () => {
     (loadPortfolioState as any).mockResolvedValue(
       stateWith([{ id: "p1", symbol: "ETH", qty: 0.1, entryPrice: 2000, stopPrice: 1900, valueUsd: 200 }]),
     );
-    // ETH 2300 = +15%, a stop felett; F&G magas → nincs DCA
+    // ETH 2300 = +15%, a +10% take-profit küszöb felett és a stop felett; F&G magas → nincs DCA
     (collectAll as any).mockResolvedValue([price("ETH", 2300, 15), fearGreed(60)]);
 
     const result = await runTick({ tickId: "2026-06-26-11", paperMode: true });
@@ -100,8 +100,8 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     const tp = result.cycleActions.find((a) => a.kind === "take-profit");
     expect(tp).toBeTruthy();
     expect(tp).toMatchObject({ side: "SELL", symbol: "ETH" });
-    // fele: 0.05
-    expect(tp!.qty).toBeCloseTo(0.05, 6);
+    // takeProfitFraction 1.0 → teljes pozíció: 0.1
+    expect(tp!.qty).toBeCloseTo(0.1, 6);
   });
 
   it("DCA: F&G ≤25 + stabil ár + van keret → BUY 2% tőke a legolcsóbb coinra", async () => {

@@ -16,9 +16,16 @@ describe("DEFAULT_STRATEGY", () => {
     expect(DEFAULT_STRATEGY.dcaBuyPct).toBe(PROFIT_CYCLE.dcaBuyPct);
     expect(DEFAULT_STRATEGY.dcaMax24hDropPct).toBe(PROFIT_CYCLE.dcaMax24hDropPct);
   });
-  it("alapból a mai módok: fixed stop, szűrő off, fél take-profit", () => {
+  it("alapból a hangolt módok: fixed stop, trend-szűrő BE, teljes take-profit", () => {
     expect(DEFAULT_STRATEGY.stopMode).toBe("fixed");
-    expect(DEFAULT_STRATEGY.entryFilter).toBe("off");
-    expect(DEFAULT_STRATEGY.takeProfitFraction).toBe(0.5);
+    expect(DEFAULT_STRATEGY.entryFilter).toBe("trend");
+    expect(DEFAULT_STRATEGY.takeProfitFraction).toBe(1.0);
+  });
+
+  it("a hangolt live stratégia: trend-szűrő BE + a hangolt TP/FG (Approach A)", () => {
+    expect(DEFAULT_STRATEGY.entryFilter).toBe("trend");
+    expect(DEFAULT_STRATEGY.takeProfitPct).toBe(0.1); // a Task 2 nyertese szerint
+    expect(DEFAULT_STRATEGY.takeProfitFraction).toBe(1.0);
+    expect(DEFAULT_STRATEGY.dcaFgThreshold).toBe(20);
   });
 });
