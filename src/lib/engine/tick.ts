@@ -32,7 +32,7 @@ export interface TickInput {
 
 /** Egy kód-alapú profit-ciklus akció (stop-loss / take-profit / DCA). */
 export interface CycleAction {
-  kind: "stop-loss" | "take-profit" | "dca";
+  kind: "stop-loss" | "take-profit" | "dca" | "momentum";
   side: "BUY" | "SELL";
   symbol: string;
   /** SELL-nél a végrehajtás után töltődik (terv-állapotban hiányozhat). */
@@ -195,7 +195,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     symbol: string,
     opts: { qty?: number; amountUsd?: number },
     price: number,
-    origin: "dca" | "stop-loss" | "take-profit",
+    origin: "dca" | "stop-loss" | "take-profit" | "momentum",
   ): Promise<Trade | null> => {
     let trade: Trade | null = null;
     if (input.paperMode) {

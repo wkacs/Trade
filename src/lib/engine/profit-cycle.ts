@@ -1,10 +1,11 @@
 import type { StrategyConfig } from "@/lib/strategy/config";
 import { evaluatePosition } from "@/lib/strategy/position-actions";
 import { evaluateDca } from "@/lib/strategy/fear-greedy";
+import { evaluateMomentum } from "@/lib/strategy/momentum";
 import { ratchetStop } from "@/lib/strategy/trailing-stop";
 
 export interface PlannedOrder {
-  kind: "stop-loss" | "take-profit" | "dca";
+  kind: "stop-loss" | "take-profit" | "dca" | "momentum";
   side: "BUY" | "SELL";
   symbol: string;
   qty?: number; // SELL (stop/TP)
@@ -34,6 +35,8 @@ export interface ProfitCycleInput {
   atrBySymbol: Record<string, number>;
   /** Per-symbol trend-flag (close ≥ SMA). trend módban a DCA-jogosultsághoz; off módban ignorált. */
   trendOkBySymbol: Record<string, boolean>;
+  /** Per-symbol momentum-flag (breakout a trend fölött). A hívó számolja; momentumEnabled ki → ignorált. */
+  momentumOkBySymbol?: Record<string, boolean>;
 }
 
 /**
@@ -100,6 +103,10 @@ export function planProfitCycle(input: ProfitCycleInput, config: StrategyConfig)
       dcaMax24hDropPct: config.dcaMax24hDropPct,
       dcaBuyPct: config.dcaBuyPct,
       entryFilter: config.entryFilter,
+      riskPerTradePct: config.riskPerTradePct,
+      stopLossPct: config.stopLossPct,
+      stopMode: config.stopMode,
+      maxPositionPct: config.maxPositionPct,
     },
   );
   if (dca.shouldAccumulate && dca.symbol) {
@@ -110,6 +117,30 @@ export function planProfitCycle(input: ProfitCycleInput, config: StrategyConfig)
       amountUsd: dca.amountUsd,
       reason: dca.reason,
     });
+  }
+
+  // 4) Momentum-belépő (vesz az erőben). A concurrent-cap CSAK az új momentum-belépőre
+  //    vonatkozik (a DCA viselkedése változatlan, hogy a backteszt-baseline ne mozduljon).
+  const mom = evaluateMomentum(
+    {
+      momentumOkBySymbol: input.momentumOkBySymbol ?? {},
+      coinChanges: input.coinChanges,
+      heldSymbols: input.positions.map((p) => p.symbol),
+      openPositionCount: input.positions.length,
+      totalEquity: input.totalEquity,
+    },
+    {
+      momentumEnabled: config.momentumEnabled,
+      momentumBuyPct: config.momentumBuyPct,
+      maxConcurrentPositions: config.maxConcurrentPositions,
+      riskPerTradePct: config.riskPerTradePct,
+      stopLossPct: config.stopLossPct,
+      stopMode: config.stopMode,
+      maxPositionPct: config.maxPositionPct,
+    },
+  );
+  if (mom.shouldEnter && mom.symbol) {
+    orders.push({ kind: "momentum", side: "BUY", symbol: mom.symbol, amountUsd: mom.amountUsd, reason: mom.reason });
   }
 
   return { orders, stopUpdates };

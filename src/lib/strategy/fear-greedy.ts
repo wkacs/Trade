@@ -1,11 +1,14 @@
 /**
  * Fear-greedy DCA halmozási logika. Tiszta függvény — nincs DB, nincs hálózat.
+ * A vétel mérete a sizeEntry-n megy (kockázat-alapú, ha bekapcsolt; egyébként flat).
  * Lásd: docs/superpowers/specs/2026-06-27-strategy-tournament-design.md §5–§6.
  *
  * Megjegyzés a skálához: a change24hPct SZÁZALÉKPONTBAN érkezik (CoinGecko
  * usd_24h_change, pl. -3 = -3%), ezért a dcaMax24hDropPct (0.08) törtet ×100-zal
  * hasonlítjuk (-8 küszöb).
  */
+
+import { sizeEntry } from "@/lib/strategy/sizing";
 
 export interface DcaSignal {
   shouldAccumulate: boolean;
@@ -28,6 +31,11 @@ export interface DcaParams {
   dcaMax24hDropPct: number;
   dcaBuyPct: number;
   entryFilter: "off" | "trend";
+  // Opcionális kockázat-alapú méretezés (hiányzó → flat dcaBuyPct, identikus a régivel).
+  riskPerTradePct?: number;
+  stopLossPct?: number;
+  stopMode?: "fixed" | "atr";
+  maxPositionPct?: number;
 }
 
 const noAccumulate = (reason: string): DcaSignal => ({
@@ -70,7 +78,13 @@ export function evaluateDca(ctx: DcaContext, params: DcaParams): DcaSignal {
   return {
     shouldAccumulate: true,
     symbol: pick.symbol,
-    amountUsd: ctx.totalEquity * params.dcaBuyPct,
+    amountUsd: sizeEntry(ctx.totalEquity, {
+      riskPerTradePct: params.riskPerTradePct ?? 0,
+      stopLossPct: params.stopLossPct ?? 0.05,
+      stopMode: params.stopMode ?? "fixed",
+      maxPositionPct: params.maxPositionPct ?? 0.2,
+      flatPct: params.dcaBuyPct,
+    }),
     reason: `Fear & Greed ${ctx.fearGreedValue} ≤ ${params.dcaFgThreshold} (extrém félelem) → ${pick.symbol} halmozása (${pick.change24hPct.toFixed(1)}% 24h).`,
   };
 }

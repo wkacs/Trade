@@ -137,7 +137,8 @@ export function runBacktest(
         const fill = simulateFill(
           {
             side: "SELL",
-            kind: o.kind === "dca" ? "market" : o.kind,
+            // momentum/dca = market-szerű BUY-kind; a SELL-ágba sosem jut, de a típus kedvéért market.
+            kind: o.kind === "dca" || o.kind === "momentum" ? "market" : o.kind,
             qty: Math.min(o.qty ?? 0, pos.qty),
             triggerPrice: o.triggerPrice,
             candle: k,

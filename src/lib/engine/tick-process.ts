@@ -1,7 +1,7 @@
 import type { CycleAction } from "@/lib/engine/tick";
 
 /** Egy trade hajtóereje. */
-export type TradeOrigin = "dca" | "stop-loss" | "take-profit" | "ai" | "manual";
+export type TradeOrigin = "dca" | "stop-loss" | "take-profit" | "momentum" | "ai" | "manual";
 
 /** A tickenkénti teljes folyamat pillanatképe (a tick_runs.process JSON alakja). */
 export interface TickProcess {
@@ -11,7 +11,7 @@ export interface TickProcess {
     fearGreed: { value: number; classification: string } | null;
     mlSignals: { symbol: string; direction1h: string; confidence: number }[];
   };
-  cycleActions: { kind: "stop-loss" | "take-profit" | "dca"; side: "BUY" | "SELL"; symbol: string; qty?: number; amountUsd?: number }[];
+  cycleActions: { kind: "stop-loss" | "take-profit" | "dca" | "momentum"; side: "BUY" | "SELL"; symbol: string; qty?: number; amountUsd?: number }[];
   phase1: { shouldDecide: boolean; summary: string };
   phase2: { action: "BUY" | "SELL" | "HOLD"; symbol: string | null; amountPct: number; confidence: number; reasoning: string } | null;
   decision: { action: "BUY" | "SELL" | "HOLD"; symbol: string | null; overridden: boolean; overrideReason: string | null };

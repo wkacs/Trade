@@ -92,4 +92,39 @@ describe("planProfitCycle", () => {
     );
     expect(plan.orders.find((o) => o.kind === "dca")).toBeUndefined();
   });
+
+  it("momentum BE: ad egy momentum BUY-ordert a legerősebb breakout-coinra", () => {
+    const plan = planProfitCycle(
+      {
+        ...baseInput,
+        positions: [],
+        candles: {},
+        fearGreedValue: 50,
+        coinChanges: [
+          { symbol: "BTC", change24hPct: 2 },
+          { symbol: "ETH", change24hPct: 7 },
+        ],
+        momentumOkBySymbol: { BTC: true, ETH: true },
+      },
+      { ...DEFAULT_STRATEGY, momentumEnabled: true, dcaFgThreshold: 0 }, // DCA ki
+    );
+    const mom = plan.orders.find((o) => o.kind === "momentum");
+    expect(mom).toBeDefined();
+    expect(mom?.symbol).toBe("ETH");
+    expect(mom?.side).toBe("BUY");
+  });
+
+  it("momentum KI (default): nincs momentum-order", () => {
+    const plan = planProfitCycle(
+      {
+        ...baseInput,
+        positions: [],
+        candles: {},
+        coinChanges: [{ symbol: "BTC", change24hPct: 7 }],
+        momentumOkBySymbol: { BTC: true },
+      },
+      DEFAULT_STRATEGY,
+    );
+    expect(plan.orders.find((o) => o.kind === "momentum")).toBeUndefined();
+  });
 });
