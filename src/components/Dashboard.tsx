@@ -10,6 +10,7 @@ import { RiskPanel, type RiskConfig } from "./RiskPanel";
 import { StrategyPanel } from "./StrategyPanel";
 import { TradeBlotter, type BlotterTrade } from "./TradeBlotter";
 import { MarketPanel, type MlSignalView, type PerfView } from "./MarketPanel";
+import { TickInspector } from "./TickInspector";
 
 interface PortfolioApi {
   portfolio: { cashUsd: number; initialCapitalUsd: number } | null;
@@ -159,6 +160,8 @@ export function Dashboard() {
           <TradeBlotter trades={data?.recentTrades ?? []} />
           <MarketPanel signals={market?.signals ?? []} mlAuc={market?.mlAuc ?? null} performance={perf} />
         </div>
+
+        <TickInspector />
 
         {/* ── Backtest + admin ── */}
         <div className="grid gap-4 lg:grid-cols-2">
