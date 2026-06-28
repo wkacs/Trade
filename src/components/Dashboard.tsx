@@ -11,6 +11,7 @@ import { StrategyPanel } from "./StrategyPanel";
 import { TradeBlotter, type BlotterTrade } from "./TradeBlotter";
 import { MarketPanel, type MlSignalView, type PerfView } from "./MarketPanel";
 import { TickInspector } from "./TickInspector";
+import { AnalyticsPanel } from "./AnalyticsPanel";
 
 interface PortfolioApi {
   portfolio: { cashUsd: number; initialCapitalUsd: number } | null;
@@ -162,6 +163,9 @@ export function Dashboard() {
         </div>
 
         <TickInspector />
+
+        {/* ── Realized teljesítmény-analitika ── */}
+        <AnalyticsPanel />
 
         {/* ── Backtest + admin ── */}
         <div className="grid gap-4 lg:grid-cols-2">
