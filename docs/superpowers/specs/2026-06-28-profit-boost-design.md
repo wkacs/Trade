@@ -189,6 +189,32 @@ Ha egy emelő nem veri a kaput → **nem szállítjuk** (pontosan mint a scalper
 - A live bot a push után a bővített stratégiával tickel (verifikálva a prod API-n + a `tick_runs` naplóban — egyúttal a 2026-06-28-i process-transparency feature **első éles verifikációja** is).
 - Dokumentált paper-mérési ablak a realized vs. backteszt összevetésére.
 
+## 10. Backteszt-kapu eredménye (2026-06-28) — ADOPTÁLVA: SEMMI
+
+A Spec 1 implementálva (8 task, TDD, 171 teszt zöld, tsc 0, build zöld). A kapu-mérés a teljes 10-lapos historyn (BTC/ETH/SOL, walk-forward 70/30, díj 0,1% + 5bps):
+
+| Variáns | IS | OOS | Verdikt |
+|---|---|---|---|
+| **baseline (default)** | +0.52% / Sh 0.58 | **+1.83% / Sh 2.75 / maxDD 0.58%** | referencia (mindkét ablak +) |
+| momentum lb48 | −0.85% / Sh −0.54 | −1.25% / Sh −1.72 | ❌ mindkét ablak NEGATÍV (142t, whipsaw) |
+| momentum lb24 | −0.67% | +0.04% / Sh 0.06 | ❌ IS negatív, OOS << default |
+| momentum + risk1% | −8.45% / maxDD 20.7% | −13.25% / maxDD 16.3% | ❌❌ katasztrófa |
+| DCA risk1% | +5.40% / Sh 1.59 | +1.48% / Sh 0.77 / maxDD 2.27% | ❌ OOS Sharpe+ret rosszabb, maxDD romlik |
+| DCA risk0.5% | +2.69% | +0.75% / Sh 0.77 | ❌ OOS rosszabb |
+
+**Érme-kuráció (coin-screen, egyéni):** kapun túl DOGE/XRP/BTC/ETH (Sharpe ≥ 1); SOL egyénileg bukik (−0.13). DE a **kombinált** univerzum-teszt:
+
+| Univerzum | IS | OOS |
+|---|---|---|
+| **BTC,ETH,SOL (baseline)** | **+0.52%** | +1.83% / Sh 2.75 |
+| DOGE,XRP,BTC,ETH | −0.59% (neg) | +1.80% / Sh 2.76 |
+| +DOGE,XRP (5-coin) | −0.12% (neg) | +1.56% / Sh 2.36 |
+| BTC,ETH (SOL nélkül) | −0.25% (neg) | +1.90% / Sh 2.76 |
+
+A baseline BTC/ETH/SOL az **EGYETLEN** univerzum, ahol **mindkét ablak pozitív**; minden alternatíva negatív IS-t ad, és az OOS sem érdemben jobb.
+
+**Döntés (bizonyíték-alapú):** egyik emelő sem veri a kaput → **a `DEFAULT_STRATEGY` és `COIN_UNIVERSE` változatlan** (momentum OFF, risk 0, BTC/ETH/SOL). A momentum-belépő pénzt veszít (csúcson vásárol, whipsaw), a risk-sizing overfittel + növeli a drawdownt, a türelmes 3-coin DCA marad a legjobb. **A megépített gépezet (momentum, sizing, coin-screen) a helyén marad, alapból kikapcsolva** — backteszt-validált, jövőbeli használatra kész, de aktiválva semmi. (Ugyanaz a mintázat, mint a scalpernél: mérünk, nem tippelünk; a kapu megvédett egy rossz változtatástól.)
+
 ---
 
 # Spec 2 — Always-on worker + gyors exit-sáv
