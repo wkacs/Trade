@@ -8,6 +8,7 @@ import { predict } from "@/lib/ml/predictor";
 import { loadPortfolioState } from "@/lib/portfolio/accounting";
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { COIN_UNIVERSE, RISK_LIMITS, PROFIT_CYCLE } from "@/lib/config";
+import { DEFAULT_STRATEGY } from "@/lib/strategy/config";
 import model from "@/lib/ml/model.json";
 
 // Élő piaci adat (collectorok) — sosem prerenderelhető / cache-elhető.
@@ -75,6 +76,8 @@ export async function GET() {
           dcaFgThreshold: PROFIT_CYCLE.dcaFgThreshold,
           dcaWeeklyBudgetPct: PROFIT_CYCLE.dcaWeeklyBudgetPct,
           dcaBuyPct: PROFIT_CYCLE.dcaBuyPct,
+          entryFilter: DEFAULT_STRATEGY.entryFilter,
+          takeProfitFraction: DEFAULT_STRATEGY.takeProfitFraction,
         },
       },
       noStore,
