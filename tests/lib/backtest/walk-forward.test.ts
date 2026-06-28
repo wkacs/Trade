@@ -40,4 +40,14 @@ describe("walk-forward", () => {
     const ranked = rankConfigs(items, 15);
     expect(ranked.map((r) => r.config)).toEqual(["B", "A"]);
   });
+
+  it("rankConfigs robust módban kizárja a negatív-IS configot és min(IS,OOS) szerint rangsorol", () => {
+    const items = [
+      { config: "lucky", is: res(-0.7, 30), oos: res(3.2, 30) }, // negatív IS → overfit-gyanú → kiesik
+      { config: "solid", is: res(1.0, 30), oos: res(2.3, 30) }, // min(IS,OOS) = 1.0
+      { config: "robust", is: res(1.8, 30), oos: res(1.5, 30) }, // min(IS,OOS) = 1.5 → első
+    ];
+    const ranked = rankConfigs(items, 15, { robust: true });
+    expect(ranked.map((r) => r.config)).toEqual(["robust", "solid"]);
+  });
 });
