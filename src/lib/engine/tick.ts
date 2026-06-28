@@ -23,6 +23,7 @@ import { planProfitCycle } from "@/lib/engine/profit-cycle";
 import { DEFAULT_STRATEGY } from "@/lib/strategy/config";
 import { computeAtr } from "@/lib/strategy/atr";
 import { passesTrendFilter } from "@/lib/strategy/entry-filter";
+import { passesMomentum } from "@/lib/strategy/momentum";
 import type { Decision, Trade, DataPoint, RawDecision } from "@/lib/types";
 
 export interface TickInput {
@@ -284,12 +285,16 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     }
     const atrBySymbol: Record<string, number> = {};
     const trendOkBySymbol: Record<string, boolean> = {};
+    const momentumOkBySymbol: Record<string, boolean> = {};
     for (const sym of COIN_UNIVERSE) {
       const buf = ohlcBySymbol[sym] ?? [];
       atrBySymbol[sym] = computeAtr(buf, DEFAULT_STRATEGY.atrPeriod);
-      trendOkBySymbol[sym] = passesTrendFilter(
-        buf.map((b) => b.close),
-        DEFAULT_STRATEGY.entryFilterSmaPeriod,
+      const closes = buf.map((b) => b.close);
+      trendOkBySymbol[sym] = passesTrendFilter(closes, DEFAULT_STRATEGY.entryFilterSmaPeriod);
+      momentumOkBySymbol[sym] = passesMomentum(
+        closes,
+        DEFAULT_STRATEGY.momentumSmaPeriod,
+        DEFAULT_STRATEGY.momentumLookback,
       );
     }
 
@@ -309,6 +314,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
         totalEquity: totalEquityNow(),
         atrBySymbol,
         trendOkBySymbol,
+        momentumOkBySymbol,
       },
       DEFAULT_STRATEGY,
     );

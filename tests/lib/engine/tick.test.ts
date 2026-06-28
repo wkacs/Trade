@@ -117,4 +117,11 @@ describe("runTick — teljes döntési ciklus", () => {
     expect(result.decision.amountPct).toBe(0.2);
     expect(result.decision.overridden).toBe(true);
   });
+
+  it("momentum-wiring (default OFF): a tick lefut, process megvan, nincs momentum cycle-action", async () => {
+    (shouldDecide as any).mockResolvedValue({ shouldDecide: false, summary: "csendes", notableEvents: [] });
+    const result = await runTick({ tickId: "2026-06-28-15", paperMode: true });
+    expect(result.process).toBeDefined();
+    expect(result.cycleActions.every((a) => a.kind !== "momentum")).toBe(true);
+  });
 });
