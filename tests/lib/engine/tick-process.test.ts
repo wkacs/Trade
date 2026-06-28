@@ -33,4 +33,20 @@ describe("buildTickProcess", () => {
     expect(p.trades).toEqual([{ symbol: "BTC", side: "BUY", origin: "ai", amountUsd: 100 }]);
     expect(p.phase2?.action).toBe("BUY");
   });
+
+  it("vegyes eset: a cycle-trade-ek MEGELŐZIK az AI-trade-et a sorrendben", () => {
+    const p = buildTickProcess({
+      ...base,
+      cycleActions: [
+        { kind: "stop-loss", side: "SELL", symbol: "ETH", qty: 0.1 },
+        { kind: "dca", side: "BUY", symbol: "SOL", amountUsd: 20 },
+      ],
+      aiTrade: { symbol: "BTC", side: "BUY", amountUsd: 100 },
+    });
+    expect(p.trades).toEqual([
+      { symbol: "ETH", side: "SELL", origin: "stop-loss", amountUsd: 0 },
+      { symbol: "SOL", side: "BUY", origin: "dca", amountUsd: 20 },
+      { symbol: "BTC", side: "BUY", origin: "ai", amountUsd: 100 },
+    ]);
+  });
 });
