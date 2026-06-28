@@ -9,6 +9,8 @@ export interface RiskConfig {
   dcaFgThreshold: number;
   dcaWeeklyBudgetPct: number;
   dcaBuyPct: number;
+  entryFilter?: "off" | "trend";
+  takeProfitFraction?: number;
 }
 
 /** Kockázati + stratégia-limitek (hardcoded) + a heti DCA-keret aktuális maradéka. */

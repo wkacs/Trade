@@ -9,6 +9,23 @@ export interface BlotterTrade {
   feeUsd: number;
   executedAt: string;
   mode: string;
+  origin?: string | null;
+}
+
+const ORIGIN: Record<string, { label: string; cls: string }> = {
+  dca: { label: "DCA", cls: "text-accentBright" },
+  "stop-loss": { label: "STOP", cls: "text-down" },
+  "take-profit": { label: "TP", cls: "text-up" },
+  ai: { label: "AI", cls: "text-dim" },
+  manual: { label: "KÉZI", cls: "text-faint" },
+};
+function OriginBadge({ origin }: { origin?: string | null }) {
+  const o = origin ? ORIGIN[origin] : null;
+  return (
+    <span className={`font-mono text-[9px] uppercase tracking-wider ${o?.cls ?? "text-faint"}`}>
+      {o?.label ?? "—"}
+    </span>
+  );
 }
 
 /** Végrehajtott tranzakciók naplója (blotter). */
@@ -34,10 +51,11 @@ export function TradeBlotter({ trades }: { trades: BlotterTrade[] }) {
           return (
             <div
               key={i}
-              className="grid grid-cols-[auto_2.5rem_1fr_auto] items-baseline gap-x-2 border-b border-line/40 py-1 last:border-0"
+              className="grid grid-cols-[auto_2.5rem_2.5rem_1fr_auto] items-baseline gap-x-2 border-b border-line/40 py-1 last:border-0"
             >
               <span className="text-faint">{time}</span>
               <span className={buy ? "text-up" : "text-down"}>{t.side}</span>
+              <OriginBadge origin={t.origin} />
               <span className="truncate text-dim">
                 {t.symbol} {t.qty.toFixed(6)} <span className="text-faint">@</span> {t.price.toFixed(2)}
               </span>

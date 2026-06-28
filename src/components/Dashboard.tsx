@@ -7,6 +7,7 @@ import { BacktestPanel } from "./BacktestPanel";
 import { AdminPanel } from "./AdminPanel";
 import { TickerStrip } from "./TickerStrip";
 import { RiskPanel, type RiskConfig } from "./RiskPanel";
+import { StrategyPanel } from "./StrategyPanel";
 import { TradeBlotter, type BlotterTrade } from "./TradeBlotter";
 import { MarketPanel, type MlSignalView, type PerfView } from "./MarketPanel";
 
@@ -149,6 +150,7 @@ export function Dashboard() {
           <div className="space-y-4">
             <PortfolioPanel cashUsd={cashUsd} positions={positions} hasDb={hasDb} prices={prices} />
             <RiskPanel config={market?.config ?? null} weeklyBudgetRemainingUsd={market?.weeklyBudgetRemainingUsd ?? null} />
+            <StrategyPanel config={market?.config ?? null} />
           </div>
         </div>
 

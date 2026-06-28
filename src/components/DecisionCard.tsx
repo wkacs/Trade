@@ -21,6 +21,7 @@ export interface DecisionRow {
     hypotheticalPnlPct: number;
     wouldProfit: boolean | null;
   } | null;
+  ref?: { prices?: Record<string, number> } | null;
 }
 
 const STAMP: Record<string, string> = {
