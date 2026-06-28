@@ -68,7 +68,7 @@ export function TickInspector() {
             {t.phase2 ? `${t.phase2.action} ${t.phase2.symbol ?? ""} (${(t.phase2.confidence * 100).toFixed(0)}%) — ${t.phase2.reasoning}` : "nem hívva (phase-1 nemet mondott)"}
           </Step>
           <Step n="6" title="Risk Manager" fired={t.decision.overridden}>
-            {t.decision.overridden ? `módosítva → ${t.decision.action} (${t.decision.overrideReason})` : "változatlanul átengedve"}
+            {t.decision.overridden ? `módosítva → ${t.decision.action} (${t.decision.overrideReason ?? "—"})` : "változatlanul átengedve"}
           </Step>
           <Step n="7" title="Végrehajtás" fired={t.trades.length > 0}>
             {t.trades.map((tr) => `${tr.origin.toUpperCase()} ${tr.side} ${tr.symbol} $${tr.amountUsd.toFixed(0)}`).join(" · ") || "nincs trade"}
