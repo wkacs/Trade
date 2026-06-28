@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { runTick } from "@/lib/engine/tick";
 import { getDb, schema } from "@/db/client";
 import { evaluatePending } from "@/lib/portfolio/evaluate";
+import { insertTickRun } from "@/lib/portfolio/accounting";
 
 /** Az ütemezett tick eredménye — a cron route és a runner-script közös visszaadása. */
 export interface ScheduledTickResult {
@@ -109,6 +110,8 @@ export async function executeScheduledTick(): Promise<ScheduledTickResult> {
         // Utólagos kiértékelés: a már „beérett" (≥~1h) korábbi döntéseket pontozzuk az
         // aktuális árakkal — „bejött volna-e, ha tényleg kötött volna". Best-effort.
         await evaluatePending(result.prices);
+        // Folyamat-napló (átláthatóság) — best-effort.
+        await insertTickRun(tickId, result.process);
       } catch (e) {
         // DB hiba nem akasztja meg a választ — a döntés már megvan.
         console.error("[scheduled-tick] mentés hiba:", e);

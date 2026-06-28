@@ -62,4 +62,6 @@ export interface Trade {
   feeUsd: number;
   executedAt: number;
   mode: "paper" | "live";
+  /** Mi hajtotta a trade-et: profit-ciklus (dca/stop-loss/take-profit) vagy AI. */
+  origin?: import("@/lib/engine/tick-process").TradeOrigin;
 }

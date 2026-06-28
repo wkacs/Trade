@@ -1,6 +1,7 @@
 import { getDb, schema, type Db } from "@/db/client";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Trade } from "@/lib/types";
+import type { TickProcess } from "@/lib/engine/tick-process";
 
 /**
  * Portfólió-accounting: a DB-ből tölti a jelenlegi állapotot,
@@ -236,6 +237,7 @@ export async function applyTrade(
       qty: trade.qty,
       feeUsd: trade.feeUsd,
       mode: trade.mode,
+      origin: trade.origin ?? null,
     });
 
     return { positionId };
@@ -252,6 +254,21 @@ async function firstPortfolioId(db: Db): Promise<string | null> {
     .from(schema.portfolios)
     .limit(1);
   return row?.id ?? null;
+}
+
+/** Best-effort: a tickenkénti folyamat-pillanatkép naplózása. DB-hiba nem buktatja a ticket. */
+export async function insertTickRun(
+  tickId: string,
+  process: TickProcess,
+  dbOverride?: Db | null,
+): Promise<void> {
+  const db = dbOverride !== undefined ? dbOverride : getDb();
+  if (!db) return;
+  try {
+    await db.insert(schema.tickRuns).values({ tickId, process });
+  } catch (e) {
+    console.error("[accounting] insertTickRun hiba:", e);
+  }
 }
 
 /**

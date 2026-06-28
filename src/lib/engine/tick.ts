@@ -16,6 +16,7 @@ import { BinanceBroker } from "@/lib/execution/binance-broker";
 import type { Broker } from "@/lib/execution/broker";
 import { COIN_UNIVERSE, RISK_LIMITS, RSS_SOURCES, REDDIT_SOURCES } from "@/lib/config";
 import { loadPortfolioState, applyTrade, setStopPrice } from "@/lib/portfolio/accounting";
+import { buildTickProcess } from "@/lib/engine/tick-process";
 import { getPerformanceSummary } from "@/lib/portfolio/evaluate";
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { planProfitCycle } from "@/lib/engine/profit-cycle";
@@ -54,6 +55,8 @@ export interface TickResult {
    * Üres tömb, ha nem volt DB/pozíció vagy nem volt teendő. Lásd profit-cycle spec §2.
    */
   cycleActions: CycleAction[];
+  /** A tick teljes folyamat-pillanatképe (átláthatóság, tick_runs napló). */
+  process: import("@/lib/engine/tick-process").TickProcess;
 }
 
 /** Fallback demo tőke, ha nincs DB vagy nincs inicializált portfólió (pl. tesztek). */
@@ -190,6 +193,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     symbol: string,
     opts: { qty?: number; amountUsd?: number },
     price: number,
+    origin: "dca" | "stop-loss" | "take-profit",
   ): Promise<Trade | null> => {
     let trade: Trade | null = null;
     if (input.paperMode) {
@@ -231,6 +235,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       );
     }
     if (!trade) return null;
+    trade.origin = origin;
     // Perzisztencia (mindkét módban): a DB az egyenleg tükre. stopPrice = entry*(1−stop%).
     if (dbState) {
       const stopPrice =
@@ -321,8 +326,8 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       if (px === undefined) continue;
       const trade =
         o.side === "SELL"
-          ? await executeCycleOrder("SELL", o.symbol, { qty: o.qty }, o.triggerPrice ?? px)
-          : await executeCycleOrder("BUY", o.symbol, { amountUsd: o.amountUsd }, px);
+          ? await executeCycleOrder("SELL", o.symbol, { qty: o.qty }, o.triggerPrice ?? px, o.kind)
+          : await executeCycleOrder("BUY", o.symbol, { amountUsd: o.amountUsd }, px, o.kind);
       if (trade) {
         cycleActions.push({
           kind: o.kind,
@@ -346,6 +351,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
 
   // Alapértelmezett döntés: HOLD a phase-1 összegzésével.
   // Ha phase-1 nemet mond, NEM hívjuk a phase-2-t — ez a ciklus 90%-a.
+  let phase2Snapshot: import("@/lib/engine/tick-process").TickProcess["phase2"] = null;
   let rawDecision: RawDecision = {
     action: "HOLD",
     symbol: "",
@@ -376,6 +382,13 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       confidence: phase2.confidence,
       reasoning: phase2.reasoning,
       model: process.env.LLM_MODEL_PHASE2 ?? "glm-5.2",
+    };
+    phase2Snapshot = {
+      action: phase2.action,
+      symbol: phase2.symbol ?? null,
+      amountPct: phase2.amountPct,
+      confidence: phase2.confidence,
+      reasoning: phase2.reasoning,
     };
   }
 
@@ -421,6 +434,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
           })
         : new BinanceBroker(process.env.BINANCE_API_KEY ?? "", process.env.BINANCE_API_SECRET ?? "");
       trade = await broker.execute(order, price);
+      if (trade) trade.origin = "ai";
 
       // 8) Perzisztencia — a DB-egyenleget mindkét módban frissítjük (live módban ez a
       // valós Binance-számla TÜKRE; a stopPrice = entry * (1 - stopLoss%)).
@@ -433,6 +447,24 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     }
   }
 
+  const fgForProcess = events.find((e) => e.kind === "sentiment" && e.sentiment)?.sentiment ?? null;
+  const tickProcess = buildTickProcess({
+    tickId: input.tickId,
+    prices,
+    fearGreed: fgForProcess ? { value: fgForProcess.value, classification: fgForProcess.classification } : null,
+    mlSignals: mlSignals.map((s) => ({ symbol: s.symbol, direction1h: s.direction1h, confidence: s.confidence })),
+    cycleActions,
+    phase1: { shouldDecide: phase1.shouldDecide, summary: phase1.summary },
+    phase2: phase2Snapshot,
+    decision: {
+      action: decision.action,
+      symbol: decision.symbol || null,
+      overridden: decision.overridden,
+      overrideReason: decision.overrideReason ?? null,
+    },
+    aiTrade: trade ? { symbol: trade.symbol, side: trade.side, amountUsd: trade.amountUsd } : null,
+  });
+
   return {
     events,
     decision,
@@ -444,5 +476,6 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     rawAmountPct: rawDecision.amountPct,
     prices,
     cycleActions,
+    process: tickProcess,
   };
 }
