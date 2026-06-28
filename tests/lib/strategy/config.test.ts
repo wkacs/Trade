@@ -28,4 +28,12 @@ describe("DEFAULT_STRATEGY", () => {
     expect(DEFAULT_STRATEGY.takeProfitFraction).toBe(1.0);
     expect(DEFAULT_STRATEGY.dcaFgThreshold).toBe(20);
   });
+
+  it("az új profit-boost mezők alapból KIKAPCSOLTAK (regresszió-őr)", () => {
+    expect(DEFAULT_STRATEGY.momentumEnabled).toBe(false);
+    expect(DEFAULT_STRATEGY.riskPerTradePct).toBe(0);
+    expect(DEFAULT_STRATEGY.momentumSmaPeriod).toBe(24);
+    expect(DEFAULT_STRATEGY.momentumLookback).toBe(48);
+    expect(DEFAULT_STRATEGY.momentumBuyPct).toBe(0.02);
+  });
 });

@@ -15,6 +15,13 @@ export interface StrategyConfig {
   maxPositionPct: number;
   maxConcurrentPositions: number;
   dailyLossCircuitBreakerPct: number;
+  /** Momentum-belépő (vesz az erőben). Alapból ki — backteszt-kapu után élesedik. */
+  momentumEnabled: boolean;
+  momentumSmaPeriod: number; // trend-SMA órák
+  momentumLookback: number; // breakout-ablak órák
+  momentumBuyPct: number; // flat méret, ha riskPerTradePct=0
+  /** Kockázat-alapú méretezés: a tőke ennyije a kockázat trade-enként. 0 = flat (régi). */
+  riskPerTradePct: number;
 }
 
 /**
@@ -41,4 +48,9 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   maxPositionPct: 0.2,
   maxConcurrentPositions: 3,
   dailyLossCircuitBreakerPct: 0.03,
+  momentumEnabled: false,
+  momentumSmaPeriod: 24,
+  momentumLookback: 48,
+  momentumBuyPct: 0.02,
+  riskPerTradePct: 0,
 };
