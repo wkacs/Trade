@@ -144,22 +144,27 @@ Expected: kiírja a BASELINE-t (mai default, várhatóan negatív OOS) és a rob
 
 - [ ] **Step 4: Rögzítsd a nyertest a planben**
 
-Írd be ide a Step 3 `#1` robust configját (a `desc(...)` sorból kiolvasva), pl.:
+Írd be ide a Step 3 `#1` robust configját (a `desc(...)` sorból kiolvasva).
+
+**RÖGZÍTETT NYERTES (re-run: `--pages 8 --min-trades 8 --robust`, 8000h ≈ 333 nap, IS 5600 / OOS 2400; 111/3024 config jutott át a robust kapun):**
 
 ```
-NYERTES (kitöltendő a re-runból):
-  stop ........... (fixed X% | atr×Y)
-  takeProfitPct .. (pl. 0.10)
-  takeProfitFraction (0.5 | 1.0)
-  dcaFgThreshold . (pl. 20)
-  dcaBuyPct ...... (pl. 0.02)
-  dcaWeeklyBudgetPct (pl. 0.05 | 0.10 | 0.20)
-  entryFilter .... trend
-  entryFilterSmaPeriod (24 | 72)
-  IS:  Sharpe ... / OOS: Sharpe ...
+#1  stop fix5% · TP 10%/1 · FG20 · dca 2%/5% · trend24
+  stopMode ........... "fixed"
+  stopLossPct ........ 0.05     (változatlan)
+  takeProfitPct ...... 0.10     (15% → 10%)
+  takeProfitFraction . 1.0      (0.5 → 1.0, teljes pozíció zárás)
+  dcaFgThreshold ..... 20       (25 → 20)
+  dcaBuyPct .......... 0.02     (változatlan)
+  dcaWeeklyBudgetPct . 0.05     (változatlan — NINCS kockázat-növelés)
+  entryFilter ........ "trend"  (off → trend)  ← a gyökér-fix
+  entryFilterSmaPeriod 24       (változatlan)
+  IS:  Sharpe 1.93 · PF 2.50 · ret 1.8% · maxDD 0.7% · 25 trade
+  OOS: Sharpe 2.60 · PF 3.64 · ret 1.4% · maxDD 0.5% · 9 trade
+  BASELINE (mai default): IS Sharpe -0.11 / OOS Sharpe -2.31 → a nyertes erősen veri.
 ```
 
-⚠️ **Döntési pont:** ha a nyertes `dcaWeeklyBudgetPct` 0.20 (a mostani 0.05 négyszerese), mérlegeld a robust TOP-listából egy alacsonyabb heti-keretű, de még mindkét ablakban pozitív jelöltet (alacsonyabb drawdown preferencia). Rögzítsd a választást és az indokát.
+✅ **Döntési pont feloldva:** a #1 nyertes `dcaWeeklyBudgetPct`-je **0.05 (a mostani érték)**, nem 0.20 — tehát nincs heti-keret emelés, nincs kockázat-növelés. A #2 (dca 4%/10%) magasabb hozamú, de dupla pozícióméret + dupla heti-keret + nagyobb drawdown → elvetve az alacsony-drawdown preferencia miatt. A #1 a legjobb `min(IS,OOS)` Sharpe és a legalacsonyabb maxDD.
 
 - [ ] **Step 5: Ha a robust kapun NEM jut át config**
 

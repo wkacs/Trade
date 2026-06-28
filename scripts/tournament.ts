@@ -25,6 +25,7 @@ async function main() {
   const pages = arg("pages", 5);
   const minTrades = arg("min-trades", 15);
   const top = arg("top", 15);
+  const robust = process.argv.includes("--robust");
 
   // Grid (spec §7).
   const grid: StrategyConfig[] = [];
@@ -89,8 +90,10 @@ async function main() {
 
   console.log(`\n=== BASELINE (mai default) ===\n  IS:  ${fmt(base.is)}\n  OOS: ${fmt(base.oos)}`);
 
-  const ranked = rankConfigs(items, minTrades);
-  console.log(`\n=== TOP ${top} (OOS Sharpe; ${ranked.length}/${grid.length} config a min-trade kapun túl) ===`);
+  const ranked = rankConfigs(items, minTrades, { robust });
+  console.log(
+    `\n=== TOP ${top} (${robust ? "ROBUST: IS>0 ÉS OOS>0, min(IS,OOS) Sharpe" : "OOS Sharpe"}; ${ranked.length}/${grid.length} config a kapun túl) ===`,
+  );
   if (ranked.length === 0) {
     console.log("  Egyetlen config sem érte el a min-trade kaput az OOS-on (próbálj több --pages-t vagy kisebb --min-trades-et).");
     return;
