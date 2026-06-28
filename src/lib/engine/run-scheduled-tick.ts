@@ -3,6 +3,7 @@ import { runTick } from "@/lib/engine/tick";
 import { getDb, schema } from "@/db/client";
 import { evaluatePending } from "@/lib/portfolio/evaluate";
 import { insertTickRun } from "@/lib/portfolio/accounting";
+import { pingHeartbeat } from "@/lib/ops/heartbeat";
 
 /** Az ütemezett tick eredménye — a cron route és a runner-script közös visszaadása. */
 export interface ScheduledTickResult {
@@ -118,6 +119,7 @@ export async function executeScheduledTick(): Promise<ScheduledTickResult> {
       }
     }
 
+    await pingHeartbeat(true);
     return {
       ok: true,
       tickId,
@@ -128,6 +130,7 @@ export async function executeScheduledTick(): Promise<ScheduledTickResult> {
     };
   } catch (e) {
     console.error("[scheduled-tick] ciklus hiba:", e);
+    await pingHeartbeat(false);
     return { ok: false, tickId, error: String(e) };
   }
 }
