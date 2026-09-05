@@ -9,7 +9,11 @@ vi.mock("@/lib/collectors/coingecko", () => ({ CoinGeckoCollector: vi.fn() }));
 vi.mock("@/lib/collectors/cryptopanic", () => ({ CryptoPanicCollector: vi.fn() }));
 vi.mock("@/lib/collectors/whalealert", () => ({ WhaleAlertCollector: vi.fn() }));
 vi.mock("@/lib/collectors/rss", () => ({ RSSCollector: vi.fn() }));
-vi.mock("@/lib/collectors/binance", () => ({ BinanceOHLCCollector: vi.fn() }));
+vi.mock("@/lib/collectors/binance", () => ({
+  BinanceOHLCCollector: vi.fn(),
+  // A jelek valódi gyertyákból számolnak; a unit-tesztben nincs OHLCV, ezért üres.
+  candlesFromDataPoints: vi.fn(() => []),
+}));
 vi.mock("@/lib/collectors/feargreed", () => ({ FearGreedCollector: vi.fn() }));
 vi.mock("@/lib/collectors/reddit", () => ({ RedditCollector: vi.fn() }));
 vi.mock("@/lib/llm/phase1-filter", () => ({ shouldDecide: vi.fn() }));

@@ -20,11 +20,10 @@ import { loadPortfolioState, applyTrade, setStopPrice } from "@/lib/portfolio/ac
 import { buildTickProcess } from "@/lib/engine/tick-process";
 import { getPerformanceSummary } from "@/lib/portfolio/evaluate";
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
-import { planProfitCycle } from "@/lib/engine/profit-cycle";
+import { planProfitCycle, computeAllSignals, type SymbolSignals } from "@/lib/engine/profit-cycle";
 import { DEFAULT_STRATEGY, STRATEGY_VERSION } from "@/lib/strategy/config";
-import { computeAtr } from "@/lib/strategy/atr";
-import { passesTrendFilter } from "@/lib/strategy/entry-filter";
-import { passesMomentum } from "@/lib/strategy/momentum";
+import { candlesFromDataPoints } from "@/lib/collectors/binance";
+import { TIMEFRAME_MS } from "@/lib/market/candles";
 import { executeIntent, type ExecuteIntentDeps, type IntentRequest } from "@/lib/engine/execute-intent";
 import {
   loadLedgerState,
@@ -115,6 +114,8 @@ export interface TickResult {
   };
   /** A collectorok kimenetele (melyik forrás mit adott, mennyi idő alatt). */
   collectors: { name: string; ok: boolean; points: number; durationMs: number }[];
+  /** Stratégiai jelek és adat-elégségesség symbolonként (T15). */
+  signals: Record<string, { bars: number; requiredBars: number; sufficient: boolean; trendOk: boolean; momentumOk: boolean }>;
   /** Az ML-modell állapota és a kihagyott feature-ök (adathiány láthatósága). */
   ml: {
     modelUsable: boolean;
@@ -305,6 +306,8 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   let intentSeq = 0;
   /** Elavult vagy hiányzó ár miatt kihagyott orderek — mérhető állapot, nem néma. */
   const staleSkips: { symbol: string; side: string; reason: string; ageMs: number | null }[] = [];
+  /** A stratégiai jelek és az adat-elégségesség symbolonként. */
+  let signalsBySymbol: Record<string, SymbolSignals> = {};
 
   const makeDeps = (origin: IntentRequest["origin"]): ExecuteIntentDeps => ({
     portfolioId,
@@ -422,21 +425,31 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       if (px !== undefined) candles[symbol] = { low: px, high: px, close: px };
     }
 
-    const ohlcBySymbol: Record<string, { high: number; low: number; close: number }[]> = {};
-    for (const e of events) {
-      if (e.source === "binance" && e.kind === "price" && e.price) {
-        (ohlcBySymbol[e.symbol] ??= []).push({ high: e.price.usd, low: e.price.usd, close: e.price.usd });
-      }
+    // A jelek VALÓDI high/low-t hordozó, LEZÁRT gyertyákból számolnak, és a backtest
+    // UGYANEZT a függvényt hívja (T15 paritás). Hiányos vagy réses sor esetén nincs
+    // trend- és momentum-engedély — nem születik jel adathiányból.
+    const candlesBySymbol: Record<string, { openTime: number; high: number; low: number; close: number }[]> = {};
+    for (const sym of COIN_UNIVERSE) {
+      candlesBySymbol[sym] = candlesFromDataPoints(events, sym).map((c) => ({
+        openTime: c.openTime,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }));
     }
+    signalsBySymbol = computeAllSignals(candlesBySymbol, DEFAULT_STRATEGY, TIMEFRAME_MS["1h"]);
     const atrBySymbol: Record<string, number> = {};
     const trendOkBySymbol: Record<string, boolean> = {};
     const momentumOkBySymbol: Record<string, boolean> = {};
-    for (const sym of COIN_UNIVERSE) {
-      const buf = ohlcBySymbol[sym] ?? [];
-      atrBySymbol[sym] = computeAtr(buf, DEFAULT_STRATEGY.atrPeriod);
-      const closes = buf.map((b) => b.close);
-      trendOkBySymbol[sym] = passesTrendFilter(closes, DEFAULT_STRATEGY.entryFilterSmaPeriod);
-      momentumOkBySymbol[sym] = passesMomentum(closes, DEFAULT_STRATEGY.momentumSmaPeriod, DEFAULT_STRATEGY.momentumLookback);
+    for (const [sym, sig] of Object.entries(signalsBySymbol)) {
+      atrBySymbol[sym] = sig.atr;
+      trendOkBySymbol[sym] = sig.trendOk;
+      momentumOkBySymbol[sym] = sig.momentumOk;
+      if (!sig.sufficient) {
+        console.warn(
+          `[tick] ${sym}: nincs elég hézagmentes gyertya (${sig.bars}/${sig.requiredBars}) — nincs trend- vagy momentum-engedély.`,
+        );
+      }
     }
 
     const plan = planProfitCycle(
@@ -669,6 +682,18 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       points: o.points,
       durationMs: o.durationMs,
     })),
+    signals: Object.fromEntries(
+      Object.entries(signalsBySymbol).map(([sym, sig]) => [
+        sym,
+        {
+          bars: sig.bars,
+          requiredBars: sig.requiredBars,
+          sufficient: sig.sufficient,
+          trendOk: sig.trendOk,
+          momentumOk: sig.momentumOk,
+        },
+      ]),
+    ),
     ml: {
       modelUsable: prediction.status.usable,
       modelDetail: prediction.status.usable ? null : prediction.status.detail,

@@ -6,7 +6,12 @@ vi.mock("@/lib/collectors/coingecko", () => ({ CoinGeckoCollector: vi.fn() }));
 vi.mock("@/lib/collectors/cryptopanic", () => ({ CryptoPanicCollector: vi.fn() }));
 vi.mock("@/lib/collectors/whalealert", () => ({ WhaleAlertCollector: vi.fn() }));
 vi.mock("@/lib/collectors/rss", () => ({ RSSCollector: vi.fn() }));
-vi.mock("@/lib/collectors/binance", () => ({ BinanceOHLCCollector: vi.fn() }));
+vi.mock("@/lib/collectors/binance", () => ({
+  BinanceOHLCCollector: vi.fn(),
+  // A jelek valódi, LEZÁRT gyertyákból számolnak. A tesztek egy elegendő hosszúságú,
+  // hézagmentes sorozatot adnak, különben (helyesen) nincs trend- vagy momentum-engedély.
+  candlesFromDataPoints: vi.fn(() => mockCandleSeries),
+}));
 vi.mock("@/lib/collectors/feargreed", () => ({ FearGreedCollector: vi.fn() }));
 vi.mock("@/lib/collectors/reddit", () => ({ RedditCollector: vi.fn() }));
 vi.mock("@/lib/llm/phase1-filter", () => ({ shouldDecide: vi.fn() }));
@@ -58,6 +63,17 @@ import { loadPortfolioState, applyTrade, setStopPrice } from "@/lib/portfolio/ac
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { runTick } from "@/lib/engine/tick";
 import type { DataPoint } from "@/lib/types";
+
+/**
+ * Elegendő hosszúságú, hézagmentes gyertyasor a jelekhez (T15). Lapos ár → a trend-szűrő
+ * átenged (close ≥ SMA), a momentum-breakout viszont nem tüzel.
+ */
+let mockCandleSeries: any[] = Array.from({ length: 60 }, (_, i) => ({
+  openTime: i * 3600_000,
+  high: 100,
+  low: 100,
+  close: 100,
+}));
 
 /** A quote-pillanatkép, amit a mockolt `fetchQuotes` visszaad (T14). */
 let mockQuoteSnapshot: any = { quotes: {}, errors: [], maxAgeMs: 0, degraded: false };

@@ -1,3 +1,5 @@
+import { DEFAULT_STRATEGY } from "@/lib/strategy/config";
+
 export interface RiskLimits {
   /** Egy pozíció maximális része a teljes tőkéből (0.2 = 20%). */
   maxPositionPct: number;
@@ -11,13 +13,19 @@ export interface RiskLimits {
   dailyLossCircuitBreakerPct: number;
 }
 
-/** Konzervatív kockázati limitlek — védik a kis tőkét. Lásd spec §3.4. */
+/**
+ * Konzervatív kockázati limitlek — védik a kis tőkét. Lásd spec §3.4.
+ *
+ * T15: EGY forrás. Ezek az értékek a `DEFAULT_STRATEGY`-ből SZÁRMAZNAK, nem külön
+ * másolatok. A régi kód két helyen tartotta ugyanazt a paramétert, és a kettő
+ * elcsúszhatott (config drift, audit §6).
+ */
 export const RISK_LIMITS: RiskLimits = {
-  maxPositionPct: 0.2,
-  stopLossPct: 0.05,
+  maxPositionPct: DEFAULT_STRATEGY.maxPositionPct,
+  stopLossPct: DEFAULT_STRATEGY.stopLossPct,
   leverage: 1,
-  maxConcurrentPositions: 3,
-  dailyLossCircuitBreakerPct: 0.03,
+  maxConcurrentPositions: DEFAULT_STRATEGY.maxConcurrentPositions,
+  dailyLossCircuitBreakerPct: DEFAULT_STRATEGY.dailyLossCircuitBreakerPct,
 };
 
 /**
@@ -25,24 +33,12 @@ export const RISK_LIMITS: RiskLimits = {
  * Lásd: docs/superpowers/specs/2026-06-26-profit-cycle-design.md §3.7.
  */
 export const PROFIT_CYCLE = {
-  /**
-   * Take-profit: ha a pozíció ennyit ért el (+10%), eladja a teljes pozíciót.
-   * Hangolva 2026-06-28 (Approach A robust tournament): 15%/fél → 10%/teljes.
-   */
-  takeProfitPct: 0.1,
-  /** DCA: Fear & Greed index ezen küszöb (≤20) alatt halmoz. Hangolva: 25 → 20. */
-  dcaFgThreshold: 20,
-  /** DCA: heti költési keret a tőke hányadaként (5%). */
-  dcaWeeklyBudgetPct: 0.05,
-  /** DCA: egy vétel mérete a tőke hányadaként (2%). */
-  dcaBuyPct: 0.02,
-  /**
-   * DCA: ha egy coin 24h esése (abszolút értékben) ezt meghaladja (>8%), az
-   * „szabaduló zuhanás" — nem veszünk bele. Live-ra váltásnál a dcaBuyPct-t a
-   * broker minimum notional fölé kell emelni. Lásd spec §7.
-   */
-  dcaMax24hDropPct: 0.08,
-};
+  takeProfitPct: DEFAULT_STRATEGY.takeProfitPct,
+  dcaFgThreshold: DEFAULT_STRATEGY.dcaFgThreshold,
+  dcaWeeklyBudgetPct: DEFAULT_STRATEGY.dcaWeeklyBudgetPct,
+  dcaBuyPct: DEFAULT_STRATEGY.dcaBuyPct,
+  dcaMax24hDropPct: DEFAULT_STRATEGY.dcaMax24hDropPct,
+} as const;
 
 /** Fix coin kosár USDT párban. Bővíthető a settings-en keresztül. Lásd spec §3.6. */
 export const COIN_UNIVERSE = ["BTC", "ETH", "SOL"] as const;

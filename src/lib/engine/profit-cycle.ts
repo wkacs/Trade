@@ -1,8 +1,97 @@
 import type { StrategyConfig } from "@/lib/strategy/config";
 import { evaluatePosition } from "@/lib/strategy/position-actions";
 import { evaluateDca } from "@/lib/strategy/fear-greedy";
-import { evaluateMomentum } from "@/lib/strategy/momentum";
+import { evaluateMomentum, passesMomentum } from "@/lib/strategy/momentum";
 import { ratchetStop } from "@/lib/strategy/trailing-stop";
+import { passesTrendFilter } from "@/lib/strategy/entry-filter";
+import { computeAtr } from "@/lib/strategy/atr";
+
+/**
+ * Egy symbolhoz tartozó stratégiai jelek (T15) — a TICK és a BACKTEST UGYANEZT hívja,
+ * így nincs drift a két úton. A bemenet VALÓDI high/low-t hordozó, LEZÁRT gyertyasor.
+ */
+export interface SymbolSignals {
+  /** Hány hézagmentes gyertya áll rendelkezésre a sorozat végén. */
+  bars: number;
+  /** Hány gyertya KELLENE a stratégia legnagyobb visszatekintéséhez + warmuphoz. */
+  requiredBars: number;
+  /** Igaz, ha van elég adat. Hamis esetén NINCS trend- és momentum-engedély. */
+  sufficient: boolean;
+  atr: number;
+  trendOk: boolean;
+  momentumOk: boolean;
+}
+
+export interface SignalCandle {
+  openTime: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+/**
+ * A stratégia legnagyobb visszatekintése + bemelegítés, gyertyában.
+ * Az audit §6 példája: a momentum 48 órás ablakot kér, a collector 24-et adott.
+ */
+export function strategyRequiredBars(config: StrategyConfig): number {
+  return Math.max(
+    config.entryFilterSmaPeriod,
+    config.momentumSmaPeriod,
+    config.momentumLookback,
+    config.atrPeriod + 1,
+  );
+}
+
+/** A sorozat VÉGÉN lévő, hézagmentes gyertyák száma (a rés előtti adat nem számít). */
+export function contiguousTail(candles: SignalCandle[], stepMs: number): number {
+  if (candles.length === 0) return 0;
+  let n = 1;
+  for (let i = candles.length - 1; i > 0; i--) {
+    if (candles[i].openTime - candles[i - 1].openTime === stepMs) n++;
+    else break;
+  }
+  return n;
+}
+
+/**
+ * Stratégiai jelek egy symbolra. HIÁNYOS vagy RÉSES adat esetén `sufficient: false`,
+ * és se trend-, se momentum-engedély nincs — a réses sor nem kap automatikus zöld utat.
+ */
+export function computeSymbolSignals(
+  candles: SignalCandle[],
+  config: StrategyConfig,
+  stepMs: number,
+): SymbolSignals {
+  const required = strategyRequiredBars(config);
+  const tail = contiguousTail(candles, stepMs);
+  if (tail < required) {
+    return { bars: tail, requiredBars: required, sufficient: false, atr: 0, trendOk: false, momentumOk: false };
+  }
+  const window = candles.slice(-tail);
+  const closes = window.map((c) => c.close);
+  return {
+    bars: tail,
+    requiredBars: required,
+    sufficient: true,
+    // VALÓDI high/low — a close-only ATR alulbecsülte a volatilitást.
+    atr: computeAtr(window, config.atrPeriod),
+    trendOk: passesTrendFilter(closes, config.entryFilterSmaPeriod),
+    momentumOk: passesMomentum(closes, config.momentumSmaPeriod, config.momentumLookback),
+  };
+}
+
+/** Több symbol jelei egyszerre — a tick és a backtest ugyanezt a formát adja tovább. */
+export function computeAllSignals(
+  candlesBySymbol: Record<string, SignalCandle[]>,
+  config: StrategyConfig,
+  stepMs: number,
+): Record<string, SymbolSignals> {
+  const out: Record<string, SymbolSignals> = {};
+  for (const [symbol, candles] of Object.entries(candlesBySymbol)) {
+    out[symbol] = computeSymbolSignals(candles, config, stepMs);
+  }
+  return out;
+}
 
 export interface PlannedOrder {
   kind: "stop-loss" | "take-profit" | "dca" | "momentum";

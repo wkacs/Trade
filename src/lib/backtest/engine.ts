@@ -5,12 +5,9 @@ import type {
   EquityPoint,
   ClosedTradePnl,
 } from "./types";
-import { planProfitCycle } from "@/lib/engine/profit-cycle";
+import { planProfitCycle, computeAllSignals } from "@/lib/engine/profit-cycle";
 import { simulateFill } from "./fill-sim";
 import { computeMetrics } from "./metrics";
-import { computeAtr } from "@/lib/strategy/atr";
-import { passesTrendFilter } from "@/lib/strategy/entry-filter";
-import { passesMomentum } from "@/lib/strategy/momentum";
 import { DEFAULT_STRATEGY, type StrategyConfig } from "@/lib/strategy/config";
 
 interface SimPosition {
@@ -42,8 +39,9 @@ export function runBacktest(
   const buyLog: { ts: number; amountUsd: number }[] = []; // gördülő heti keret
   let hoursInMarket = 0;
   let nextId = 1;
-  // Per-symbol gyertya-buffer az ATR/SMA-hoz (gördülő ablak).
-  const buffers: Record<string, { high: number; low: number; close: number }[]> = {};
+  // Per-symbol gyertya-buffer az ATR/SMA-hoz (gördülő ablak). A nyitóidő is kell,
+  // hogy a réseket a TICK-kel AZONOS módon ismerjük fel (T15 paritás).
+  const buffers: Record<string, { openTime: number; high: number; low: number; close: number }[]> = {};
 
   const closeAt = (frame: HistoryFrame, sym: string): number | undefined => frame.candles[sym]?.close;
   const equityNow = (frame: HistoryFrame): number =>
@@ -62,20 +60,22 @@ export function runBacktest(
     const totalEquity = equityNow(frame);
     if (positions.length > 0) hoursInMarket++;
 
-    // Per-symbol ATR + trend-flag a gördülő bufferből.
-    const atrBySymbol: Record<string, number> = {};
-    const trendOkBySymbol: Record<string, boolean> = {};
-    const momentumOkBySymbol: Record<string, boolean> = {};
+    // Per-symbol jelek a gördülő bufferből — UGYANAZ a függvény, mint a runTickben.
     for (const sym of config.symbols) {
       const k = frame.candles[sym];
       if (!k) continue;
       const buf = (buffers[sym] ??= []);
-      buf.push({ high: k.high, low: k.low, close: k.close });
+      buf.push({ openTime: frame.ts, high: k.high, low: k.low, close: k.close });
       if (buf.length > 300) buf.shift();
-      atrBySymbol[sym] = computeAtr(buf, strategy.atrPeriod);
-      const closes = buf.map((b) => b.close);
-      trendOkBySymbol[sym] = passesTrendFilter(closes, strategy.entryFilterSmaPeriod);
-      momentumOkBySymbol[sym] = passesMomentum(closes, strategy.momentumSmaPeriod, strategy.momentumLookback);
+    }
+    const signals = computeAllSignals(buffers, strategy, HOUR);
+    const atrBySymbol: Record<string, number> = {};
+    const trendOkBySymbol: Record<string, boolean> = {};
+    const momentumOkBySymbol: Record<string, boolean> = {};
+    for (const [sym, sig] of Object.entries(signals)) {
+      atrBySymbol[sym] = sig.atr;
+      trendOkBySymbol[sym] = sig.trendOk;
+      momentumOkBySymbol[sym] = sig.momentumOk;
     }
 
     // Heti DCA-keret: dcaWeeklyBudgetPct * equity − az utolsó 7 nap BUY-jai.
