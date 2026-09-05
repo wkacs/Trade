@@ -2,7 +2,14 @@ import { createHmac, randomUUID } from "crypto";
 import type { Order, Trade } from "@/lib/types";
 import type { Broker, ExecutionBroker, ExecutionReceipt } from "./broker";
 import { clientOrderId, fillKey, isIntentExpired, toLegacyOrder, type ExecutionIntent } from "./contracts";
-import { dec } from "@/lib/portfolio/money";
+import { dec, toNumber, isPositive } from "@/lib/portfolio/money";
+import {
+  sizeBuy,
+  sizeSell,
+  protectionPrices,
+  pairFor,
+  type SymbolFilters,
+} from "./exchange-rules";
 
 const BINANCE_BASE = "https://api.binance.com";
 
@@ -72,19 +79,37 @@ export class BinanceBroker implements Broker {
     return body;
   }
 
+  /**
+   * A szimbólum aktuális szűrőkészlete. A hívó tölti fel (exchange-rules.fetchSymbolFilters);
+   * hiánya esetén a broker NEM küld ordert — ismeretlen szabályokkal nem kereskedünk.
+   */
+  filters: Record<string, SymbolFilters> = {};
+
   async execute(order: Order, currentPrice: number): Promise<Trade> {
-    // Kötelező stop-loss (spec §3.4/§6) — dupla biztosíték a Risk Manager felett.
-    if (order.stopLossPct < 0.05) {
-      throw new Error("BinanceBroker: stop-loss kötelező, min 5%");
+    const symbol = pairFor(order.symbol);
+    const filters = this.filters[symbol];
+    const now = Date.now();
+
+    // T24: a kitalált „stop-loss min 5%" dobás helyett VALÓDI tőzsdei validáció.
+    // A stop hiánya nem itt dől el (azt a stratégia és a védőorder-kezelés adja).
+    const price = dec(currentPrice);
+    const sized =
+      order.side === "BUY"
+        ? sizeBuy(dec(order.amountUsd), price, filters, now)
+        : sizeSell(dec(order.amountUsd / (currentPrice || 1)), price, filters, now);
+    if (!sized.check.ok) {
+      throw new Error(
+        `BinanceBroker: a tőzsdei szabályok elutasítják (${sized.check.reason}): ${sized.check.message}`,
+      );
     }
 
-    const symbol = `${order.symbol}USDT`;
-    const resp = (await this.signedRequest("/api/v3/order", {
-      symbol,
-      side: order.side,
-      type: "MARKET",
-      quoteOrderQty: order.amountUsd.toFixed(2),
-    })) as BinanceOrderResponse;
+    // MARKET BUY-nál a quoteOrderQty a természetes (a tőzsde kerekít), de a kerekítés
+    // UTÁNI notionalt már ellenőriztük, ezért a minimum alatti order ide sem jut el.
+    const params: Record<string, string> =
+      order.side === "BUY"
+        ? { symbol, side: "BUY", type: "MARKET", quoteOrderQty: sized.notional }
+        : { symbol, side: "SELL", type: "MARKET", quantity: sized.qty };
+    const resp = (await this.signedRequest("/api/v3/order", params)) as BinanceOrderResponse;
 
     const executedQty = Number(resp.executedQty);
     const quote = Number(resp.cummulativeQuoteQty);
@@ -97,16 +122,21 @@ export class BinanceBroker implements Broker {
 
     // BUY után védő stop-loss-limit (best-effort). Ha hibázik, HANGOSAN logolunk:
     // a pozíció ekkor stop NÉLKÜL nyitva maradt — ezt kézzel kell rendezni.
-    if (order.side === "BUY" && executedQty > 0) {
-      const stopPrice = avgPrice * (1 - order.stopLossPct);
+    if (order.side === "BUY" && executedQty > 0 && filters) {
+      // A védőorder ára és mennyisége is a TŐZSDEI szűrőkre kerekül (tickSize/stepSize).
+      const { stop, limit } = protectionPrices(dec(avgPrice * (1 - order.stopLossPct)), filters);
+      const protectQty = sizeSell(dec(executedQty), stop, filters, now, "LIMIT");
       try {
+        if (!protectQty.check.ok) {
+          throw new Error(`a védőorder nem felel meg a szűrőknek: ${protectQty.check.message}`);
+        }
         await this.signedRequest("/api/v3/order", {
           symbol,
           side: "SELL",
           type: "STOP_LOSS_LIMIT",
-          quantity: executedQty.toString(),
-          stopPrice: stopPrice.toFixed(2),
-          price: (stopPrice * 0.999).toFixed(2),
+          quantity: protectQty.qty,
+          stopPrice: stop,
+          price: limit,
           timeInForce: "GTC",
         });
       } catch (e) {

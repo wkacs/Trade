@@ -21,6 +21,7 @@
  * a díjjal EGYÜTT igaz.
  */
 import { type Dec, ZERO, add, sub, mul, div, gt, isPositive, min as decMin } from "@/lib/portfolio/money";
+import { sizeBuy, sizeSell, type SymbolFilters } from "./exchange-rules";
 
 export type PaperFillKind = "market" | "stop-loss" | "take-profit";
 
@@ -52,6 +53,13 @@ export interface PaperFillParams {
   /** Teljes bid-ask spread bázispontban; bid/ask hiányában a last köré tesszük. */
   spreadBps: number;
   quoteAsset?: string;
+  /**
+   * A TŐZSDEI szűrők (T24). Ha meg van adva, a paper és a backtest UGYANAZT a kerekítést
+   * és minimum-ellenőrzést használja, mint az éles út — így a 100 USD-s mérés valósághű.
+   */
+  filters?: SymbolFilters;
+  /** A szűrő-ellenőrzéshez szükséges idő (az elévülés miatt). */
+  nowMs?: number;
 }
 
 export interface PaperFillOutcome {
@@ -66,7 +74,7 @@ export interface PaperFillOutcome {
 
 export interface PaperFillRejection {
   ok: false;
-  reason: "no_price" | "no_amount" | "zero_qty" | "zero_notional";
+  reason: "no_price" | "no_amount" | "zero_qty" | "zero_notional" | "exchange_rule";
   message: string;
 }
 
@@ -127,9 +135,21 @@ export function simulatePaperFill(req: PaperFillRequest, params: PaperFillParams
       return { ok: false, reason: "no_amount", message: "BUY: hiányzó vagy nulla maxQuoteSpend" };
     }
     // A díj BELEFÉR a keretbe: bruttó + bruttó*fee = budget.
-    const gross = div(budget, add("1", params.feePct));
-    const feeAmount = mul(gross, params.feePct);
-    const qty = div(gross, fillPrice);
+    let gross = div(budget, add("1", params.feePct));
+    let feeAmount = mul(gross, params.feePct);
+    let qty = div(gross, fillPrice);
+
+    // Tőzsdei szűrők: LEFELÉ kerekítés és minimum-ellenőrzés a kerekítés UTÁN.
+    if (params.filters) {
+      const sized = sizeBuy(gross, fillPrice, params.filters, params.nowMs ?? 0);
+      if (!sized.check.ok) {
+        return { ok: false, reason: "exchange_rule", message: `${sized.check.reason}: ${sized.check.message}` };
+      }
+      qty = sized.qty;
+      gross = mul(qty, fillPrice);
+      feeAmount = mul(gross, params.feePct);
+    }
+
     if (!isPositive(qty)) {
       return { ok: false, reason: "zero_qty", message: "BUY: a keretből nem jön ki pozitív mennyiség" };
     }
@@ -147,9 +167,16 @@ export function simulatePaperFill(req: PaperFillRequest, params: PaperFillParams
     };
   }
 
-  const qty = req.baseQty;
+  let qty = req.baseQty;
   if (!qty || !isPositive(qty)) {
     return { ok: false, reason: "no_amount", message: "SELL: hiányzó vagy nulla baseQty" };
+  }
+  if (params.filters) {
+    const sized = sizeSell(qty, fillPrice, params.filters, params.nowMs ?? 0);
+    if (!sized.check.ok) {
+      return { ok: false, reason: "exchange_rule", message: `${sized.check.reason}: ${sized.check.message}` };
+    }
+    qty = sized.qty;
   }
   const gross = mul(qty, fillPrice);
   if (!isPositive(gross)) {
