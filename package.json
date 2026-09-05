@@ -13,7 +13,9 @@
     "db:migrate": "drizzle-kit migrate",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "audit:state": "tsx scripts/audit-state.ts",
-    "migrate:ledger": "tsx scripts/migrate-paper-ledger.ts"
+    "migrate:ledger": "tsx scripts/migrate-paper-ledger.ts",
+    "worker": "tsx scripts/worker.ts",
+    "worker:once": "tsx scripts/worker.ts --once exit"
   },
   "dependencies": {
     "@neondatabase/serverless": "0.9.1",

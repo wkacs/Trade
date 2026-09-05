@@ -1,0 +1,231 @@
+import { describe, it, expect, vi } from "vitest";
+import { TradingWorker, nextSlotStart, currentSlot, type WorkerDeps, type WorkerEvent, type WorkerConfig } from "@/lib/engine/worker";
+import type { Lease } from "@/lib/engine/run-lease";
+
+const MIN = 60_000;
+/** 2026-09-05 10:00:00 UTC */
+const T0 = Date.UTC(2026, 8, 5, 10, 0, 0);
+
+function lease(acquired = true): Lease {
+  return { key: "k", owner: "me", fencingToken: 1, expiresAtMs: 0, acquired };
+}
+
+/** Vezérelhető óra és alvás: a teszt nem vár valós időt. */
+function fakeClock(start: number) {
+  let now = start;
+  const sleepers: { at: number; resolve: () => void; signal: { aborted: boolean } }[] = [];
+  return {
+    now: () => now,
+    advance(ms: number) {
+      now += ms;
+      for (const s of [...sleepers]) {
+        if (s.at <= now || s.signal.aborted) {
+          sleepers.splice(sleepers.indexOf(s), 1);
+          s.resolve();
+        }
+      }
+    },
+    sleep: (ms: number, signal: { aborted: boolean }) =>
+      new Promise<void>((resolve) => {
+        if (signal.aborted || ms <= 0) return resolve();
+        sleepers.push({ at: now + ms, resolve, signal });
+      }),
+    pending: () => sleepers.length,
+  };
+}
+
+function makeWorker(over: Partial<WorkerDeps> = {}, config: Partial<WorkerConfig> = {}) {
+  const clock = fakeClock(T0);
+  const events: WorkerEvent[] = [];
+  const deps: WorkerDeps = {
+    now: clock.now,
+    sleep: clock.sleep,
+    acquireLease: async () => lease(true),
+    releaseLease: async () => true,
+    runExit: async () => {},
+    runEntry: async () => {},
+    onEvent: (e) => events.push(e),
+    ...over,
+  };
+  const worker = new TradingWorker(
+    { portfolioId: "pf", mode: "paper", exitIntervalMs: 5 * MIN, entryIntervalMs: 60 * MIN, entryOffsetMs: 7 * MIN, ...config },
+    deps,
+  );
+  return { worker, clock, events, deps };
+}
+
+describe("időzítés — a KÖVETKEZŐ sáv, sosem a régi", () => {
+  it("nextSlotStart a következő sávkezdetet adja", () => {
+    expect(nextSlotStart(T0, 5 * MIN)).toBe(T0 + 5 * MIN);
+    expect(nextSlotStart(T0 + 2 * MIN, 5 * MIN)).toBe(T0 + 5 * MIN);
+  });
+
+  it("az offset eltolja a sávkezdetet (órás gyertya záródása után)", () => {
+    // :07-es offset mellett 10:00-kor a következő futás 10:07.
+    expect(nextSlotStart(T0, 60 * MIN, 7 * MIN)).toBe(T0 + 7 * MIN);
+    // 10:10-kor már a 11:07 következik.
+    expect(nextSlotStart(T0 + 10 * MIN, 60 * MIN, 7 * MIN)).toBe(T0 + 67 * MIN);
+  });
+
+  it("éjfél-átlépés nem töri el a sávot", () => {
+    const beforeMidnight = Date.UTC(2026, 8, 5, 23, 58, 0);
+    expect(nextSlotStart(beforeMidnight, 5 * MIN)).toBe(Date.UTC(2026, 8, 6, 0, 0, 0));
+  });
+
+  it("a JELENLEGI sáv azonosítója óraugrás után is a mostani", () => {
+    const a = currentSlot(T0, 5 * MIN);
+    const b = currentSlot(T0 + 2 * MIN, 5 * MIN);
+    const c = currentSlot(T0 + 6 * MIN, 5 * MIN);
+    expect(a).toBe(b);
+    expect(a).not.toBe(c);
+  });
+});
+
+describe("runOnce — egyszeri futás, lease-szel", () => {
+  it("lefut, ha megkapja a lease-t", async () => {
+    const runExit = vi.fn(async () => {});
+    const { worker } = makeWorker({ runExit });
+    const r = await worker.runOnce("exit");
+    expect(r.ran).toBe(true);
+    expect(runExit).toHaveBeenCalledTimes(1);
+    expect(worker.stats.exit.runs).toBe(1);
+  });
+
+  it("NEM fut, ha más tartja a lease-t", async () => {
+    const runExit = vi.fn(async () => {});
+    const { worker } = makeWorker({ acquireLease: async () => lease(false), runExit });
+    const r = await worker.runOnce("exit");
+    expect(r.ran).toBe(false);
+    expect(r.reason).toBe("lease_held");
+    expect(runExit).not.toHaveBeenCalled();
+    expect(worker.stats.exit.skippedLease).toBe(1);
+  });
+
+  it("hiba esetén elengedi a lease-t és számolja a hibát", async () => {
+    const releaseLease = vi.fn(async () => true);
+    const { worker, events } = makeWorker({
+      runExit: async () => {
+        throw new Error("boom");
+      },
+      releaseLease,
+    });
+    await worker.runOnce("exit");
+    expect(releaseLease).toHaveBeenCalled();
+    expect(worker.stats.exit.errors).toBe(1);
+    expect(events.some((e) => e.type === "error")).toBe(true);
+  });
+
+  it("a hiba nem állítja meg a workert (a következő ciklus indulhat)", async () => {
+    let calls = 0;
+    const { worker } = makeWorker({
+      runExit: async () => {
+        calls++;
+        if (calls === 1) throw new Error("első hiba");
+      },
+    });
+    await worker.runOnce("exit");
+    const second = await worker.runOnce("exit");
+    expect(second.ran).toBe(true);
+    expect(calls).toBe(2);
+  });
+});
+
+describe("átfedés — a hosszú belépés nem fogja meg a kilépést", () => {
+  it("ugyanaz a fajta NEM indul újra, amíg fut", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { worker } = makeWorker({ runEntry: () => gate });
+
+    const first = worker.runOnce("entry");
+    // Az átfedés-őr szinkron zár, ezért a második hívás azonnal visszatér.
+    const second = await worker.runOnce("entry");
+    expect(second.ran).toBe(false);
+    expect(second.reason).toBe("overlap");
+    release();
+    await first;
+    expect(worker.stats.entry.skippedOverlap).toBe(1);
+  });
+
+  it("a FUTÓ belépés mellett a kilépés akadálytalanul lefut", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const runExit = vi.fn(async () => {});
+    const { worker } = makeWorker({ runEntry: () => gate, runExit });
+
+    const entry = worker.runOnce("entry");
+    const exit = await worker.runOnce("exit");
+    expect(exit.ran).toBe(true);
+    expect(runExit).toHaveBeenCalledTimes(1);
+    release();
+    await entry;
+  });
+
+  it("a belépés és a kilépés KÜLÖN lease-kulcsot használ", async () => {
+    const keys: string[] = [];
+    const { worker } = makeWorker({
+      acquireLease: async (key) => {
+        keys.push(key);
+        return lease(true);
+      },
+    });
+    await worker.runOnce("entry");
+    await worker.runOnce("exit");
+    expect(keys[0].startsWith("entry:")).toBe(true);
+    expect(keys[1].startsWith("exit:")).toBe(true);
+  });
+});
+
+describe("hurok, késés és leállítás", () => {
+  it("a hurok a sávkezdetkor futtat, és nem pótolja a kihagyott sávokat", async () => {
+    const slots: string[] = [];
+    const { worker, clock } = makeWorker({ runExit: async (slot) => void slots.push(slot) });
+
+    const started = worker.start();
+    // Az első sávkezdetig alszik.
+    clock.advance(5 * MIN);
+    await Promise.resolve();
+    // Nagy ugrás: 3 sávnyi idő telik el egyszerre (pl. a gép aludt).
+    clock.advance(15 * MIN);
+    await Promise.resolve();
+    worker.stop();
+    clock.advance(60 * MIN);
+    await started;
+
+    // Legfeljebb annyi futás, ahányszor ébredtünk — a kihagyott sávokat NEM pótoljuk.
+    expect(slots.length).toBeLessThanOrEqual(3);
+    const unique = new Set(slots);
+    expect(unique.size).toBe(slots.length);
+  });
+
+  it("a leállítás után új ciklus nem indul", async () => {
+    const runExit = vi.fn(async () => {});
+    const { worker, clock } = makeWorker({ runExit });
+    const started = worker.start();
+    worker.stop();
+    clock.advance(60 * MIN);
+    await started;
+    expect(worker.isRunning()).toBe(false);
+    expect(runExit).not.toHaveBeenCalled();
+  });
+
+  it("a leállítás eseményei megjelennek", async () => {
+    const { worker, clock, events } = makeWorker();
+    const started = worker.start();
+    worker.stop();
+    clock.advance(60 * MIN);
+    await started;
+    expect(events.map((e) => e.type)).toContain("started");
+    expect(events.map((e) => e.type)).toContain("stopping");
+    expect(events.map((e) => e.type)).toContain("stopped");
+  });
+
+  it("a ciklusok időtartama mérhető", async () => {
+    const { worker, clock } = makeWorker({
+      runExit: async () => {
+        clock.advance(1234);
+      },
+    });
+    await worker.runOnce("exit");
+    expect(worker.stats.exit.lastDurationMs).toBe(1234);
+  });
+});
