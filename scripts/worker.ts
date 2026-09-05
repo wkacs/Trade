@@ -30,7 +30,22 @@ async function main() {
   const { executeScheduledTick } = await import("@/lib/engine/run-scheduled-tick");
   const { loadPortfolioState } = await import("@/lib/portfolio/accounting");
   const { expireStaleReservations, listUnsettledIntents } = await import("@/lib/execution/order-store");
-  const { getTradingMode } = await import("@/lib/config");
+  const { getTradingMode, schedulerGuard } = await import("@/lib/config");
+
+  const once = arg("once");
+  const guard = schedulerGuard("worker");
+  if (!guard.active && !once && !process.argv.includes("--force")) {
+    // A FOLYAMATOS futás az, ami duplázna. Az egyszeri (`--once`) futás mehet.
+    console.error(
+      [
+        `[worker] NEM indul: ${guard.message}`,
+        "  Állandó workerhez: SCHEDULER=worker (és a GitHub Actions tick ekkor magától kihagy).",
+        "  Kényszerített indítás (csak ha tudod, mit csinálsz): pnpm worker --force",
+      ].join("\n"),
+    );
+    process.exit(2);
+    return;
+  }
 
   const portfolio = await loadPortfolioState();
   if (!portfolio) {
@@ -93,7 +108,6 @@ async function main() {
     },
   );
 
-  const once = arg("once");
   if (once === "exit" || once === "entry") {
     const r = await worker.runOnce(once);
     console.log(`[worker] egyszeri ${once} futás: ${r.ran ? `lefutott (${r.slot})` : `kihagyva (${r.reason})`}`);

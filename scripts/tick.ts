@@ -15,7 +15,19 @@ import { config } from "dotenv";
 config({ path: ".env.local" });
 config(); // .env fallback (a már beállított kulcsokat nem írja felül)
 
+/** `--force`: akkor is fut, ha nem ez az aktív ütemező (kézi, egyszeri futtatás). */
+const FORCE = process.argv.includes("--force");
+
 async function main() {
+  const { schedulerGuard } = await import("@/lib/config");
+  const guard = schedulerGuard("github-actions");
+  if (!guard.active && !FORCE) {
+    // NEM hiba: a workflow zölden kihagyja. Így a workflow bekapcsolva maradhat
+    // anélkül, hogy a workerrel párhuzamosan tickelne.
+    console.log(`[scripts/tick] KIHAGYVA — ${guard.message} (kézi futtatás: --force)`);
+    console.log(JSON.stringify({ ok: true, skipped: true, reason: "not_active_scheduler" }, null, 2));
+    return;
+  }
   const { executeScheduledTick } = await import("@/lib/engine/run-scheduled-tick");
   const result = await executeScheduledTick();
   console.log(JSON.stringify(result, null, 2));

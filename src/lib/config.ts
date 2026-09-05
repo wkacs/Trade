@@ -71,3 +71,56 @@ export function getTradingMode(): TradingMode {
   const mode = process.env.TRADING_MODE ?? "paper";
   return mode === "live" ? "live" : "paper";
 }
+
+/**
+ * Az ütemező szerepe (T28).
+ *
+ * PONTOSAN EGY aktív ütemező lehet. Három hely tudna tickelni:
+ *   - `worker`         → állandó folyamat (5 perces kilépés + órás belépés) — TELJES működés
+ *   - `github-actions` → óránkénti runner (`scripts/tick.ts`) — CSAK órás belépés, nincs 5 perces kilépés
+ *   - `vercel-cron`    → a `/api/cron/tick` route Vercel ütemezéssel — 60s limit miatt megbízhatatlan
+ *
+ * A lease (T10) második védvonalként úgyis kizárja a dupla futást ugyanarra a sávra, de
+ * a konfiguráció szintjén is egyértelműnek kell lennie, KI az ütemező — különben senki
+ * nem tudja, melyik naplót kell nézni, és a „miért nem futott" kérdés megválaszolhatatlan.
+ */
+export type SchedulerRole = "worker" | "github-actions" | "vercel-cron";
+
+const SCHEDULER_ROLES: SchedulerRole[] = ["worker", "github-actions", "vercel-cron"];
+
+/** A beállított ütemező. Alapértelmezés: `github-actions` (ez fut ma, ingyen). */
+export function getSchedulerRole(): SchedulerRole {
+  const raw = (process.env.SCHEDULER ?? "github-actions").trim();
+  return (SCHEDULER_ROLES as string[]).includes(raw) ? (raw as SchedulerRole) : "github-actions";
+}
+
+/** Igaz, ha a SCHEDULER értéke érvénytelen (elgépelés esetén ne csendben default-oljunk). */
+export function isSchedulerRoleValid(): boolean {
+  const raw = process.env.SCHEDULER;
+  return raw === undefined || (SCHEDULER_ROLES as string[]).includes(raw.trim());
+}
+
+/**
+ * Ellenőrzés indításkor: a hívó az AKTÍV ütemező-e.
+ *
+ * Nem dob kivételt — a hívó dönti el, mit tesz. A kilépés-ciklus (`--once exit`) és a
+ * kézi futtatás akkor is megengedett, ha nem ez az aktív ütemező; a FOLYAMATOS futás nem.
+ */
+export function schedulerGuard(role: SchedulerRole): { active: boolean; configured: SchedulerRole; message: string } {
+  const configured = getSchedulerRole();
+  if (!isSchedulerRoleValid()) {
+    return {
+      active: false,
+      configured,
+      message: `Ismeretlen SCHEDULER érték: "${process.env.SCHEDULER}". Érvényes: ${SCHEDULER_ROLES.join(", ")}.`,
+    };
+  }
+  if (configured === role) return { active: true, configured, message: `Az aktív ütemező: ${role}.` };
+  return {
+    active: false,
+    configured,
+    message:
+      `Ez a folyamat "${role}", de az aktív ütemező a beállítás szerint "${configured}". ` +
+      "EGY aktív ütemező lehet — állítsd a SCHEDULER változót, vagy állítsd le a másikat.",
+  };
+}

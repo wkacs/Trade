@@ -4,6 +4,15 @@ name: hourly-tick
 # Vercel Hobby 60s maxDuration limit, ami cold-starton 504-et okozott (kimaradt tickek).
 # A runner közvetlenül a Neon DB ellen dolgozik. Kötelező secretek: lásd lent.
 #
+# EGY AKTÍV ÜTEMEZŐ (T28): a lépés a `SCHEDULER` repo-változót nézi. Ha az nem
+# `github-actions`, a tick ZÖLDEN KIHAGYJA magát — így ez a workflow bekapcsolva
+# maradhat akkor is, amikor az állandó worker az aktív ütemező. Beállítás:
+# Settings → Secrets and variables → Actions → Variables → SCHEDULER.
+#
+# KORLÁT: itt CSAK az órás belépés fut. 5 perces kilépés-ciklus NINCS, tehát a stop és
+# a take-profit legfeljebb óránként néz magára. Teljes működéshez: `pnpm worker`
+# (docs/worker-runbook.md).
+#
 # A GitHub ütemezett workflow a DEFAULT branch-en (master) fut, és ~60 nap commit-mentes
 # inaktivitás után letiltódik (egy commit újraaktiválja).
 on:
@@ -39,6 +48,9 @@ jobs:
           LLM_MODEL_PHASE2: ${{ secrets.LLM_MODEL_PHASE2 }}
           # BIZTONSÁG: "paper" — SOHA ne "live", amíg nem validáltad a backtesttel!
           TRADING_MODE: ${{ secrets.TRADING_MODE }}
+          # EGY AKTÍV ÜTEMEZŐ: üresen hagyva az alapértelmezés "github-actions",
+          # tehát a tick fut. "worker" értéknél ez a lépés kihagyja magát.
+          SCHEDULER: ${{ vars.SCHEDULER }}
           # OPCIONÁLIS (nélkülük is fut):
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
           WHALEALERT_KEY: ${{ secrets.WHALEALERT_KEY }}

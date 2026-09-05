@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { TradingWorker, nextSlotStart, currentSlot, type WorkerDeps, type WorkerEvent, type WorkerConfig } from "@/lib/engine/worker";
-import type { Lease } from "@/lib/engine/run-lease";
+import { leaseKey, slotId, SLOT_MS, type Lease } from "@/lib/engine/run-lease";
 
 const MIN = 60_000;
 /** 2026-09-05 10:00:00 UTC */
@@ -264,5 +264,52 @@ describe("induláskori egyeztetés (T27)", () => {
   it("egyeztető nélkül a worker nem tiltja a vételt (paper mód)", async () => {
     const { worker } = makeWorker();
     expect(await worker.reconcileNow()).toBe(true);
+  });
+});
+
+describe("egy aktív scheduler — a worker és a cron NEM dupláz (T28)", () => {
+  /**
+   * A `executeScheduledTick` (cron route és `scripts/tick.ts`) offset NÉLKÜL számol
+   * sávot: `leaseKey("entry", slotId(now, SLOT_MS.entry))`. Ha a worker az offsettel
+   * számolna, ugyanarra az órára MÁS kulcsot kapna, és a lease nem zárná ki egymást.
+   */
+  const cronKey = (nowMs: number) => leaseKey("entry", slotId(nowMs, SLOT_MS.entry));
+
+  it("a worker belépési kulcsa MEGEGYEZIK a cron kulcsával a :07-es indításnál", () => {
+    const at = Date.UTC(2026, 8, 5, 14, 7, 0);
+    expect(leaseKey("entry", currentSlot(at, SLOT_MS.entry))).toBe(cronKey(at));
+  });
+
+  it("az egész órán belül végig ugyanaz a kulcs (késve induló futás is)", () => {
+    for (const min of [7, 12, 30, 59]) {
+      const at = Date.UTC(2026, 8, 5, 14, min, 0);
+      expect(leaseKey("entry", currentSlot(at, SLOT_MS.entry))).toBe(cronKey(Date.UTC(2026, 8, 5, 14, 7, 0)));
+    }
+  });
+
+  it("a következő óra MÁS kulcs (az óránkénti futás nem esik ki)", () => {
+    const a = leaseKey("entry", currentSlot(Date.UTC(2026, 8, 5, 14, 7, 0), SLOT_MS.entry));
+    const b = leaseKey("entry", currentSlot(Date.UTC(2026, 8, 5, 15, 7, 0), SLOT_MS.entry));
+    expect(a).not.toBe(b);
+  });
+
+  it("ha a cron már elvitte a sávot, a worker belépése kimarad", async () => {
+    const held: Record<string, string> = { [cronKey(T0)]: "tick-runner" };
+    const { worker } = makeWorker(
+      {
+        acquireLease: async (key, owner, ttl) => {
+          if (held[key] && held[key] !== owner) {
+            return { key, owner, fencingToken: 1, expiresAtMs: 0, acquired: false, heldBy: held[key] };
+          }
+          held[key] = owner;
+          return { key, owner, fencingToken: 1, expiresAtMs: ttl, acquired: true, heldBy: owner };
+        },
+      },
+      { entryIntervalMs: SLOT_MS.entry },
+    );
+    const r = await worker.runOnce("entry");
+    expect(r.ran).toBe(false);
+    expect(r.reason).toBe("lease_held");
+    expect(worker.stats.entry.runs).toBe(0);
   });
 });

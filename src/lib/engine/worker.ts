@@ -67,9 +67,16 @@ export function nextSlotStart(nowMs: number, intervalMs: number, offsetMs = 0): 
   return base > nowMs ? base : base + intervalMs;
 }
 
-/** A JELENLEGI sáv azonosítója. Késés után is EZ fut, nem a kihagyott régi sávok. */
-export function currentSlot(nowMs: number, intervalMs: number, offsetMs = 0): string {
-  return slotId(nowMs - offsetMs, intervalMs);
+/**
+ * A JELENLEGI sáv azonosítója. Késés után is EZ fut, nem a kihagyott régi sávok.
+ *
+ * SZÁNDÉKOSAN NINCS benne az offset: a sáv a fali óra szerinti idősáv (pl. a 14:00–15:00
+ * óra), az offset csak azt mondja meg, a sávon BELÜL mikor indulunk (:07). Ha az offset
+ * beleszámítana, a worker és a cron route (`executeScheduledTick`, ami offset nélkül
+ * számol) KÜLÖNBÖZŐ lease-kulcsot kapna ugyanarra az órára, és mindkettő lefutna.
+ */
+export function currentSlot(nowMs: number, intervalMs: number): string {
+  return slotId(nowMs, intervalMs);
 }
 
 export interface CycleStats {
@@ -119,8 +126,7 @@ export class TradingWorker {
    */
   async runOnce(kind: "entry" | "exit"): Promise<{ ran: boolean; slot: string; reason?: "overlap" | "lease_held" }> {
     const interval = this.intervalFor(kind);
-    const offset = this.offsetFor(kind);
-    const slot = currentSlot(this.deps.now(), interval, offset);
+    const slot = currentSlot(this.deps.now(), interval);
     const key = leaseKey(kind, slot);
 
     // Az átfedés-őr SZINKRON módon zár: a lease-lekérés is hálózati hívás, ezért két

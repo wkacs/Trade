@@ -1,0 +1,239 @@
+# Futtatási és átállási runbook (T28)
+
+Ez a dokumentum azt írja le, **mi futtatja a botot, hogyan indul, hogyan áll le, hogyan
+látszik, hogy él, és hogyan lehet visszaállni**, ha valami elromlik.
+
+Állapot a dokumentum írásakor: **paper mód, live kereskedés kikapcsolva.** A live
+átállás nem ennek a runbooknak a tárgya — külön döntés, külön ellenőrzőlista (T32).
+
+---
+
+## 1. Pontosan EGY aktív ütemező
+
+Három hely tudna tickelni. **Egyszerre csak egy lehet aktív.**
+
+| Szerep | Mit tud | Mit NEM tud | Költség |
+|---|---|---|---|
+| `worker` | 5 perces kilépés-ciklus **és** órás belépés | állandóan futó gépet igényel | a gép ára (otthoni PC / NAS: 0 Ft többlet) |
+| `github-actions` | órás belépés (`scripts/tick.ts`) | **nincs 5 perces kilépés** — a stop csak óránként nézi meg magát | ingyenes (a repó Actions-kvótáján belül) |
+| `vercel-cron` | HTTP tick a `/api/cron/tick`-en | Hobby csomagon 60 s a plafon, a tick cold-starton ezt túllépheti → 504 | ingyenes, de megbízhatatlan |
+
+A választást **egy env változó** rögzíti:
+
+```bash
+SCHEDULER=worker            # vagy: github-actions | vercel-cron
+```
+
+Ezt a `schedulerGuard()` (`src/lib/config.ts`) érvényesíti:
+
+- `pnpm worker` **nem indul el**, ha `SCHEDULER != worker` (kilépési kód `2`).
+  Kivétel: `--once` futás és a `--force` kapcsoló.
+- `scripts/tick.ts` (a GitHub-workflow) **zölden kihagyja** magát, ha
+  `SCHEDULER != github-actions`. Így a workflow bekapcsolva maradhat anélkül, hogy a
+  workerrel párhuzamosan tickelne. Kézi futtatás: `pnpm tsx scripts/tick.ts --force`.
+- Elgépelt érték (`SCHEDULER=wroker`) esetén **egyik szerep sem aktív** — a hiba
+  látszik, nem csúszik át csendben egy default-ra.
+
+### Miért nem duplázna akkor sem, ha mégis kettő futna
+
+Második védvonalként a **lease** (T10) van: a belépési ciklus idősávonként egy tartós
+claim-et szerez (`entry:<sáv>`), és aki nem nyerte meg, az nem fut. A worker és a
+`executeScheduledTick` **ugyanazt a kulcsot** számolja ki ugyanarra az órára (a sáv a
+fali óra szerinti idősáv; az offset csak azt mondja meg, a sávon belül mikor indulunk).
+Ezt a `tests/lib/engine/worker.test.ts` „egy aktív scheduler" blokkja bizonyítja.
+
+A `vercel.json`-ból a cron **el lett távolítva**: korábban egy napi `0 7 * * *` tick is
+ott figyelt a GitHub-runner mellett, amiről a README nem írt. Ez volt a harmadik,
+nyilvántartás nélküli ütemező.
+
+---
+
+## 2. Helyi worker (teljes működés)
+
+### Indítás
+
+```bash
+cd C:\Users\konig\ZCodeProject
+# .env.local: DATABASE_URL, LLM_*, TRADING_MODE=paper, SCHEDULER=worker
+pnpm install
+pnpm worker
+```
+
+Amit induláskor csinál, sorrendben:
+
+1. betölti a `.env.local`-t (fallback `.env`),
+2. ellenőrzi az ütemező-szerepet (`schedulerGuard`),
+3. betölti a portfólió-állapotot — **DB nélkül nem indul** (hiányzó DB nem aktiválhat ordert),
+4. felszabadítja a lejárt költségvetés-foglalásokat (`expireStaleReservations`),
+5. megnézi az ismeretlen állapotú megbízásokat (`listUnsettledIntents`) — ha van, a
+   ciklusok **nem indítanak új ordert**, amíg nincsenek egyeztetve,
+6. LIVE módban tőzsdei egyeztetést futtat (T27). Ha az egyeztetés hibára fut, a
+   viselkedés konzervatív: **új vétel tilos**, a kilépés és a védelem továbbra is megy.
+
+### Ciklusok
+
+| Ciklus | Alapérték | Mit csinál |
+|---|---|---|
+| kilépés | 5 perc | friss bid/ask, stop / take-profit / trailing, LLM nélkül |
+| belépés | 60 perc, a sáv kezdete után 7 perccel | lezárt gyertya, collectorok, ML, LLM, kockázati kapu, végrehajtás |
+
+A kettő **külön hurok és külön lease**: egy lassú LLM-hívás nem fogja meg a kilépést.
+Késés vagy újraindulás után **nem pótoljuk** a kihagyott sávokat — mindig a jelenlegi
+sáv fut.
+
+### Egyszeri futtatás (kézi ellenőrzéshez)
+
+```bash
+pnpm worker:once                 # egy kilépés-ciklus
+pnpm worker --once entry         # egy belépés-ciklus
+pnpm worker --exit-ms 60000      # rövidebb kilépés-ciklus (teszthez)
+```
+
+### Leállítás és újraindítás
+
+`Ctrl+C` vagy `SIGTERM`: **a folyamatban lévő ciklus befejeződik, új nem indul.**
+Erőszakos kilövés (`taskkill /F`) esetén a lease legfeljebb a TTL végéig (a sáv 90%-a)
+blokkolja a következő futást — utána magától átvehető. Ez nem hiba, csak késés.
+
+Újraindítás után:
+
+```bash
+pnpm audit:state          # mit lát a rendszer a saját állapotáról
+pnpm worker
+```
+
+### Állandó futtatás Windowsban
+
+A worker sima Node-folyamat, semmi különös nem kell hozzá. Két bevált mód:
+
+- **Feladatütemező** (Task Scheduler): trigger „bejelentkezéskor / rendszerindításkor",
+  művelet `pnpm`, argumentum `worker`, indítási hely a repó gyökere, „a felhasználó
+  bejelentkezése nélkül is fusson" bekapcsolva.
+- **NAS / Docker**: ugyanaz a parancs egy `node:20` képben, `restart: unless-stopped`.
+
+Fizetős felhő-futtatás (Railway, Fly, Render, VPS) **nem része ennek a lépésnek**: az
+külön költségdöntés, lásd 6. szakasz.
+
+---
+
+## 3. GitHub Actions ütemezés (ingyenes, csökkentett működés)
+
+```yaml
+# .github/workflows/tick.yml — óránként :07-kor
+SCHEDULER: github-actions
+```
+
+Amit tudni kell róla:
+
+- **Csak órás belépés van.** 5 perces kilépés nincs, tehát a stop és a take-profit
+  legfeljebb óránként egyszer néz magára. Egy órán belüli visszaesésre a rendszer nem
+  reagál. Ez tudatos csökkentés, nem hiba — de a kockázat-számításban ott kell lennie.
+- A GitHub ütemezés **terhelés alatt késik** (percekkel is), és a workflow ~60 nap
+  commit-mentesség után letiltódik (egy commit újraaktiválja).
+- A futás a **default branch**-en él, és a Neon DB ellen dolgozik.
+
+Kötelező secretek: `DATABASE_URL`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_PHASE1`,
+`LLM_MODEL_PHASE2`, `TRADING_MODE`. Opcionális: `CRYPTOPANIC_TOKEN`, `WHALEALERT_KEY`,
+`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`. A `SCHEDULER` repo-változóként (`vars`) is
+megadható; ha nincs beállítva, az alapértelmezés `github-actions`, tehát a workflow fut.
+
+**Átállás workerre:** állítsd a repo `SCHEDULER` változóját `worker`-re (vagy vedd ki a
+`schedule:` blokkot). A workflow ettől kezdve zölden kihagyja magát.
+
+---
+
+## 4. Hosted endpointok és kulcsok
+
+| Endpoint | Auth | Megjegyzés |
+|---|---|---|
+| `POST /api/cron/tick` | `Authorization: Bearer $CRON_SECRET` | **kötelező** — beállított titok nélkül a route elutasít (T32) |
+| `GET /api/analytics` | nincs | csak olvasás, származtatott számok |
+| dashboard oldalak | nincs | személyes használat, publikus URL-en is csak olvasható |
+
+Kulcsok szerepe:
+
+| Kulcs | Mire kell | Mi történik nélküle |
+|---|---|---|
+| `DATABASE_URL` | minden állapot (ledger, döntések, lease) | a worker **nem indul**, a tick nem könyvel |
+| `LLM_API_KEY` + `LLM_BASE_URL` | Phase-1/Phase-2 döntés | nincs AI-döntés; a kód-alapú kilépés és a kockázati kapu megy |
+| `CRON_SECRET` | a hosted tick-endpoint védelme | a route **elutasít** (fail-closed) |
+| `TRADING_MODE` | paper vagy live | hiányzó érték = `paper` |
+| `SCHEDULER` | ki az aktív ütemező | hiányzó érték = `github-actions` |
+| `BINANCE_API_KEY/SECRET` | **csak** live módban | paper módban nem használt |
+
+A Binance kulcs jogosultsága: **read + trade, SOHA withdraw.**
+
+---
+
+## 5. Egészség és hibakeresés
+
+### Gyors állapot
+
+```bash
+pnpm audit:state       # portfólió, pozíciók, nyitott intentek, utolsó tickek
+pnpm tsx scripts/check-db.ts
+```
+
+A dashboardon a **TickInspector** „egészség" blokkja mondja meg, mikor futott utoljára
+sikeres belépés és kilépés, mekkora a quote-kor, és **miért nem történt kötés**
+(`explainNoTrade`). Ami nem ismert, az `null`, nem `0`.
+
+### Heartbeat
+
+A siker-heartbeat **csak sikeres könyvelés mellett** megy ki. Azonos hibakód nem
+ismétlődik minden tickben (deduplikálva), de a más típusú hiba és a helyreállás azonnal
+látszik.
+
+### Tipikus tünetek
+
+| Tünet | Ok | Teendő |
+|---|---|---|
+| `[worker] NEM indul: ... EGY aktív ütemező lehet` | `SCHEDULER` nem `worker` | állítsd át, vagy `--force` egyszeri futáshoz |
+| `skipped: lease_held` | másik futó vitte el a sávot | normális; ha tartósan, keresd a másik futót |
+| `unsettled_intents` | ismeretlen kimenetelű megbízás | egyeztetés (T27), **nem** újraküldés |
+| `reason: "stale_quote"` | a bid/ask öregebb 10 s-nál | adatforrás-hiba; kilépés szándékosan nem történik |
+| `persist_failed` | a mentés nem sikerült | a ciklus eredménye nem tartós; a hiba nem tűnik el magától |
+| ML: `KARANTÉN: nincs ML-jel` | a `model.json` feature-verziója régi | újratréning kell (`pnpm tsx scripts/train-model.ts`) |
+
+---
+
+## 6. Rollback
+
+**Kódvisszaállás.** Minden feladat külön commit. Visszaállás egy korábbi állapotra:
+
+```bash
+git log --oneline
+git revert <sha>          # egy feladat visszavonása
+```
+
+**Séma.** A `0002`–`0004` migrációk **additívak**: új táblák és függvények, a régi
+táblák érintetlenek. A régi kód ezért a séma visszabontása nélkül is elindul; a v2
+táblák egyszerűen kihasználatlanul maradnak. **Táblát nem törlünk vissza** — a
+történeti adat marad.
+
+**Ledger-migráció.** A `pnpm migrate:ledger` alapból **dry-run**. A legacy sorok
+`provenance='legacy-unverified'` jelöléssel, **egyenlegmozgás nélkül** kerülnek be
+történetként. Részletek: [`docs/ledger-migration.md`](ledger-migration.md).
+
+**Leállás mint rollback.** A legbiztosabb visszavonás: `SCHEDULER` átállítása egy nem
+futó szerepre (pl. `vercel-cron`, miközben a Vercel cron nincs beállítva). Ekkor sem a
+worker, sem a GitHub-tick nem fut, és **semmi nem kereskedik**, miközben a dashboard és
+az adat megmarad.
+
+---
+
+## 7. Költségdöntést igénylő tételek (NEM automatikus)
+
+Ezek egyike sincs bekapcsolva, és egyik sem kapcsolható be külön felhasználói döntés
+nélkül:
+
+- **Fizetős hosting** állandó workerhez (VPS / Railway / Fly / Render): havidíj.
+- **Neon fizetős tier**: az ingyenes tier tárhely- és compute-korlátos; hosszú
+  történeti adatnál merül fel.
+- **Fizetős LLM** (`glm-5.2` a Phase-2-höz): egyenleg-feltöltés kell. A `glm-4.7-flash`
+  ingyenes.
+- **Fizetős adatforrás** (CryptoPanic, WhaleAlert): jelenleg ingyenes RSS + Fear&Greed
+  megy helyettük.
+
+A jelenlegi felállás ingyenes: GitHub Actions ütemezés + Neon free tier +
+`glm-4.7-flash`. Az órás kilépés ennek az ára.
