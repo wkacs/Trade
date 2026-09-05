@@ -35,6 +35,7 @@ import {
   type LedgerState,
 } from "@/lib/portfolio/ledger";
 import { type Dec, ZERO, add, div, mul, dec, toNumber, isPositive } from "@/lib/portfolio/money";
+import { resolveDayGate, sinceInceptionPnlPct, type DayGateResult } from "@/lib/portfolio/day-equity";
 import type { Decision, Trade, DataPoint, RawDecision } from "@/lib/types";
 
 export interface TickInput {
@@ -76,6 +77,17 @@ export interface TickResult {
    * Hamis esetén a döntés naplózódik, de order SOHA nem megy ki.
    */
   tradingEnabled: boolean;
+  /** A napi veszteségkapu állapota (referencia-forrás, napi hozam, latch). */
+  dayGate: {
+    dayUtc: string;
+    source: string;
+    dayPnlPct: number | null;
+    latched: boolean;
+    blockNewBuys: boolean;
+    reason: string;
+  };
+  /** Az INDULÁS ÓTA mért hozam — külön mutató, nem a napi kapu bemenete. */
+  inceptionPnlPct: number | null;
 }
 
 /** Szimulált díj — egyezik a paper fill-modellel (0.1%). */
@@ -170,13 +182,33 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     }
   }
 
-  // Napi P&L a mark-to-market equityből. A VALÓDI napkezdő baseline a T07-ben érkezik;
-  // addig a kezdőtőkéhez mért érték marad, de már a közös ledgerből számolva.
   const equityNow = (): Dec => equityAt(ledger, pricesDec);
-  let dayPnlPct = 0;
-  if (dbState && dbState.initialCapitalUsd > 0) {
-    dayPnlPct = toNumber(div(equityNow(), dec(dbState.initialCapitalUsd))) - 1;
-  }
+
+  // ── Napi veszteségkapu (T07). A régi kód az INDULÁS ÓTA mért hozamot használta;
+  //    itt UTC napkezdő referencia, pénzmozgás-korrekció és napi latch dolgozik.
+  //    Ha egy BIRTOKOLT coin ára hiányzik, az equity nem mérhető → nincs kitalált
+  //    napi hozam, és az új vétel szünetel (a SELL nem).
+  const heldWithoutPrice = Object.keys(ledger.positions).filter((s) => pricesDec[s] === undefined);
+  const measurableEquity = heldWithoutPrice.length === 0 ? equityNow() : null;
+  const dayGate: DayGateResult = tradingEnabled
+    ? await resolveDayGate(
+        portfolioId,
+        mode,
+        measurableEquity,
+        dec(RISK_LIMITS.dailyLossCircuitBreakerPct),
+        Date.now(),
+      )
+    : {
+        dayUtc: "",
+        row: { dayUtc: "", baselineEquity: ZERO, cashFlowQuote: ZERO, source: "missing", lossLatched: false, latchedAt: null },
+        dayPnlPct: null,
+        latched: false,
+        blockNewBuys: true,
+        reason: "Nincs hiteles portfólió-állapot.",
+        needsPersist: false,
+      };
+  /** Az indulás óta mért hozam KÜLÖN mutató — nem a napi kapu bemenete. */
+  const inceptionPnlPct = dbState ? sinceInceptionPnlPct(equityNow(), dec(dbState.initialCapitalUsd)) : null;
 
   // ── Végrehajtási függőségek (a broker CSAK jóváhagyott intentet kaphat) ────
   /** A stop/TP trigger az intentId-hoz kötve (a paper fill-modellnek). */
@@ -211,9 +243,8 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       reservedQuoteBySymbol: {},
       reservedQuoteTotal: ZERO,
       originBudgetQuote: originBudgetFor(origin, { weeklyDcaRemaining: weeklyRemaining }),
-      // A valódi napi latch a T07-ben kapcsolódik be; addig a mért napi hozam dönt.
-      dailyLossLatched: dayPnlPct <= -RISK_LIMITS.dailyLossCircuitBreakerPct,
-      dayBaselineMissing: false,
+      dailyLossLatched: dayGate.latched,
+      dayBaselineMissing: dayGate.dayPnlPct === null,
       allowedSymbols: [...COIN_UNIVERSE],
       quoteAsset: "USDT",
     }),
@@ -431,7 +462,9 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   const decision = applyRisk(
     rawDecision,
     riskContextFromLedger(ledger, pricesDec, {
-      dayPnlPct,
+      dayPnlPct: dayGate.dayPnlPct ?? undefined,
+      dailyLossLatched: dayGate.latched,
+      dayBaselineMissing: dayGate.dayPnlPct === null,
       allowedSymbols: [...COIN_UNIVERSE],
     }),
     {
@@ -498,5 +531,14 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     cycleActions,
     process: tickProcess,
     tradingEnabled,
+    dayGate: {
+      dayUtc: dayGate.dayUtc,
+      source: dayGate.row.source,
+      dayPnlPct: dayGate.dayPnlPct,
+      latched: dayGate.latched,
+      blockNewBuys: dayGate.blockNewBuys,
+      reason: dayGate.reason,
+    },
+    inceptionPnlPct,
   };
 }

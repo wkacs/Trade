@@ -6,53 +6,59 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 
 ### T01 — Biztonságos mérési és integrációs alap
 
-- [ ] Kész
+- [x] Kész
 - Függőség: nincs. Méret: M.
 - Fájlok: `scripts/audit-state.ts`, `tests/integration/setup.ts`, `vitest.integration.config.ts`, `package.json`, `.gitignore`.
 - Elfogadás: csak olvasó, redaktált állapotexport; külön teszt-DB és parancs, alapértelmezésben semmilyen teszt nem használhatja a normál DATABASE_URL-t; a 182 tesztes alapállapot és az audit példái rögzítve.
 - Ellenőrzés: `pnpm test`; a script fixture-adatú próbája; az integrációs setup elutasítja a normál/hiányzó DB-konfigurációt. Exportált pénzügyi adatok ne kerüljenek gitbe.
+- **Bizonyíték:** `pnpm test` → 40 fájl / 186 teszt zöld; `pnpm exec tsc --noEmit` tiszta. A `pnpm exec vitest run --config vitest.integration.config.ts` TEST_DATABASE_URL nélkül HIBÁVAL áll le (Hiányzó TEST_DATABASE_URL), tehát fail-closed. A unit-setup törli a DATABASE_URL-t, így egy teszt sem érheti el az éles DB-t. Alapállapot rögzítve: `docs/verification/baseline-2026-09-05.md`. KORLÁT: a gépen nincs helyi PostgreSQL (nincs `psql`, nincs Docker), ezért integrációs teszt ebben a szakaszban nem futott.
 
 ### T02 — Verziózott order- és fill-szerződés
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T01. Méret: M.
 - Fájlok: `src/lib/types.ts`, `src/lib/execution/contracts.ts`, `src/lib/execution/broker.ts`, `tests/lib/execution/contracts.test.ts`.
 - Elfogadás: BUY quote-budget és SELL base-qty megkülönböztethető; intent/fill azonosító, díjeszköz és állapot explicit; v2 típusok kompatibilitási adapterrel bevezetve, a régi runtime még fordul.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/execution/contracts.test.ts`; `pnpm exec tsc --noEmit`; negatív/NaN/Infinity és értelmetlen oldali mezők elutasítása.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/execution/contracts.test.ts tests/lib/portfolio/money.test.ts` → 36 teszt zöld; `tsc --noEmit` tiszta. Elutasított bemenetek: negatív és nulla mennyiség, NaN, Infinity, exponenciális alak, ellentétes oldali mező (BUY + baseQty), hiányzó contractVersion. A decimális megoldás saját BigInt fixpont (`money.ts`), nincs új csomag, a `pnpm-lock.yaml` változatlan.
 
 ### T03 — Atomi ledgerhez szükséges bővítő séma
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T02. Méret: M.
 - Fájlok: `src/db/schema.ts`, `src/db/client.ts`, `src/db/migrations/<következő>.sql`, `tests/integration/ledger-schema.test.ts`, `docs/ledger-contract.md`.
 - Elfogadás: numeric összegek, portfolio/mode/version határ, egyedi intent/fill azonosítók, reservations és napi equity tárolható; driver/tranzakciómegoldás ellenőrzött; migráció nem veszít régi sorokat, meglévő reader tovább működik.
 - Ellenőrzés: izolált PostgreSQL-migráció üres és legacy fixture-re; egyediség és CHECK feltételek valódi DB-ben; dokumentált tranzakciópróba. Külső DB-n még nincs alkalmazás.
+- **Bizonyíték:** `pnpm exec drizzle-kit generate` → 0002 (csak CREATE TABLE és CREATE INDEX, egyetlen ALTER vagy DROP sem a v1 táblákon) + kézzel írt 0003 (CHECK feltételek, `apply_fill_v2`, `acquire_run_lease`). A driver-képesség ELLENŐRIZVE, nem feltételezve: `drizzle-orm/neon-http/session.js:108` → No transactions support in neon-http driver; `session.js:94` → a batch `client.transaction(...)`-t hív. Dokumentálva: `docs/ledger-contract.md` és `DRIVER_CAPABILITIES`. 🔴 KORLÁT: a `tests/integration/ledger-schema.test.ts` MEGÍRVA, de NEM FUTOTT — nincs elérhető PostgreSQL a gépen; futtatáshoz `TEST_DATABASE_URL` kell.
 
 **C1:** T01–T03 után alap-suite, típusellenőrzés, izolált migráció zöld; export és séma áttekinthető.
 
 ### T04 — Közös fill-könyvelő
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T02. Méret: M.
 - Fájlok: `src/lib/portfolio/ledger.ts`, `src/lib/portfolio/money.ts`, `tests/lib/portfolio/ledger.test.ts`, `package.json`, `pnpm-lock.yaml`.
 - Elfogadás: azonos fill → azonos cash/qty/bekerülési érték; BUY és SELL díj quote/base/harmadik eszközben egyszer számít; részleges zárás helyes, készlet és cash nem lesz tiltottan negatív. Egy kiválasztott decimális megoldás, nincs többféle kerekítés.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/portfolio/ledger.test.ts`; kézzel ellenőrizhető round-trip példák, változatlan árnál veszteség pontosan a költség, részleges fill és dust határ.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/portfolio/ledger.test.ts` → 21 teszt zöld. Kézzel ellenőrizhető példák: 60 USD vétel 0,06 díjjal → cash 39,94 és bekerülési érték 60,06; változatlan áron BUY majd SELL realizált eredménye pontosan −(0,06 + 0,06); fél pozíció zárása a bekerülési érték felét viszi; dust-küszöbnél a maradék is realizálódik. A díj quote, base és BNB eszközben külön, pontosan egyszer számít. Egy decimális megoldás (`money.ts`) dokumentált kerekítéssel.
 
 ### T05 — PaperBroker valósághű teljesülése
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T04. Méret: M.
 - Fájlok: `src/lib/execution/paper-broker.ts`, `src/lib/execution/paper-fill.ts`, `tests/lib/execution/paper-broker.test.ts`, `tests/lib/execution/paper-fill.test.ts`.
 - Elfogadás: SELL birtokolt qty-ből, helyes díjjal; nincs orphan SELL vagy nulla order; 95-ös stop és 90-es megfigyelt eladási ár nem ad 95-ös fillt, spread/csúszás explicit. A broker nem vezet második, eltérő igazságforrású egyenleget.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/execution/paper-broker.test.ts tests/lib/execution/paper-fill.test.ts`; BUY→részleges SELL→teljes SELL azonos ledgeren.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/execution/paper-broker.test.ts tests/lib/execution/paper-fill.test.ts` → 28 teszt zöld. A 95-ös stop és 90-es megfigyelt ár mostantól 90-en tölt. A SELL a birtokolt mennyiségből megy cash=0 mellett is; nem birtokolt coin eladása `no_position` elutasítás; nulla méretű order nem keletkezik. A BUY → részleges SELL → teljes SELL sor ugyanazon a ledgeren fut le. A v2 broker nem vezet saját egyenleget: külön teszt bizonyítja, hogy a ledger változatlan marad, amíg a hívó nem könyvel.
 
 ### T06 — Minden order közös kockázati kapun
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T04, T05. Méret: M.
 - Fájlok: `src/lib/risk/risk-manager.ts`, `src/lib/engine/execute-intent.ts`, `src/lib/engine/tick.ts`, `tests/lib/risk/risk-manager.test.ts`, `tests/lib/engine/execute-intent.test.ts`.
 - Elfogadás: AI/DCA/momentum/manual egységes kaput kap; 20 USD BTC + 80 USD cash + 20%-os BUY nem növeli tovább a BTC-t; max positions, cash, reserved összeg és szimbólumlista együtt számít. SELL cash=0 mellett is végrehajtható és veszteségkapunál is engedett.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/risk/risk-manager.test.ts tests/lib/engine/execute-intent.test.ts`; túlméretes BUY nem ugrik át pozíciószám-korlátot; nincs DB-hibás fallback-order. V2 nincs tartós futásra engedve T09–T11 előtt.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/risk/risk-manager.test.ts tests/lib/engine/execute-intent.test.ts` → 46 teszt zöld; `pnpm test` 45 fájl / 302 teszt; `tsc --noEmit` tiszta; `pnpm build` sikeres. Regressziós tesztek: 20 USD BTC + 80 USD cash + 20%-os BUY → nincs vétel, és a broker `submit` metódusa meg sem hívódik; a visszavágott BUY NEM ugorja át a pozíciószám-korlátot; a SELL cash=0 mellett és aktív veszteségkapunál is végrehajtódik. A 10 000 USD-s DB-fallback törölve: `tradingEnabled=false` mellett nincs order (külön teszt). A v2 tartós futásra még NINCS engedve: a perzisztencia a v1 `applyTrade`-en megy, a tranzakciós út a T09.
 
 **C2:** T04–T06 után fill/risk regressziók és teljes típusellenőrzés zöld; a bizonyított 36%-os kitettségi hiba megszűnt.
 

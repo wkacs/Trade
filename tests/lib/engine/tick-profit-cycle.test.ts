@@ -163,10 +163,12 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     expect(result.cycleActions).toEqual([]);
   });
 
-  it("MTM CIRCUIT BREAKER: pozíció aktuális áron ≤ -3% equity → AI BUY HOLD-ra vált", async () => {
-    // Kezdőtőke 1000, cash 200, egy ETH pozíció: 0.3 qty @ entry 2000 = 600 entry-érték.
-    // Az aktuális ár 1300-ra esett → MTM value = 0.3*1300 = 390.
-    // MTM equity = 200 + 390 = 590. dayPnlPct = 590/1000 - 1 = -0.41 = -41% → bőven -3% alatt.
+  it("A NAPI kapu nem az indulás óta mért veszteségtől függ (T07 javítás)", async () => {
+    // Kezdőtőke 1000, cash 200, egy ETH pozíció: 0.3 qty @ entry 2000.
+    // Az ár 1300-ra esett → az INDULÁS ÓTA mért hozam kb. −41%.
+    // A RÉGI kód ezt napi veszteségnek vette és HOLD-ra kényszerített. A javított kapu
+    // UTC napkezdő referenciából számol: friss baseline mellett a napi hozam 0%, ezért
+    // az AI döntése érvényben marad. Az indulás óta mért hozam KÜLÖN mutatóként látszik.
     (loadPortfolioState as any).mockResolvedValue(
       stateWith(
         [{ id: "p1", symbol: "ETH", qty: 0.3, entryPrice: 2000, stopPrice: 1900, valueUsd: 600 }],
@@ -185,11 +187,16 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     });
 
     const result = await runTick({ tickId: "2026-06-26-16", paperMode: true });
-    // A stop 1900 felett van az ár 1300 → előbb stop-loss tüzel (teljes pozíció SELL).
-    // Az AI BUY az MTM circuit breaker miatt HOLD-ra vált (-41% < -3%).
-    expect(result.decision.action).toBe("HOLD");
-    expect(result.decision.overridden).toBe(true);
-    expect(result.decision.overrideReason).toMatch(/circuit breaker|napi/i);
+
+    // A stop 1900 felett van az ár 1300 → a stop-loss lefut (teljes pozíció SELL).
+    expect(result.cycleActions.find((a) => a.kind === "stop-loss")).toBeTruthy();
+    // A napi kapu friss referenciát vett fel → 0% napi hozam, nincs latch.
+    expect(result.dayGate.dayPnlPct).toBe(0);
+    expect(result.dayGate.latched).toBe(false);
+    // Az indulás óta mért hozam KÜLÖN mutató, és tényleg mélyen negatív.
+    expect(result.inceptionPnlPct).toBeLessThan(-0.3);
+    // Az AI döntése emiatt NEM fagy HOLD-ba.
+    expect(result.decision.action).toBe("BUY");
   });
 
   it("TRAILING STOP ratchet: emelkedő árnál a stop felfelé kúszik (setStopPrice), de nem tüzel", async () => {
