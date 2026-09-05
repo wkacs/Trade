@@ -4,6 +4,11 @@ import type { Broker, ExecutionBroker, ExecutionReceipt } from "./broker";
 import { clientOrderId, fillKey, isIntentExpired, toLegacyOrder, type ExecutionIntent } from "./contracts";
 import { dec, toNumber, isPositive } from "@/lib/portfolio/money";
 import {
+  interpretOrder,
+  unknownFromError,
+  type BinanceOrderPayload,
+} from "./binance-order-state";
+import {
   sizeBuy,
   sizeSell,
   protectionPrices,
@@ -227,6 +232,164 @@ export class BinanceLegacyExecutionAdapter implements ExecutionBroker {
       state: "unknown",
       fills: [],
       error: { code: "lookup_unsupported", message: "A v1 adapter nem tud order-állapotot lekérdezni (T25)" },
+    };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v2 — BinanceExecutionBroker (T25): stabil client order ID, státusz-lekérdezés,
+// részleges teljesülés és díj a saját eszközében.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface BinanceHttp {
+  /** Aláírt POST. Timeout esetén DOBJON — a hívó ilyenkor lekérdez, nem küld újat. */
+  signedPost(path: string, params: Record<string, string>): Promise<unknown>;
+  /** Aláírt GET (order-állapot lekérdezés). */
+  signedGet(path: string, params: Record<string, string>): Promise<unknown>;
+}
+
+export interface BinanceExecutionDeps {
+  http: BinanceHttp;
+  /** Szimbólum-szűrők (T24). Hiányuk esetén NINCS order. */
+  filters: Record<string, SymbolFilters>;
+  now: () => number;
+  quoteAsset?: string;
+}
+
+/**
+ * Valós Binance végrehajtás a v2 szerződéssel (T25).
+ *
+ * Garanciák:
+ *  - STABIL `newClientOrderId` az intentId-ból → az újraküldés NEM hoz létre másodikat;
+ *  - timeout után NEM küldünk új azonosítójú ordert, hanem LEKÉRDEZÜNK;
+ *  - a részleges teljesülés `partially_filled`, a nulla fill `rejected` vagy `unknown`;
+ *  - a díj a saját eszközében marad, a hiányzó díjárfolyam FÜGGŐ értékelés.
+ */
+export class BinanceExecutionBroker implements ExecutionBroker {
+  /** Azok a fill-ek, ahol a díj eszközének USD-értékelése függőben van. */
+  pendingFeeValuations: { fillId: string; asset: string; amount: string }[] = [];
+
+  constructor(private deps: BinanceExecutionDeps) {}
+
+  private pairOf(symbol: string): string {
+    return pairFor(symbol, this.deps.quoteAsset ?? "USDT");
+  }
+
+  async submit(intent: ExecutionIntent): Promise<ExecutionReceipt> {
+    const coid = clientOrderId(intent.intentId);
+    const pair = this.pairOf(intent.order.symbol);
+    const filters = this.deps.filters[pair];
+    const now = this.deps.now();
+
+    if (isIntentExpired(intent, now)) {
+      return {
+        exchangeOrderId: null,
+        clientOrderId: coid,
+        state: "rejected",
+        fills: [],
+        error: { code: "intent_expired", message: "Az intent lejárt — nem küldünk ordert." },
+      };
+    }
+
+    // T24: a tőzsdei szabályok ELŐBB. Ismeretlen vagy elavult szűrő → nincs order.
+    const sized =
+      intent.order.side === "BUY"
+        ? sizeBuy(intent.order.maxQuoteSpend, intent.referencePrice, filters, now)
+        : sizeSell(intent.order.baseQty, intent.referencePrice, filters, now);
+    if (!sized.check.ok) {
+      return {
+        exchangeOrderId: null,
+        clientOrderId: coid,
+        state: "rejected",
+        fills: [],
+        error: { code: sized.check.reason ?? "rule_violation", message: sized.check.message ?? "" },
+      };
+    }
+
+    const params: Record<string, string> =
+      intent.order.side === "BUY"
+        ? { symbol: pair, side: "BUY", type: "MARKET", quoteOrderQty: sized.notional, newClientOrderId: coid, newOrderRespType: "FULL" }
+        : { symbol: pair, side: "SELL", type: "MARKET", quantity: sized.qty, newClientOrderId: coid, newOrderRespType: "FULL" };
+
+    let payload: unknown;
+    try {
+      payload = await this.deps.http.signedPost("/api/v3/order", params);
+    } catch (e) {
+      // A kimenetel ISMERETLEN. NEM küldünk új azonosítójú ordert — lekérdezünk.
+      const message = e instanceof Error ? e.message : String(e);
+      if (/duplicate|-2010|already/i.test(message)) {
+        // A tőzsde szerint ez a client order ID már létezik → a mi ordereünk. Lekérdezzük.
+        return this.lookup(intent);
+      }
+      const unknown = unknownFromError(e);
+      return {
+        exchangeOrderId: null,
+        clientOrderId: coid,
+        state: "unknown",
+        fills: [],
+        error: { code: "submit_unknown", message: unknown.message ?? message },
+      };
+    }
+
+    return this.toReceipt(intent, coid, payload as BinanceOrderPayload, filters);
+  }
+
+  /** Egy korábbi (esetleg ismeretlen állapotú) megbízás lekérdezése a STABIL azonosítóval. */
+  async lookup(intent: ExecutionIntent): Promise<ExecutionReceipt> {
+    const coid = clientOrderId(intent.intentId);
+    const pair = this.pairOf(intent.order.symbol);
+    try {
+      const payload = (await this.deps.http.signedGet("/api/v3/order", {
+        symbol: pair,
+        origClientOrderId: coid,
+      })) as BinanceOrderPayload;
+      return this.toReceipt(intent, coid, payload, this.deps.filters[pair]);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      // -2013: "Order does not exist" → a megbízás sosem jött létre, tehát nem teljesült.
+      if (/-2013|does not exist/i.test(message)) {
+        return {
+          exchangeOrderId: null,
+          clientOrderId: coid,
+          state: "rejected",
+          fills: [],
+          error: { code: "order_not_found", message: "A tőzsde szerint nem jött létre megbízás ezzel az azonosítóval." },
+        };
+      }
+      return {
+        exchangeOrderId: null,
+        clientOrderId: coid,
+        state: "unknown",
+        fills: [],
+        error: { code: "lookup_failed", message },
+      };
+    }
+  }
+
+  private toReceipt(
+    intent: ExecutionIntent,
+    coid: string,
+    payload: BinanceOrderPayload,
+    filters: SymbolFilters | undefined,
+  ): ExecutionReceipt {
+    const interpreted = interpretOrder(payload, intent, {
+      quoteAsset: this.deps.quoteAsset ?? "USDT",
+      baseAsset: filters?.baseAsset ?? intent.order.symbol,
+    });
+    for (const p of interpreted.pendingFeeValuations) {
+      this.pendingFeeValuations.push({ fillId: p.fillId, asset: p.asset, amount: p.amount });
+    }
+    // Nulla fill NEM siker: a `rejected`/`unknown` állapotot az interpretOrder adja.
+    const noFills = interpreted.fills.length === 0;
+    return {
+      exchangeOrderId: interpreted.exchangeOrderId,
+      clientOrderId: coid,
+      state: interpreted.state,
+      fills: interpreted.fills,
+      error:
+        interpreted.message || (noFills && interpreted.state !== "pending")
+          ? { code: interpreted.state, message: interpreted.message ?? "Nem érkezett teljesülés." }
+          : undefined,
     };
   }
 }
