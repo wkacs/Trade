@@ -47,6 +47,11 @@ export type WorkerEvent =
 
 export interface WorkerDeps {
   now: () => number;
+  /**
+   * Induláskori és periodikus egyeztetés (T27). Igaz visszatérés = biztonságos folytatni.
+   * Hamis esetén az ÚJ VÉTEL tiltott; a kilépés és a védelem továbbra is működik.
+   */
+  reconcile?: () => Promise<{ safeToBuy: boolean; summary: string }>;
   /** Alvás a megadott ms-ig. A `signal` a leállításkor megszakítja. */
   sleep: (ms: number, signal: { aborted: boolean }) => Promise<void>;
   acquireLease: (key: string, owner: string, ttlMs: number) => Promise<Lease>;
@@ -182,12 +187,39 @@ export class TradingWorker {
     }
   }
 
+  /** Igaz, ha az utolsó egyeztetés szerint biztonságos új vételt indítani. */
+  private buysAllowed = true;
+
+  /** Az utolsó egyeztetés összefoglalója (naplóhoz és állapotjelzéshez). */
+  lastReconcileSummary: string | null = null;
+
+  /** Az egyeztetés lefuttatása. Hiba esetén KONZERVATÍV: a vétel tiltott marad. */
+  async reconcileNow(): Promise<boolean> {
+    if (!this.deps.reconcile) return this.buysAllowed;
+    try {
+      const r = await this.deps.reconcile();
+      this.buysAllowed = r.safeToBuy;
+      this.lastReconcileSummary = r.summary;
+    } catch (e) {
+      this.buysAllowed = false;
+      this.lastReconcileSummary = `Az egyeztetés hibára futott: ${String(e)} — ÚJ VÉTEL TILOS.`;
+    }
+    return this.buysAllowed;
+  }
+
+  /** Szabad-e új vételt indítani az utolsó egyeztetés szerint? */
+  canBuy(): boolean {
+    return this.buysAllowed;
+  }
+
   /** A worker indítása. A visszaadott ígéret a leállásig fut. */
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
     this.signal = { aborted: false };
     this.emit({ type: "started", owner: this.owner, at: this.deps.now() });
+    // INDULÁSKORI EGYEZTETÉS: a nyitott orderek és az egyenleg összevetése a tőzsdével.
+    await this.reconcileNow();
     this.loops = [this.loop("exit"), this.loop("entry")];
     await Promise.all(this.loops);
     this.emit({ type: "stopped", at: this.deps.now() });

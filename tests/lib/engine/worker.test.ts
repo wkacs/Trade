@@ -229,3 +229,40 @@ describe("hurok, késés és leállítás", () => {
     expect(worker.stats.exit.lastDurationMs).toBe(1234);
   });
 });
+
+describe("induláskori egyeztetés (T27)", () => {
+  it("indításkor lefut, és az eredménye szabályozza az új vételt", async () => {
+    const reconcile = vi.fn(async () => ({ safeToBuy: false, summary: "eltérés a tőzsdével" }));
+    const { worker, clock } = makeWorker({ reconcile });
+    const started = worker.start();
+    await Promise.resolve();
+    worker.stop();
+    clock.advance(60 * MIN);
+    await started;
+
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(worker.canBuy()).toBe(false);
+    expect(worker.lastReconcileSummary).toMatch(/eltérés/);
+  });
+
+  it("sikeres egyeztetés után szabad a vétel", async () => {
+    const { worker } = makeWorker({ reconcile: async () => ({ safeToBuy: true, summary: "rendben" }) });
+    expect(await worker.reconcileNow()).toBe(true);
+    expect(worker.canBuy()).toBe(true);
+  });
+
+  it("hibára futó egyeztetés KONZERVATÍV: a vétel tiltott marad", async () => {
+    const { worker } = makeWorker({
+      reconcile: async () => {
+        throw new Error("exchange down");
+      },
+    });
+    expect(await worker.reconcileNow()).toBe(false);
+    expect(worker.lastReconcileSummary).toMatch(/ÚJ VÉTEL TILOS/);
+  });
+
+  it("egyeztető nélkül a worker nem tiltja a vételt (paper mód)", async () => {
+    const { worker } = makeWorker();
+    expect(await worker.reconcileNow()).toBe(true);
+  });
+});
