@@ -15,6 +15,20 @@
       "when": 1782655945070,
       "tag": "0001_safe_namora",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788610991912,
+      "tag": "0002_vengeful_moonstone",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788611003496,
+      "tag": "0003_ledger_atomic_functions",
+      "breakpoints": true
     }
   ]
 }
