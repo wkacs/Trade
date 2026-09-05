@@ -66,7 +66,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     vi.stubEnv("TRADING_MODE", "paper");
     (predict as any).mockResolvedValue([]);
     (shouldDecide as any).mockResolvedValue({ shouldDecide: false, summary: "csendes", notableEvents: [] });
-    (remainingWeeklyBudget as any).mockResolvedValue(60); // alap: van keret
+    (remainingWeeklyBudget as any).mockResolvedValue("60"); // alap: van keret (Dec)
     (applyTrade as any).mockResolvedValue({ positionId: "persisted-id" });
   });
 
@@ -128,7 +128,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
 
   it("DCA NEM fut, ha nincs heti keret (remaining 0)", async () => {
     (loadPortfolioState as any).mockResolvedValue(stateWith([], 1000));
-    (remainingWeeklyBudget as any).mockResolvedValue(0);
+    (remainingWeeklyBudget as any).mockResolvedValue("0");
     (collectAll as any).mockResolvedValue([price("BTC", 60000, -3), fearGreed(13)]);
 
     const result = await runTick({ tickId: "2026-06-26-13", paperMode: true });
@@ -139,7 +139,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     // A heti-keret kapu kikerült az AI-BUY ágból: az AI saját döntése átmegy akkor is,
     // ha a DCA-keret elfogyott (csak a DCA-t fékezi a keret). Lásd tournament spec §6.
     (loadPortfolioState as any).mockResolvedValue(stateWith([], 1000));
-    (remainingWeeklyBudget as any).mockResolvedValue(0);
+    (remainingWeeklyBudget as any).mockResolvedValue("0");
     (collectAll as any).mockResolvedValue([price("BTC", 60000, 1), fearGreed(60)]);
     (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
     (decide as any).mockResolvedValue({

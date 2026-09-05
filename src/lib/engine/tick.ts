@@ -294,7 +294,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   const cycleActions: CycleAction[] = [];
 
   if (tradingEnabled) {
-    weeklyRemaining = dec(await remainingWeeklyBudget(toNumber(equityNow())));
+    weeklyRemaining = await remainingWeeklyBudget(equityNow(), { portfolioId, mode }, Date.now());
 
     const fgEvent = events.find((e) => e.kind === "sentiment" && e.sentiment);
     const fearGreedValue = fgEvent?.sentiment?.value ?? null;

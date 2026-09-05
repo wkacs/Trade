@@ -31,6 +31,11 @@ export interface DcaParams {
   dcaMax24hDropPct: number;
   dcaBuyPct: number;
   entryFilter: "off" | "trend";
+  /**
+   * Minimum kötésérték USD-ben. A maradék keretre vágott vétel ez alatt NEM tervezhető
+   * (a tőzsdei minimum notional alatti order amúgy is elutasításra kerülne). Alap: 1.
+   */
+  minOrderUsd?: number;
   // Opcionális kockázat-alapú méretezés (hiányzó → flat dcaBuyPct, identikus a régivel).
   riskPerTradePct?: number;
   stopLossPct?: number;
@@ -75,16 +80,31 @@ export function evaluateDca(ctx: DcaContext, params: DcaParams): DcaSignal {
 
   const pick = eligible.reduce((min, c) => (c.change24hPct < min.change24hPct ? c : min));
 
+  // A KERETRE VÁGÁS: az audit §4 szerint a régi kód csak azt nézte, POZITÍV-e a maradék,
+  // ezért 1 USD maradék mellett is 2 USD vételt tervezett. A terv soha nem lépheti túl a
+  // maradékot, és a minimum kötésérték alatt nincs kötés.
+  const desired = sizeEntry(ctx.totalEquity, {
+    riskPerTradePct: params.riskPerTradePct ?? 0,
+    stopLossPct: params.stopLossPct ?? 0.05,
+    stopMode: params.stopMode ?? "fixed",
+    maxPositionPct: params.maxPositionPct ?? 0.2,
+    flatPct: params.dcaBuyPct,
+  });
+  const amountUsd = Math.min(desired, ctx.weeklyBudgetRemainingUsd);
+  const minOrderUsd = params.minOrderUsd ?? 1;
+  if (amountUsd < minOrderUsd) {
+    return noAccumulate(
+      `A heti keret maradéka (${ctx.weeklyBudgetRemainingUsd.toFixed(2)} USD) a minimum ${minOrderUsd} USD kötésérték alatt van.`,
+    );
+  }
+
   return {
     shouldAccumulate: true,
     symbol: pick.symbol,
-    amountUsd: sizeEntry(ctx.totalEquity, {
-      riskPerTradePct: params.riskPerTradePct ?? 0,
-      stopLossPct: params.stopLossPct ?? 0.05,
-      stopMode: params.stopMode ?? "fixed",
-      maxPositionPct: params.maxPositionPct ?? 0.2,
-      flatPct: params.dcaBuyPct,
-    }),
-    reason: `Fear & Greed ${ctx.fearGreedValue} ≤ ${params.dcaFgThreshold} (extrém félelem) → ${pick.symbol} halmozása (${pick.change24hPct.toFixed(1)}% 24h).`,
+    amountUsd,
+    reason:
+      `Fear & Greed ${ctx.fearGreedValue} ≤ ${params.dcaFgThreshold} (extrém félelem) → ${pick.symbol} halmozása ` +
+      `(${pick.change24hPct.toFixed(1)}% 24h)` +
+      (amountUsd < desired ? `, a heti keret maradékára vágva (${amountUsd.toFixed(2)} USD).` : "."),
   };
 }

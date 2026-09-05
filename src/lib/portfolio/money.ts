@@ -78,10 +78,32 @@ export function fromUnits(units: bigint): Dec {
 export function dec(value: Dec | number): Dec {
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new MoneyError(`Nem véges szám: ${value}`);
-    // A toFixed(SCALE) exponenciális alakot is feloldja (1e-7 → 0.000000100000000000).
-    return fromUnits(toUnits(value.toFixed(SCALE)));
+    // A String() a LEGRÖVIDEBB oda-vissza pontos alakot adja: 0.05 → "0.05".
+    // A toFixed(18) ezzel szemben kiírná a bináris maradékot is
+    // ("0.050000000000000003"), ami minden későbbi szorzásba beszivárogna.
+    const s = String(value);
+    return fromUnits(toUnits(/[eE]/.test(s) ? expandExponential(s) : s));
   }
   return fromUnits(toUnits(value));
+}
+
+/** Exponenciális alak (1e-7, 2.5e+3) feloldása sima decimális szöveggé. */
+function expandExponential(input: string): string {
+  const m = /^([+-]?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(input);
+  if (!m) throw new MoneyError(`Nem értelmezhető exponenciális szám: ${input}`);
+  const [, sign, intPart, fracPart = "", expStr] = m;
+  const exp = Number(expStr);
+  const digits = intPart + fracPart;
+  const pointPos = intPart.length + exp;
+  let body: string;
+  if (pointPos <= 0) body = `0.${"0".repeat(-pointPos)}${digits}`;
+  else if (pointPos >= digits.length) body = digits + "0".repeat(pointPos - digits.length);
+  else body = `${digits.slice(0, pointPos)}.${digits.slice(pointPos)}`;
+  const normalized = body.includes(".") ? body.replace(/0+$/, "").replace(/\.$/, "") : body;
+  if (!isDecimalString(normalized)) {
+    throw new MoneyError(`Az exponenciális szám nem fér a ${SCALE} tizedes pontosságba: ${input}`);
+  }
+  return sign === "-" ? `-${normalized}` : normalized;
 }
 
 /** Dec → number. CSAK megjelenítéshez/régi API-hoz; könyvelésre sosem. */

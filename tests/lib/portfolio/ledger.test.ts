@@ -312,3 +312,64 @@ describe("ledger — származtatott mutatók és segédek", () => {
     expect(add(cashOf(before, "USDT"), delta)).toBe(cashOf(r.state, "USDT"));
   });
 });
+
+describe("ledger — a rávásárlás nem viszi lejjebb a trailing stopot (T08)", () => {
+  it("AUDIT §4: a felhúzott stop megmarad, ha az új BUY alacsonyabb stopot kérne", () => {
+    const opened = applyFill(
+      start(),
+      fill({ side: "BUY", filledBaseQty: "0.001", grossQuoteAmount: "60", fillPrice: "60000" }),
+      { stopPrice: "57000" },
+    ).state;
+    // Trailing ratchet felhúzta a stopot 66000-es árnál 62700-ra.
+    const ratcheted = setStop(opened, "BTC", "62700");
+    expect(ratcheted.positions.BTC.stopPrice).toBe("62700");
+
+    // Rávásárlás 66000-en: a naiv entry*(1−5%) = 62700-nál ALACSONYABB stopot kérne.
+    const addOn = applyFill(
+      ratcheted,
+      fill({
+        side: "BUY",
+        filledBaseQty: "0.0001",
+        grossQuoteAmount: "6.6",
+        fillPrice: "66000",
+        exchangeOrderId: "o-add",
+      }),
+      { stopPrice: "60000" },
+    );
+    expect(addOn.applied).toBe(true);
+    expect(addOn.state.positions.BTC.stopPrice).toBe("62700");
+  });
+
+  it("a MAGASABB kért stop viszont érvényre jut", () => {
+    const opened = applyFill(
+      start(),
+      fill({ side: "BUY", filledBaseQty: "0.001", grossQuoteAmount: "60", fillPrice: "60000" }),
+      { stopPrice: "57000" },
+    ).state;
+    const addOn = applyFill(
+      opened,
+      fill({
+        side: "BUY",
+        filledBaseQty: "0.0001",
+        grossQuoteAmount: "6.6",
+        fillPrice: "66000",
+        exchangeOrderId: "o-add2",
+      }),
+      { stopPrice: "62700" },
+    );
+    expect(addOn.state.positions.BTC.stopPrice).toBe("62700");
+  });
+
+  it("stopPrice nélküli rávásárlás sem nyúl a meglévő stophoz", () => {
+    const opened = applyFill(
+      start(),
+      fill({ side: "BUY", filledBaseQty: "0.001", grossQuoteAmount: "60", fillPrice: "60000" }),
+      { stopPrice: "57000" },
+    ).state;
+    const addOn = applyFill(
+      opened,
+      fill({ side: "BUY", filledBaseQty: "0.0001", grossQuoteAmount: "6", fillPrice: "60000", exchangeOrderId: "o-add3" }),
+    );
+    expect(addOn.state.positions.BTC.stopPrice).toBe("57000");
+  });
+});

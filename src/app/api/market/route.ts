@@ -7,7 +7,8 @@ import { buildFeatures } from "@/lib/ml/features";
 import { predict } from "@/lib/ml/predictor";
 import { loadPortfolioState } from "@/lib/portfolio/accounting";
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
-import { COIN_UNIVERSE, RISK_LIMITS, PROFIT_CYCLE } from "@/lib/config";
+import { COIN_UNIVERSE, RISK_LIMITS, PROFIT_CYCLE, getTradingMode } from "@/lib/config";
+import { dec } from "@/lib/portfolio/money";
 import { DEFAULT_STRATEGY } from "@/lib/strategy/config";
 import model from "@/lib/ml/model.json";
 
@@ -57,7 +58,11 @@ export async function GET() {
       const equity =
         state.cashUsd +
         state.positions.reduce((s, p) => s + (prices[p.symbol]?.usd ?? p.entryPrice) * p.qty, 0);
-      weeklyBudgetRemainingUsd = await remainingWeeklyBudget(equity);
+      // A keret hatókör-helyes: csak EZ a portfólió és mód DCA-fill-jei és foglalásai
+      // fogyasztják (T08). A megjelenítéshez number kell.
+      weeklyBudgetRemainingUsd = Number(
+        await remainingWeeklyBudget(dec(equity), { portfolioId: state.portfolioId, mode: getTradingMode() }),
+      );
     }
 
     return NextResponse.json(

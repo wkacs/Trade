@@ -261,14 +261,26 @@ export function applyFill(state: LedgerState, fill: Fill, options: LedgerOptions
     return fail(next, "insufficient_position", `A készlet negatívba menne: ${fill.symbol} ${newQty}`);
   }
   if (isPositive(newQty)) {
+    // A RÁVÁSÁRLÁS SOSEM VISZI LEJJEBB a már felhúzott (trailing) stopot — az audit §4
+    // szerint a régi kód minden BUY-nál újraszámolta a stopot entry*(1−5%)-ra, így egy
+    // emelkedésben felkúszott védelem egyetlen kis vétellel visszaesett.
+    const requestedStop = fill.side === "BUY" ? options.stopPrice : undefined;
+    const keptStop = existing?.stopPrice ?? null;
+    const stopPrice =
+      requestedStop === undefined
+        ? keptStop
+        : requestedStop === null
+          ? keptStop
+          : keptStop === null
+            ? requestedStop
+            : gt(requestedStop, keptStop)
+              ? requestedStop
+              : keptStop;
     next.positions[fill.symbol] = {
       symbol: fill.symbol,
       qty: newQty,
       costBasisQuote: lt(newCost, ZERO) ? ZERO : newCost,
-      stopPrice:
-        fill.side === "BUY" && options.stopPrice !== undefined
-          ? options.stopPrice
-          : (existing?.stopPrice ?? null),
+      stopPrice,
     };
   } else {
     delete next.positions[fill.symbol];

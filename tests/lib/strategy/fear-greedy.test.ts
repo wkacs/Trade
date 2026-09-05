@@ -11,8 +11,8 @@ const ctx = (over: Partial<Parameters<typeof evaluateDca>[0]> = {}) => ({
     { symbol: "ETH", change24hPct: -1 },
     { symbol: "SOL", change24hPct: -5 },
   ],
-  weeklyBudgetRemainingUsd: 4,
-  totalEquity: 27,
+  weeklyBudgetRemainingUsd: 200,
+  totalEquity: 1000,
   ...over,
 });
 
@@ -20,7 +20,7 @@ describe("evaluateDca — fear-greedy DCA halmozás", () => {
   it("F&G alacsony + stabil ár + van keret → halmoz (BUY)", () => {
     const s = evaluateDca(ctx(), P);
     expect(s.shouldAccumulate).toBe(true);
-    expect(s.amountUsd).toBeCloseTo(27 * 0.02, 6); // 2% tőke
+    expect(s.amountUsd).toBeCloseTo(1000 * 0.02, 6); // 2% tőke
   });
 
   it("a leginkább esett (legolcsóbb relatíve) coint választja a -8% felettiek közül", () => {
@@ -97,5 +97,32 @@ describe("evaluateDca — fear-greedy DCA halmozás", () => {
       { ...P, entryFilter: "off" },
     );
     expect(s.shouldAccumulate).toBe(true);
+  });
+
+  // ── T08: a terv soha nem lépheti túl a heti maradékot ──
+  it("AUDIT §4: 1 USD maradék mellett LEGFELJEBB 1 USD tervezhető (nem 2 USD)", () => {
+    // A régi kód csak azt nézte, pozitív-e a maradék, és 2%-nyi (20 USD) vételt tervezett.
+    const s = evaluateDca(ctx({ weeklyBudgetRemainingUsd: 1 }), P);
+    expect(s.shouldAccumulate).toBe(true);
+    expect(s.amountUsd).toBe(1);
+    expect(s.reason).toMatch(/heti keret marad/i);
+  });
+
+  it("ha a maradék a minimum kötésérték alatt van, NINCS kötés", () => {
+    const s = evaluateDca(ctx({ weeklyBudgetRemainingUsd: 0.4 }), P);
+    expect(s.shouldAccumulate).toBe(false);
+    expect(s.amountUsd).toBe(0);
+    expect(s.reason).toMatch(/minimum/i);
+  });
+
+  it("a minimum kötésérték paraméterezhető", () => {
+    const s = evaluateDca(ctx({ weeklyBudgetRemainingUsd: 3 }), { ...P, minOrderUsd: 5 });
+    expect(s.shouldAccumulate).toBe(false);
+  });
+
+  it("bőséges maradéknál a tervezett méret a 2%-os alapméret marad", () => {
+    const s = evaluateDca(ctx({ weeklyBudgetRemainingUsd: 999 }), P);
+    expect(s.amountUsd).toBeCloseTo(20, 9);
+    expect(s.reason).not.toMatch(/vágva/);
   });
 });
