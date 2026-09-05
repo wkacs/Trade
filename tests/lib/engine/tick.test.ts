@@ -64,6 +64,32 @@ import { loadPortfolioState } from "@/lib/portfolio/accounting";
 import { runTick } from "@/lib/engine/tick";
 import type { DataPoint } from "@/lib/types";
 
+/** A phase-2 döntés mockolása az ÚJ (T16) alakban: {decision, usage, promptChars}. */
+function mockDecision(d: { action: "BUY" | "SELL" | "HOLD"; symbol?: string; amountPct?: number; confidence: number; reasoning: string }) {
+  (decide as any).mockResolvedValue({
+    decision: {
+      schemaVersion: 2,
+      action: d.action,
+      symbol: d.symbol ?? null,
+      equityFraction: d.action === "BUY" ? (d.amountPct ?? 0) : 0,
+      positionFraction: d.action === "SELL" ? (d.amountPct ?? 0) : 0,
+      confidence: d.confidence,
+      reasoning: d.reasoning,
+      adjustments: [],
+    },
+    usage: {
+      model: "glm-5.2",
+      promptVersion: "p2-test",
+      latencyMs: 10,
+      promptTokens: 100,
+      completionTokens: 20,
+      totalTokens: 120,
+      failed: false,
+    },
+    promptChars: 100,
+  });
+}
+
 /** A quote-pillanatkép, amit a mockolt `fetchQuotes` visszaad (T14). */
 let mockQuoteSnapshot: any = { quotes: {}, errors: [], maxAgeMs: 0, degraded: false };
 
@@ -164,7 +190,7 @@ describe("runTick — teljes döntési ciklus", () => {
       summary: "ETF hír",
       notableEvents: [{ symbol: "BTC", reason: "inflow" }],
     });
-    (decide as any).mockResolvedValue({
+    mockDecision({
       action: "BUY",
       symbol: "BTC",
       amountPct: 0.15,
@@ -186,7 +212,7 @@ describe("runTick — teljes döntési ciklus", () => {
       summary: "vegyes",
       notableEvents: [],
     });
-    (decide as any).mockResolvedValue({
+    mockDecision({
       action: "HOLD",
       amountPct: 0,
       confidence: 0.4,
@@ -204,7 +230,7 @@ describe("runTick — teljes döntési ciklus", () => {
       notableEvents: [],
     });
     // a GLM túl merészet javasol (50%) — a Risk Manager visszavágja 20%-ra
-    (decide as any).mockResolvedValue({
+    mockDecision({
       action: "BUY",
       symbol: "BTC",
       amountPct: 0.5,
@@ -219,7 +245,7 @@ describe("runTick — teljes döntési ciklus", () => {
   it("hiteles portfólió-állapot NÉLKÜL nincs kötés (nincs 10 000 USD fallback)", async () => {
     (loadPortfolioState as any).mockResolvedValue(null);
     (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
-    (decide as any).mockResolvedValue({
+    mockDecision({
       action: "BUY",
       symbol: "BTC",
       amountPct: 0.1,
@@ -257,7 +283,7 @@ describe("runTick — végrehajtási ár és adatfrissesség (T14)", () => {
       dayPnlPct: 0,
     });
     (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
-    (decide as any).mockResolvedValue({
+    mockDecision({
       action: "BUY",
       symbol: "BTC",
       amountPct: 0.1,
@@ -307,5 +333,70 @@ describe("runTick — végrehajtási ár és adatfrissesség (T14)", () => {
     expect(result.quotes.degraded).toBe(false);
     expect(result.quotes.staleSkips).toEqual([]);
     expect(result.collectors.length).toBeGreaterThan(0);
+  });
+});
+
+describe("runTick — AI-intent és valós portfóliókontextus (T16)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv("TRADING_MODE", "paper");
+    (predict as any).mockResolvedValue([]);
+    mockMarket([priceEvent("BTC", 60000)]);
+    (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
+  });
+
+  it("az AI VALÓS belépési árat és szabad keretet kap (nem nullát)", async () => {
+    setLedgerFixture(40, [{ symbol: "BTC", qty: 0.001, entryPrice: 60000, stopPrice: 57000 }]);
+    (loadPortfolioState as any).mockResolvedValue({
+      portfolioId: "pf-test",
+      cashUsd: 40,
+      initialCapitalUsd: 100,
+      positions: [{ id: "p1", symbol: "BTC", qty: 0.001, entryPrice: 60000, stopPrice: 57000, valueUsd: 60 }],
+      totalEquity: () => 100,
+      dayPnlPct: 0,
+    });
+    mockDecision({ action: "HOLD", confidence: 0.3, reasoning: "csend" });
+
+    await runTick({ tickId: "2026-06-25-20", paperMode: true });
+
+    const call = (decide as any).mock.calls[0][0];
+    expect(call.portfolio.positions[0].entryPrice).toBe(60000);
+    expect(call.portfolio.positions[0].valueUsd).toBe(60);
+    expect(call.portfolio.equityUsd).toBe(100);
+    // 20% pozíciólimit 100 equityn = 20; a meglévő 60 → nincs szabad keret BTC-re.
+    expect(call.portfolio.freeBuyBudgetUsd.BTC).toBe(0);
+    expect(call.allowedSymbols).toEqual(["BTC", "ETH", "SOL"]);
+  });
+
+  it("SELL cash=0 mellett is végrehajtódik (a méret a birtokolt mennyiségből)", async () => {
+    setLedgerFixture(0, [{ symbol: "BTC", qty: 0.001, entryPrice: 60000, stopPrice: 0 }]);
+    (loadPortfolioState as any).mockResolvedValue({
+      portfolioId: "pf-test",
+      cashUsd: 0,
+      initialCapitalUsd: 100,
+      positions: [{ id: "p1", symbol: "BTC", qty: 0.001, entryPrice: 60000, stopPrice: 0, valueUsd: 60 }],
+      totalEquity: () => 60,
+      dayPnlPct: 0,
+    });
+    mockDecision({ action: "SELL", symbol: "BTC", amountPct: 1, confidence: 0.8, reasoning: "kiszállás" });
+
+    const result = await runTick({ tickId: "2026-06-25-21", paperMode: true });
+    expect(result.decision.action).toBe("SELL");
+    expect(result.trade?.side).toBe("SELL");
+    expect(result.trade?.qty).toBeCloseTo(0.001, 9);
+  });
+
+  it("az LLM-használat (modell, prompt-verzió, token, idő) mérhető", async () => {
+    setLedgerFixture(10000, []);
+    mockDecision({ action: "HOLD", confidence: 0.3, reasoning: "csend" });
+    const result = await runTick({ tickId: "2026-06-25-22", paperMode: true });
+    expect(result.llm).toMatchObject({ model: "glm-5.2", promptVersion: "p2-test", totalTokens: 120 });
+  });
+
+  it("phase-1 nemet mond → nincs LLM-használat rögzítve", async () => {
+    setLedgerFixture(10000, []);
+    (shouldDecide as any).mockResolvedValue({ shouldDecide: false, summary: "csend", notableEvents: [] });
+    const result = await runTick({ tickId: "2026-06-25-23", paperMode: true });
+    expect(result.llm).toBeNull();
   });
 });

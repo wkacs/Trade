@@ -10,7 +10,13 @@ import { buildFeaturesWithDiagnostics } from "@/lib/ml/features";
 import { predictWithStatus } from "@/lib/ml/predictor";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
 import { decide } from "@/lib/llm/phase2-decide";
-import { applyRisk, riskContextFromLedger, originBudgetFor, DEFAULT_ORDER_RISK_PARAMS } from "@/lib/risk/risk-manager";
+import {
+  applyRisk,
+  riskContextFromLedger,
+  originBudgetFor,
+  positionHeadroom,
+  DEFAULT_ORDER_RISK_PARAMS,
+} from "@/lib/risk/risk-manager";
 import { PaperExecutionBroker } from "@/lib/execution/paper-broker";
 import { BinanceBroker, BinanceLegacyExecutionAdapter } from "@/lib/execution/binance-broker";
 import type { ExecutionBroker } from "@/lib/execution/broker";
@@ -116,6 +122,8 @@ export interface TickResult {
   collectors: { name: string; ok: boolean; points: number; durationMs: number }[];
   /** Stratégiai jelek és adat-elégségesség symbolonként (T15). */
   signals: Record<string, { bars: number; requiredBars: number; sufficient: boolean; trendOk: boolean; momentumOk: boolean }>;
+  /** Az LLM-hívás mérhető adatai (T16). null, ha nem volt phase-2 hívás. */
+  llm: import("@/lib/llm/client").LlmUsage | null;
   /** Az ML-modell állapota és a kihagyott feature-ök (adathiány láthatósága). */
   ml: {
     modelUsable: boolean;
@@ -542,6 +550,8 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   const phase1 = await shouldDecide(llmEvents);
 
   let phase2Snapshot: import("@/lib/engine/tick-process").TickProcess["phase2"] = null;
+  /** Az LLM-hívás mérhető adatai (modell, prompt-verzió, token, késleltetés). */
+  let llmUsage: import("@/lib/llm/client").LlmUsage | null = null;
   let rawDecision: RawDecision = {
     action: "HOLD",
     symbol: "",
@@ -553,17 +563,56 @@ export async function runTick(input: TickInput): Promise<TickResult> {
 
   if (phase1.shouldDecide) {
     const performance = await getPerformanceSummary();
+    const equityForAi = equityNow();
+
+    // Az AI VALÓS belépési árat, pozícióértéket, equityt és SZABAD KERETET lát
+    // (a régi kód 0 belépési árat küldött — audit C. szakasz).
+    const freeBuyBudgetUsd: Record<string, number> = {};
+    for (const sym of COIN_UNIVERSE) {
+      const { headroom } = positionHeadroom(
+        sym,
+        {
+          ledger,
+          prices: pricesDec,
+          reservedQuoteBySymbol: reservations.bySymbol,
+          reservedQuoteTotal: reservations.total,
+          dailyLossLatched: dayGate.latched,
+          dayBaselineMissing: dayGate.dayPnlPct === null,
+          allowedSymbols: [...COIN_UNIVERSE],
+          quoteAsset: "USDT",
+        },
+        { ...DEFAULT_ORDER_RISK_PARAMS, maxPositionPct: dec(RISK_LIMITS.maxPositionPct) },
+      );
+      freeBuyBudgetUsd[sym] = toNumber(headroom);
+    }
+
     const phase2 = await decide({
       events: llmEvents,
       mlSignals,
-      // Az AI VALÓS belépési árat és pozícióértéket lát (a régi kód 0-t küldött).
       portfolio: {
         cashUsd: toNumber(cashOf(ledger, "USDT")),
-        positions: Object.values(ledger.positions).map((p) => ({
-          symbol: p.symbol,
-          qty: toNumber(p.qty),
-          entryPrice: isPositive(p.qty) ? toNumber(div(p.costBasisQuote, p.qty)) : 0,
-        })),
+        equityUsd: toNumber(equityForAi),
+        positions: Object.values(ledger.positions).map((p) => {
+          const entryPrice = isPositive(p.qty) ? toNumber(div(p.costBasisQuote, p.qty)) : 0;
+          const px = pricesDec[p.symbol];
+          return {
+            symbol: p.symbol,
+            qty: toNumber(p.qty),
+            entryPrice,
+            valueUsd: px ? toNumber(mul(p.qty, px)) : 0,
+            unrealizedPnlPct: px && entryPrice > 0 ? toNumber(div(mul(p.qty, px), p.costBasisQuote)) - 1 : null,
+            stopPrice: p.stopPrice ? toNumber(p.stopPrice) : null,
+          };
+        }),
+        freeBuyBudgetUsd,
+      },
+      allowedSymbols: [...COIN_UNIVERSE],
+      dataQuality: {
+        mlUsable: prediction.status.usable,
+        staleOrMissingQuotes: [...COIN_UNIVERSE].filter((s) => !quoteSnapshot.quotes[s]),
+        insufficientHistory: Object.entries(signalsBySymbol)
+          .filter(([, sig]) => !sig.sufficient)
+          .map(([sym]) => sym),
       },
       performance: {
         actionable: performance.actionable,
@@ -571,20 +620,24 @@ export async function runTick(input: TickInput): Promise<TickResult> {
         avgHypotheticalPnlPct: performance.avgHypotheticalPnlPct,
       },
     });
+    llmUsage = phase2.usage;
+
+    // A döntés-szintű kapu `amountPct`-je BUY-nál equity-hányad, SELL-nél pozíció-hányad.
+    const d = phase2.decision;
     rawDecision = {
-      action: phase2.action,
-      symbol: phase2.symbol ?? "",
-      amountPct: phase2.amountPct,
-      confidence: phase2.confidence,
-      reasoning: phase2.reasoning,
-      model: process.env.LLM_MODEL_PHASE2 ?? "glm-5.2",
+      action: d.action,
+      symbol: d.symbol ?? "",
+      amountPct: d.action === "BUY" ? d.equityFraction : d.action === "SELL" ? d.positionFraction : 0,
+      confidence: d.confidence,
+      reasoning: d.reasoning,
+      model: phase2.usage.model,
     };
     phase2Snapshot = {
-      action: phase2.action,
-      symbol: phase2.symbol ?? null,
-      amountPct: phase2.amountPct,
-      confidence: phase2.confidence,
-      reasoning: phase2.reasoning,
+      action: d.action,
+      symbol: d.symbol,
+      amountPct: rawDecision.amountPct,
+      confidence: d.confidence,
+      reasoning: d.reasoning,
     };
   }
 
@@ -682,6 +735,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       points: o.points,
       durationMs: o.durationMs,
     })),
+    llm: llmUsage,
     signals: Object.fromEntries(
       Object.entries(signalsBySymbol).map(([sym, sig]) => [
         sym,

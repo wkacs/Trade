@@ -64,6 +64,32 @@ import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { runTick } from "@/lib/engine/tick";
 import type { DataPoint } from "@/lib/types";
 
+/** A phase-2 döntés mockolása az ÚJ (T16) alakban: {decision, usage, promptChars}. */
+function mockDecision(d: { action: "BUY" | "SELL" | "HOLD"; symbol?: string; amountPct?: number; confidence: number; reasoning: string }) {
+  (decide as any).mockResolvedValue({
+    decision: {
+      schemaVersion: 2,
+      action: d.action,
+      symbol: d.symbol ?? null,
+      equityFraction: d.action === "BUY" ? (d.amountPct ?? 0) : 0,
+      positionFraction: d.action === "SELL" ? (d.amountPct ?? 0) : 0,
+      confidence: d.confidence,
+      reasoning: d.reasoning,
+      adjustments: [],
+    },
+    usage: {
+      model: "glm-5.2",
+      promptVersion: "p2-test",
+      latencyMs: 10,
+      promptTokens: 100,
+      completionTokens: 20,
+      totalTokens: 120,
+      failed: false,
+    },
+    promptChars: 100,
+  });
+}
+
 /**
  * Elegendő hosszúságú, hézagmentes gyertyasor a jelekhez (T15). Lapos ár → a trend-szűrő
  * átenged (close ≥ SMA), a momentum-breakout viszont nem tüzel.
@@ -243,7 +269,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     (remainingWeeklyBudget as any).mockResolvedValue("0");
     mockMarket([price("BTC", 60000, 1), fearGreed(60)]);
     (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
-    (decide as any).mockResolvedValue({
+    mockDecision({
       action: "BUY",
       symbol: "BTC",
       amountPct: 0.1,
@@ -279,7 +305,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     );
     mockMarket([price("ETH", 1300, -35), fearGreed(60)]);
     (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
-    (decide as any).mockResolvedValue({
+    mockDecision({
       action: "BUY",
       symbol: "ETH",
       amountPct: 0.1,
