@@ -152,12 +152,13 @@ Az órás production futáshoz az időzítő beállítása:
 - metódus: `POST`
 - ütemezés: `7 * * * *` (UTC, minden óra 7. percében)
 - fejléc: `Authorization: Bearer <a Vercelben beállított CRON_SECRET>`
-- timeout: legalább 300 másodperc; retry: legfeljebb 1
+- cron-job.org timeout: legfeljebb 30 másodperc; retry: legfeljebb 1
 
 Erre használható például Upstash QStash vagy cron-job.org. A külső szolgáltatás csak
 az indító HTTPS-kérést küldi; az adatgyűjtés, döntés, végrehajtás és könyvelés az éles
 Vercel deploymentben fut. A Vercel projektben a Fluid Compute aktív, a route
-`maxDuration` értéke 300 másodperc.
+`maxDuration` értéke 300 másodperc; a cron-job.org saját kérés-időkorlátja ettől
+függetlenül 30 másodperc.
 
 Vercel Pro esetén ugyanez külső szolgáltatás nélkül, natív Vercel Cronnal is óránként
 futtatható. Hobby csomagban az órás cron kifejezés deployment hibát okozna.
