@@ -1,0 +1,242 @@
+/**
+ * Gyors kilépés-ciklus (T21) — LLM és hírgyűjtők NÉLKÜL.
+ *
+ * Az audit B. szakasza: a motor a profit-ciklus előtt megvárta az ÖSSZES collectort,
+ * köztük az RSS-t. Egy lassú hírforrás így késleltette a stop-loss végrehajtását.
+ *
+ * Ez a ciklus KIZÁRÓLAG friss árra vár:
+ *   quote lekérés → kilépés-terv → közös kockázati kapu → közös fill-könyvelő
+ *
+ * Amit SOHA nem csinál: nem vesz, nem hív LLM-et, nem vár hírre, és elavult áron nem lép ki.
+ */
+import { COIN_UNIVERSE, RISK_LIMITS } from "@/lib/config";
+import { DEFAULT_STRATEGY, STRATEGY_VERSION, type StrategyConfig } from "@/lib/strategy/config";
+import { fetchQuotes, checkExecutionQuote, DEFAULT_QUOTE_MAX_AGE_MS, type QuoteSnapshot } from "@/lib/market/quotes";
+import { planExits, exitPositionsFromLedger, type ExitPlan } from "@/lib/engine/plan-exits";
+import { executeIntent, type ExecuteIntentDeps } from "@/lib/engine/execute-intent";
+import { PaperExecutionBroker } from "@/lib/execution/paper-broker";
+import { BinanceBroker, BinanceLegacyExecutionAdapter } from "@/lib/execution/binance-broker";
+import type { ExecutionBroker } from "@/lib/execution/broker";
+import type { Fill, TradingMode } from "@/lib/execution/contracts";
+import { loadLedgerState, loadReservations, persistFill, persistStopPrice, listUnsettledIntents } from "@/lib/execution/order-store";
+import { setStop, type LedgerState } from "@/lib/portfolio/ledger";
+import { DEFAULT_ORDER_RISK_PARAMS } from "@/lib/risk/risk-manager";
+import { type Dec, ZERO, dec, toNumber } from "@/lib/portfolio/money";
+
+export interface FastExitInput {
+  portfolioId: string;
+  mode: TradingMode;
+  /** A ciklus azonosítója (idősáv + sorszám) — az intent-azonosítók magja. */
+  cycleId: string;
+  strategy?: StrategyConfig;
+  now?: () => number;
+  maxQuoteAgeMs?: number;
+  /** Teszthez injektálható függőségek. */
+  deps?: Partial<FastExitDeps>;
+}
+
+export interface FastExitDeps {
+  fetchQuotes: typeof fetchQuotes;
+  loadLedger: (scope: { portfolioId: string; mode: TradingMode }) => Promise<LedgerState>;
+  loadReservations: typeof loadReservations;
+  listUnsettledIntents: typeof listUnsettledIntents;
+  persistFill: typeof persistFill;
+  persistStopPrice: typeof persistStopPrice;
+  makeBroker: (getLedger: () => LedgerState, quotes: QuoteSnapshot, now: () => number) => ExecutionBroker;
+}
+
+export interface FastExitResult {
+  cycleId: string;
+  /** A ténylegesen végrehajtott kilépések. */
+  fills: Fill[];
+  plan: ExitPlan;
+  quotes: { maxAgeMs: number; degraded: boolean; missing: string[] };
+  /** Miért nem futott le a ciklus, ha nem futott. */
+  halted?: "unsettled_intents" | "no_positions" | "no_quotes";
+  stopUpdatesApplied: number;
+  /** Az elutasított kilépések oka (kockázati kapu vagy broker). */
+  rejections: Record<string, number>;
+  durationMs: number;
+}
+
+function defaultDeps(): FastExitDeps {
+  return {
+    fetchQuotes,
+    loadLedger: (scope) => loadLedgerState(scope),
+    loadReservations,
+    listUnsettledIntents,
+    persistFill,
+    persistStopPrice,
+    makeBroker: (getLedger, quotes, now) =>
+      new PaperExecutionBroker({
+        getLedger,
+        getMarket: (symbol) => {
+          const q = quotes.quotes[symbol];
+          return q ? { bid: q.bid, ask: q.ask, last: q.mid } : null;
+        },
+        now,
+      }),
+  };
+}
+
+/**
+ * Egy gyors kilépés-ciklus. Determinisztikus a bemeneteire: az idő, a quote-lekérés és a
+ * perzisztencia mind injektálható.
+ */
+export async function runFastExit(input: FastExitInput): Promise<FastExitResult> {
+  const deps: FastExitDeps = { ...defaultDeps(), ...input.deps };
+  const now = input.now ?? (() => Date.now());
+  const strategy = input.strategy ?? DEFAULT_STRATEGY;
+  const maxQuoteAgeMs = input.maxQuoteAgeMs ?? DEFAULT_QUOTE_MAX_AGE_MS;
+  const scope = { portfolioId: input.portfolioId, mode: input.mode };
+  const started = now();
+  const rejections: Record<string, number> = {};
+  const emptyPlan: ExitPlan = { exits: [], stopUpdates: [], skipped: [] };
+
+  // 1) Ismeretlen állapotú megbízás mellett NEM küldünk újat — egyeztetés jár.
+  const unsettled = await deps.listUnsettledIntents(scope);
+  if (unsettled.length > 0) {
+    return {
+      cycleId: input.cycleId,
+      fills: [],
+      plan: emptyPlan,
+      quotes: { maxAgeMs: 0, degraded: true, missing: [] },
+      halted: "unsettled_intents",
+      stopUpdatesApplied: 0,
+      rejections,
+      durationMs: now() - started,
+    };
+  }
+
+  let ledger = await deps.loadLedger(scope);
+  const positions = exitPositionsFromLedger(ledger.positions);
+  if (positions.length === 0) {
+    return {
+      cycleId: input.cycleId,
+      fills: [],
+      plan: emptyPlan,
+      quotes: { maxAgeMs: 0, degraded: false, missing: [] },
+      halted: "no_positions",
+      stopUpdatesApplied: 0,
+      rejections,
+      durationMs: now() - started,
+    };
+  }
+
+  // 2) CSAK friss árra várunk — se hírre, se sentimentre, se LLM-re.
+  const symbols = positions.map((p) => p.symbol);
+  const quotes = await deps.fetchQuotes(symbols, { now, maxAgeMs: maxQuoteAgeMs });
+  const missing = symbols.filter((s) => !quotes.quotes[s]);
+  if (Object.keys(quotes.quotes).length === 0) {
+    return {
+      cycleId: input.cycleId,
+      fills: [],
+      plan: emptyPlan,
+      quotes: { maxAgeMs: quotes.maxAgeMs, degraded: true, missing },
+      halted: "no_quotes",
+      stopUpdatesApplied: 0,
+      rejections,
+      durationMs: now() - started,
+    };
+  }
+
+  // 3) Kilépés-terv — a KÖZÖS tervezővel (az órás ág ugyanezt hívja).
+  const plan = planExits(
+    { positions, quotes: quotes.quotes, nowMs: now(), maxQuoteAgeMs, inFlightSymbols: [] },
+    strategy,
+  );
+
+  // 4) Trailing ratchet perzisztálása (sosem lefelé).
+  let stopUpdatesApplied = 0;
+  for (const u of plan.stopUpdates) {
+    ledger = setStop(ledger, u.symbol, u.newStop);
+    if (await deps.persistStopPrice(scope, u.symbol, u.newStop)) stopUpdatesApplied++;
+  }
+
+  // 5) Végrehajtás a KÖZÖS úton. BUY-t itt SOHA nem hozunk létre.
+  const reservations = await deps.loadReservations(scope);
+  const broker = deps.makeBroker(() => ledger, quotes, now);
+  const fills: Fill[] = [];
+  let seq = 0;
+
+  for (const exit of plan.exits) {
+    const check = checkExecutionQuote(quotes, exit.symbol, now(), maxQuoteAgeMs);
+    if (!check.ok) {
+      rejections[`quote_${check.reason}`] = (rejections[`quote_${check.reason}`] ?? 0) + 1;
+      continue;
+    }
+
+    const execDeps: ExecuteIntentDeps = {
+      portfolioId: input.portfolioId,
+      mode: input.mode,
+      strategyVersion: STRATEGY_VERSION,
+      broker,
+      getLedger: () => ledger,
+      getRiskContext: () => ({
+        ledger,
+        prices: Object.fromEntries(Object.entries(quotes.quotes).map(([s, q]) => [s, q.mid])) as Record<string, Dec>,
+        reservedQuoteBySymbol: reservations.bySymbol,
+        reservedQuoteTotal: reservations.total,
+        // A kilépést a napi kapu SOHA nem tiltja.
+        dailyLossLatched: false,
+        dayBaselineMissing: false,
+        allowedSymbols: [...COIN_UNIVERSE],
+        quoteAsset: "USDT",
+      }),
+      riskParams: {
+        ...DEFAULT_ORDER_RISK_PARAMS,
+        maxPositionPct: dec(RISK_LIMITS.maxPositionPct),
+        maxConcurrentPositions: RISK_LIMITS.maxConcurrentPositions,
+      },
+      now,
+      newIntentId: () => `${input.cycleId}-${exit.kind}-${++seq}`,
+      persist: async (intent, fill, deltas) => {
+        await deps.persistFill(intent, fill, deltas);
+      },
+    };
+
+    const outcome = await executeIntent(
+      {
+        side: "SELL",
+        symbol: exit.symbol,
+        baseQty: exit.baseQty,
+        origin: exit.kind,
+        referencePrice: check.quote.bid,
+        trigger: { kind: exit.kind, triggerPrice: exit.triggerPrice },
+      },
+      execDeps,
+    );
+
+    if (outcome.status === "executed") {
+      ledger = outcome.ledger;
+      fills.push(...outcome.fills);
+    } else if (outcome.status === "rejected_by_risk") {
+      rejections[outcome.code] = (rejections[outcome.code] ?? 0) + 1;
+    } else if (outcome.status === "rejected_by_broker") {
+      rejections[outcome.code] = (rejections[outcome.code] ?? 0) + 1;
+    } else if (outcome.status === "unknown") {
+      rejections.unknown = (rejections.unknown ?? 0) + 1;
+    }
+  }
+
+  return {
+    cycleId: input.cycleId,
+    fills,
+    plan,
+    quotes: { maxAgeMs: quotes.maxAgeMs, degraded: quotes.degraded, missing },
+    stopUpdatesApplied,
+    rejections,
+    durationMs: now() - started,
+  };
+}
+
+/** Live broker a gyors ághoz (a T25-ig az átmeneti adapterrel). */
+export function liveExitBroker(now: () => number = () => Date.now()): ExecutionBroker {
+  return new BinanceLegacyExecutionAdapter(
+    new BinanceBroker(process.env.BINANCE_API_KEY ?? "", process.env.BINANCE_API_SECRET ?? ""),
+    RISK_LIMITS.stopLossPct,
+    now,
+  );
+}
+
+export { ZERO, toNumber };
