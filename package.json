@@ -10,7 +10,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "audit:state": "tsx scripts/audit-state.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "0.9.1",

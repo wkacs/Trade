@@ -1,6 +1,12 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
 
+/**
+ * Alapértelmezett (unit) futás. Az integrációs tesztek (tests/integration/**) KI vannak
+ * zárva — azok külön configból, külön teszt-DB-vel futnak (vitest.integration.config.ts).
+ * A setup-unit.ts kitörli a DATABASE_URL-t, hogy egyetlen unit-teszt se érhesse el az
+ * éles adatbázist.
+ */
 export default defineConfig({
   resolve: {
     alias: {
@@ -10,5 +16,8 @@ export default defineConfig({
   test: {
     environment: "node",
     globals: true,
+    include: ["tests/**/*.test.ts"],
+    exclude: ["node_modules/**", "tests/integration/**"],
+    setupFiles: ["tests/setup-unit.ts"],
   },
 });
