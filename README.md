@@ -32,7 +32,7 @@ Az ütemezés, indítás, leállítás, health és rollback részletei:
 ## Architektúra
 
 ```
-Ütemező (worker VAGY GitHub Actions)
+Ütemező (worker VAGY GitHub Actions VAGY Vercel HTTP-cron)
    → LEASE az idősávra (egy író, fencing token)
    → Piaci adat: LEZÁRT órás gyertyák + KÜLÖN friss bid/ask (max 10s)
    → Data Collectors (CoinGecko, RSS, Fear&Greed, opcionálisan CryptoPanic/WhaleAlert/Reddit)
@@ -129,9 +129,10 @@ curl -X POST http://localhost:3000/api/cron/tick -H "Authorization: Bearer $CRON
 
 ## Vercel deploy
 
-A Vercel a **dashboardot** szolgálja ki, **nem** az ütemezést: a `vercel.json`-ben
-nincs cron. A Hobby csomag 60 s-os plafonja alatt a tick cold-starton 504-et adott,
-ezért az ütemezés a runnerben vagy a workerben él.
+A Vercel a dashboardot és a hitelesített `POST /api/cron/tick` kereskedési ciklust is
+futtatja. A projektben Fluid Compute aktív, ezért a route időkorlátja 300 másodperc.
+A `vercel.json`-ben nincs natív cron, mert a Hobby csomag csak napi egy cronfutást
+enged; órás futáshoz külső HTTP-időzítő (például QStash) hívja a production URL-t.
 
 1. Pushold a repót GitHubra
 2. Importáld a Vercelbe
@@ -183,7 +184,7 @@ Részletek: [`src/lib/ml/README.md`](src/lib/ml/README.md).
   mert a `neon-http` driver nem tud interaktív tranzakciót)
 - **GLM API** (OpenAI-compatible, Zhipu AI)
 - **Vitest** (TDD)
-- Ütemezés: állandó Node worker vagy GitHub Actions
+- Ütemezés: állandó Node worker, GitHub Actions vagy a Vercel route-ot hívó HTTP-cron
 
 ---
 

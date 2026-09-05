@@ -16,7 +16,7 @@ Három hely tudna tickelni. **Egyszerre csak egy lehet aktív.**
 |---|---|---|---|
 | `worker` | 5 perces kilépés-ciklus **és** órás belépés | állandóan futó gépet igényel | a gép ára (otthoni PC / NAS: 0 Ft többlet) |
 | `github-actions` | órás belépés (`scripts/tick.ts`) | **nincs 5 perces kilépés** — a stop csak óránként nézi meg magát | ingyenes (a repó Actions-kvótáján belül) |
-| `vercel-cron` | HTTP tick a `/api/cron/tick`-en | Hobby csomagon 60 s a plafon, a tick cold-starton ezt túllépheti → 504 | ingyenes, de megbízhatatlan |
+| `vercel-cron` | órás belépés az éles `/api/cron/tick` Vercel Functionben | **nincs 5 perces kilépés**; Hobby saját cron csak napi egyszer futhat, ezért külső HTTP-időzítő kell | Vercel Hobby + külső időzítő free tierben is megoldható |
 
 A választást **egy env változó** rögzíti:
 
@@ -42,9 +42,9 @@ claim-et szerez (`entry:<sáv>`), és aki nem nyerte meg, az nem fut. A worker �
 fali óra szerinti idősáv; az offset csak azt mondja meg, a sávon belül mikor indulunk).
 Ezt a `tests/lib/engine/worker.test.ts` „egy aktív scheduler" blokkja bizonyítja.
 
-A `vercel.json`-ból a cron **el lett távolítva**: korábban egy napi `0 7 * * *` tick is
-ott figyelt a GitHub-runner mellett, amiről a README nem írt. Ez volt a harmadik,
-nyilvántartás nélküli ütemező.
+A `vercel.json`-ban nincs natív cron: a Hobby csomag naponta csak egy futást enged.
+Gyakoribb indításhoz egy külső felhős HTTP-időzítő POSTolja az éles route-ot. A ciklus
+ettől még a Vercel Functionben fut, és ugyanaz a Neon lease védi a duplázástól.
 
 ---
 
@@ -143,6 +143,24 @@ megadható; ha nincs beállítva, az alapértelmezés `github-actions`, tehát a
 ---
 
 ## 4. Hosted endpointok és kulcsok
+
+### Vercel Hobby + külső felhős időzítő
+
+Az órás production futáshoz az időzítő beállítása:
+
+- URL: `https://trade-beryl-six.vercel.app/api/cron/tick`
+- metódus: `POST`
+- ütemezés: `7 * * * *` (UTC, minden óra 7. percében)
+- fejléc: `Authorization: Bearer <a Vercelben beállított CRON_SECRET>`
+- timeout: legalább 300 másodperc; retry: legfeljebb 1
+
+Erre használható például Upstash QStash vagy cron-job.org. A külső szolgáltatás csak
+az indító HTTPS-kérést küldi; az adatgyűjtés, döntés, végrehajtás és könyvelés az éles
+Vercel deploymentben fut. A Vercel projektben a Fluid Compute aktív, a route
+`maxDuration` értéke 300 másodperc.
+
+Vercel Pro esetén ugyanez külső szolgáltatás nélkül, natív Vercel Cronnal is óránként
+futtatható. Hobby csomagban az órás cron kifejezés deployment hibát okozna.
 
 | Endpoint | Auth | Megjegyzés |
 |---|---|---|

@@ -78,7 +78,7 @@ export function getTradingMode(): TradingMode {
  * PONTOSAN EGY aktív ütemező lehet. Három hely tudna tickelni:
  *   - `worker`         → állandó folyamat (5 perces kilépés + órás belépés) — TELJES működés
  *   - `github-actions` → óránkénti runner (`scripts/tick.ts`) — CSAK órás belépés, nincs 5 perces kilépés
- *   - `vercel-cron`    → a `/api/cron/tick` route Vercel ütemezéssel — 60s limit miatt megbízhatatlan
+ *   - `vercel-cron`    → a `/api/cron/tick` route Vercelen, Vercel Pro vagy külső HTTP-cron indítással
  *
  * A lease (T10) második védvonalként úgyis kizárja a dupla futást ugyanarra a sávra, de
  * a konfiguráció szintjén is egyértelműnek kell lennie, KI az ütemező — különben senki

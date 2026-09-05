@@ -2,12 +2,10 @@ import { NextResponse } from "next/server";
 import { executeScheduledTick } from "@/lib/engine/run-scheduled-tick";
 import { authorizeCronRequest } from "@/lib/ops/cron-auth";
 
-// A tick több külső hívást tesz (collectors párhuzamosan + 1-2 LLM hívás + DB),
-// ezért megemeljük a függvény-időkorlátot (Vercelen a default 10s kevés lehet).
-// MEGJEGYZÉS: a Hobby plafon 60s — cold-starton a tick ezt túllépheti → 504. Ezért
-// az ELSŐDLEGES ütemezés a GitHub-runner (scripts/tick.ts, nincs 60s limit); ez a
-// route manuális/backup hívásra marad. Lásd run-scheduled-tick.ts + .github/workflows/tick.yml.
-export const maxDuration = 60;
+// A tick több külső hívást tesz (collectorok párhuzamosan + 1-2 LLM hívás + DB),
+// ezért a Fluid Compute-os Hobby projekt jelenlegi 300s plafonját használjuk. Az
+// ütemező lehet külső HTTP-cron is; maga a kereskedési ciklus ezen a Vercel route-on fut.
+export const maxDuration = 300;
 // Node runtime kell (neon, openai SDK, crypto) — nem Edge.
 export const runtime = "nodejs";
 
