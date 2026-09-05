@@ -208,27 +208,30 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 
 ### T21 — Külön, determinisztikus exit-ciklus
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T10, T14, T15, T17. Méret: M.
 - Fájlok: `src/lib/engine/plan-exits.ts`, `src/lib/engine/profit-cycle.ts`, `src/lib/engine/fast-exit.ts`, `tests/lib/engine/plan-exits.test.ts`, `tests/lib/engine/fast-exit.test.ts`.
 - Elfogadás: közös stop/TP/trailing tervező órás és gyors ágnak; fast-exit nem készít BUY-t és nem hív LLM-et; időközben zárt pozíció és stale quote nem okoz hibás/dupla SELL-t, a gyakoriság külön konfigurált.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/engine/plan-exits.test.ts tests/lib/engine/fast-exit.test.ts tests/lib/engine/profit-cycle.test.ts`; ugyanazon trigger két ciklusból egyszer könyvelődik.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/engine/plan-exits.test.ts tests/lib/engine/fast-exit.test.ts` → 23 teszt zöld; `pnpm test` 56 fájl / 546 teszt. Bizonyított: a `planExits` KÖZÖS tervező (az órás és a gyors ág is ezt hívja), SOHA nem tervez BUY-t, a megfigyelt ár a BID; elavult vagy hiányzó quote-ra NINCS kilépés (ok és kor rögzítve); a lezárt pozíció és a hiányzó belépési ár külön kihagyási ok; a stop elsőbbséget élvez; a trailing ratchet csak felfelé mozdul; az `inFlightSymbols` megakadályozza a dupla SELL-t. A `runFastExit` nem hív LLM-et és nem vár collectorra, ismeretlen állapotú megbízásnál megáll, és külön teszt bizonyítja, hogy ugyanaz a trigger két ciklusból EGYSZER könyvelődik.
 
 ### T22 — Ütemező worker és újraindulás
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T10, T21. Méret: M.
 - Fájlok: `scripts/worker.ts`, `src/lib/engine/worker.ts`, `src/lib/engine/run-scheduled-tick.ts`, `package.json`, `tests/lib/engine/worker.test.ts`.
 - Elfogadás: 5m exit + 60m lezárt gyertyás entry; ne legyen átfedő async setInterval, hosszú LLM-hívás ne fogja az exitet; indulás/restart függő állapotokat egyeztet, régi idősávokat nem vesz visszamenőleg. SIGTERM és egyszeri futás tesztelhető.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/engine/worker.test.ts`; injektált idővel késés/éjfél/restart/óraugrás, hosszú entry mellett exit; két folyamat valódi DB-n egy írót eredményez.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/engine/worker.test.ts` → 19 teszt zöld; `pnpm test` 57 fájl / 561 teszt. Bizonyított: 5 perces kilépés + 60 perces belépés :07-es offsettel; a FUTÓ belépés mellett a kilépés akadálytalanul lefut (külön teszt); az átfedés-őr SZINKRON zár, ezért két egyszerre indított azonos ciklus nem fut párhuzamosan; a belépés és a kilépés KÜLÖN lease-kulcsot használ; 15 perces óraugrás és éjfél-átlépés után sem pótoljuk a kihagyott sávokat; hiba esetén lease-elengedés és a worker tovább él; `stop()` után új ciklus nem indul. Parancsok: `pnpm worker`, `pnpm worker:once`. 🔴 KORLÁT: valódi két folyamatos futó egy DB-n NEM lett kipróbálva (nincs PostgreSQL).
 
 ### T23 — Futási állapot, költség és pénzügyi UI
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T18, T20, T22. Méret: M.
 - Fájlok: `src/lib/engine/tick-process.ts`, `src/lib/ops/heartbeat.ts`, `src/components/TickInspector.tsx`, `src/components/AnalyticsPanel.tsx`, `tests/lib/engine/tick-process.test.ts`.
 - Elfogadás: entry/exit utolsó siker, scheduler késés, quote-age, stage latency, letiltási ok és adatkimaradás látszik; nettó P&L és iránytalálat külön, költségadat hiánya nem nulla; sikertelen ledger nem zöld heartbeat, riasztás nem ismétel változatlan hibát minden tickben.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/engine/tick-process.test.ts tests/lib/ops/heartbeat.test.ts`; szimulált failure/degraded/recovery UI egy desktop+mobil körben. Új vizuális irány nincs; meglévő dashboardhoz illesztés.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/ops/heartbeat.test.ts tests/lib/engine/tick-process.test.ts` → 28 teszt zöld; `pnpm test` 57 fájl / 579 teszt; `pnpm build` sikeres. Bizonyított: a siker-heartbeat CSAK sikeres könyvelés mellett megy ki; azonos hibakód nem ismétlődik minden tickben (elnyomott pingek számláltak), MÁS hiba és a helyreállás viszont azonnal kimegy; az `OpsHealth` külön követi a belépést és a kilépést (utolsó siker, ütemező-késés, quote-kor, adatkimaradás), és a MÉG SOSEM futott ciklus nem „friss”, hanem ismeretlen. A `TickProcess.health` + `explainNoTrade` megmondja, MIÉRT nem történt kötés; a hiányzó adat mindenhol `null`, nem 0. 🔴 KORLÁT: a desktop+mobil UI-kör NEM futott le — nincs böngésző ebben a környezetben.
 
 **C9 / M4:** Legalább 24 órás izolált paper próba: nincs dupla fill vagy elveszett state, működő forrás mellett quote-age ≤10 s, exit indulási késés p95 ≤10 s a tervezett ütemhez képest. Ez mérnöki cél, túllépéskor okfeltárás szükséges. Ez még nem profitbizonyíték.
 
@@ -236,37 +239,41 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 
 ### T24 — Symbol filter és minimum-order
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T02, T04, T14. Méret: M.
 - Fájlok: `src/lib/execution/exchange-rules.ts`, `src/lib/execution/binance-broker.ts`, `src/lib/execution/paper-fill.ts`, `tests/lib/execution/exchange-rules.test.ts`, `tests/lib/execution/binance-broker.test.ts`.
 - Elfogadás: aktuális hivatalos dokumentáció és exchangeInfo alapján ár/mennyiség/notional kerekítés; nincs univerzális toFixed vagy fix dollárminimum; paper/backtest ugyanazt az ellenőrzőt használhatja, a broker az indokolatlan minimum-5%-os stoptiltást helyes validációra cseréli.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/execution/exchange-rules.test.ts tests/lib/execution/binance-broker.test.ts`; 100 USD tőke, mikroorder/dust, határpontok, stale filter és kerekítés utáni notional.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/execution/exchange-rules.test.ts tests/lib/execution/binance-broker.test.ts` → 33 teszt zöld; `pnpm test` 58 fájl / 608 teszt; `pnpm build` sikeres. Bizonyított: a kerekítés a TÉNYLEGES tickSize és stepSize szerint LEFELÉ történik, szimbólumonként (nincs univerzális toFixed); a minimum notional a KEREKÍTÉS UTÁNI értékre vonatkozik; 100 USD tőkén a 2%-os DCA (2 USD) az 5 USD-s minimum alatt van és elutasításra kerül; a hiányos szűrőkészletű szimbólum kimarad, az ELAVULT készlet pedig blokkol; a védőorder ára is tickSize-ra kerül és a limit a stop ALATT marad; a kitalált „min 5% stop” dobás megszűnt. A paper/backtest ugyanezt az ellenőrzőt használhatja (`PaperFillParams.filters`).
 
 ### T25 — Idempotens orderküldés és tényleges fill
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T09, T10, T24. Méret: M.
 - Fájlok: `src/lib/execution/binance-broker.ts`, `src/lib/execution/binance-order-state.ts`, `src/lib/execution/order-store.ts`, `tests/lib/execution/binance-broker.test.ts`, `tests/integration/order-recovery.test.ts`.
 - Elfogadás: stabil client order ID, orderállapot és fill dedup; base/quote/BNB díj helyes eszközön, hiányzó díjárfolyam jelölt becslés/függő értékelés; timeout után státuszlekérdezés, részleges teljesülés és nulla fill nem hamis teljes siker. BUY stop paramétere nem sérti a közös stratégiát.
 - Ellenőrzés: adapterfixture-ek elfogadott de timeoutos, elutasított, részlegesen teljesült, ismételt válaszokra; valódi DB retry-teszt, újraindulás nem küld új azonosítójú duplikátumot.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/execution/binance-order-state.test.ts` → 24 teszt zöld; `pnpm test` 59 fájl / 632 teszt. Bizonyított: STABIL `newClientOrderId` az intentId-ból, ezért az újraindulás UGYANAZT az azonosítót küldi; timeout után NEM megy ki új order, hanem lekérdezés; a „duplicate order” hibát a MEGLÉVŐ megbízás lekérdezésével oldjuk fel; a FILLED státusz NULLA teljesüléssel `unknown` és NYITOTT marad; a részleges teljesülés részlegesként látszik; a fill-kulcs (mode, orderId, tradeId) miatt nincs dupla könyvelés; a díj a SAJÁT eszközében marad, a BNB-díj FÜGGŐ értékelésű, nem nulla. 🔴 KORLÁT: `tests/integration/order-recovery.test.ts` MEGÍRVA, de NEM FUTOTT; valódi tesztkörnyezeti (testnet) próba sem történt.
 
 ### T26 — Védőorder teljes életciklusa
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T21, T25. Méret: M.
 - Fájlok: `src/lib/execution/protection.ts`, `src/lib/execution/binance-broker.ts`, `src/lib/engine/fast-exit.ts`, `tests/lib/execution/protection.test.ts`, `tests/integration/protection-recovery.test.ts`.
 - Elfogadás: BUY után net birtokolt qty védelme, order ID tartós; trailing/rávásárlás/részleges SELL után a védelem qty/ára egyezik; TP/manual SELL és zárolt készlet koordinált. Stoptelepítés hibája és cancel/replace közbeni fill explicit incident, nincs puszta console.error utáni normál BUY-folytatás.
 - Ellenőrzés: feltöltés/stopcancel közti fill, restart, részleges execution, gap és stop-limit nemteljesülés fixture-ek; tesztkörnyezetben védelem nélküli állapot kimutatása és előre rögzített helyreállítás. Kényszerpiaci zárás nem rejtett alapértelmezés.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/execution/protection.test.ts` → 20 teszt zöld; `pnpm test` 60 fájl / 652 teszt. Bizonyított: a védett mennyiség a NETTÓ birtokolt mennyiség, ezért a rávásárlás és a részleges eladás CSERÉT tervez; a trailing ratchet a TŐZSDEI ordert is cseréli (a DB-frissítés önmagában nem elég — külön `stale_stop` incidens); a védelem hiánya, az elbukott feladás és az elbukott törlés BLOKKOLÓ incidens, tehát nincs normál BUY-folytatás egy `console.error` után; a cancel a place ELŐTT megy (a pihenő order zárolja a készletet); a csere közbeni fill külön eset; az árva védőorder törlendő, de nem blokkol; kényszerpiaci zárást a modul SOHA nem tervez. 🔴 KORLÁT: `tests/integration/protection-recovery.test.ts` MEGÍRVA, de NEM FUTOTT.
 
 **C10:** T24–T26 után exchange-rules, order recovery és protection tesztek zöldek; mock és valódi tesztkörnyezeti bizonyíték külön jelölve.
 
 ### T27 — Tőzsdei egyenleg és nyitott orderek egyeztetése
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T25, T26. Méret: M.
 - Fájlok: `src/lib/execution/reconcile.ts`, `src/lib/engine/worker.ts`, `src/lib/execution/order-store.ts`, `tests/lib/execution/reconcile.test.ts`, `tests/integration/reconcile.test.ts`.
 - Elfogadás: induláskor és periodikusan exchange az igazságforrás a live accountnál; free/locked/base/quote és védőorderek egyeznek, új fill egyszer importálódik; kézi tőzsdei kötés vagy eltérés új BUY-t blokkol, helyreállítás idempotens, paper account érintetlen.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/execution/reconcile.test.ts`; izolált DB-ben kiesés alatti stop-fill, idegen manuális order, deposit és duplikált trade; tesztkörnyezeti restart egyeztetéssel.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/execution/reconcile.test.ts tests/lib/engine/worker.test.ts` → 35 teszt zöld; `pnpm test` 61 fájl / 671 teszt; `pnpm build` sikeres. Bizonyított: LIVE módban a tőzsde az igazságforrás; a free ÉS locked együtt számít (a pihenő védőorder zárolása nem hiány); a kimaradás alatti stop-fill, az idegen kézi order és a védelem nélküli pozíció mind BLOKKOLJA az új vételt; a talált teljesülés pontosan egyszer importálódik (ismert fill-kulcs nem kerül újra be); a PAPER számlán a modul NEM fut le és nem nyúl semmihez. A worker induláskor egyeztet, és a hibára futó egyeztetés KONZERVATÍV: a vétel tiltott marad. 🔴 KORLÁT: `tests/integration/reconcile.test.ts` MEGÍRVA, de NEM FUTOTT; valódi tesztkörnyezeti BUY→védőorder→részleges SELL→zárás→reconcile folyamat NEM lett végigvive.
 
 **C11 / M5:** Teljes suite + típusellenőrzés + build; tesztkörnyezeti BUY→védőorder→részleges SELL→zárás→reconcile folyamat. Valós pénzes próbát vagy live váltást ez nem indít.
 
