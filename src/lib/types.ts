@@ -42,13 +42,29 @@ export interface Decision extends RawDecision {
   overrideReason?: string;
 }
 
-/** Végrehajtható order a broker felé. */
+/**
+ * Végrehajtható order a broker felé.
+ *
+ * @deprecated v1 — kétértelmű `amountUsd`. Az új, verziózott szerződés a
+ * `@/lib/execution/contracts` `ExecutionOrder`-e: BUY `maxQuoteSpend`, SELL `baseQty`.
+ * Ez a típus a kompatibilitási adapterek (fromLegacyOrder/toLegacyOrder) miatt marad.
+ */
 export interface Order {
   side: "BUY" | "SELL";
   symbol: string;
   amountUsd: number;
   stopLossPct: number;
 }
+
+// A v2 szerződés újraexportálva, hogy egy helyről (types) is elérhető legyen.
+export type {
+  ExecutionOrder,
+  ExecutionIntent,
+  IntentMeta,
+  Fill,
+  OrderState,
+  TradingMode as ExecutionMode,
+} from "@/lib/execution/contracts";
 
 /** Egy végrehajtott tranzakció eredménye. */
 export interface Trade {
