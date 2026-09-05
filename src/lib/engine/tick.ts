@@ -1,4 +1,4 @@
-import { collectAll, type DataCollector } from "@/lib/collectors/base";
+import { collectAllWithOutcomes, type DataCollector, type CollectorOutcome } from "@/lib/collectors/base";
 import { CoinGeckoCollector } from "@/lib/collectors/coingecko";
 import { CryptoPanicCollector } from "@/lib/collectors/cryptopanic";
 import { WhaleAlertCollector } from "@/lib/collectors/whalealert";
@@ -47,6 +47,12 @@ import {
   type LedgerState,
 } from "@/lib/portfolio/ledger";
 import { type Dec, ZERO, add, div, mul, dec, toNumber, isPositive } from "@/lib/portfolio/money";
+import {
+  fetchQuotes,
+  checkExecutionQuote,
+  DEFAULT_QUOTE_MAX_AGE_MS,
+  type QuoteSnapshot,
+} from "@/lib/market/quotes";
 import { resolveDayGate, sinceInceptionPnlPct, type DayGateResult } from "@/lib/portfolio/day-equity";
 import type { Decision, Trade, DataPoint, RawDecision } from "@/lib/types";
 
@@ -100,6 +106,15 @@ export interface TickResult {
   };
   /** Az INDULÁS ÓTA mért hozam — külön mutató, nem a napi kapu bemenete. */
   inceptionPnlPct: number | null;
+  /** A végrehajtási ár adatútjának állapota (kor, hiányok, kihagyott orderek). */
+  quotes: {
+    maxAgeMs: number;
+    degraded: boolean;
+    errors: { symbol: string; code: string }[];
+    staleSkips: { symbol: string; side: string; reason: string; ageMs: number | null }[];
+  };
+  /** A collectorok kimenetele (melyik forrás mit adott, mennyi idő alatt). */
+  collectors: { name: string; ok: boolean; points: number; durationMs: number }[];
   /** Az ML-modell állapota és a kihagyott feature-ök (adathiány láthatósága). */
   ml: {
     modelUsable: boolean;
@@ -201,10 +216,23 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       new RedditCollector(process.env.REDDIT_CLIENT_ID, process.env.REDDIT_CLIENT_SECRET, REDDIT_SOURCES),
     );
 
-  const events = await collectAll(collectors);
+  // ── 2/a) VÉGREHAJTÁSI ÁR — külön, rövid időkorlátos úton, a hírgyűjtők ELŐTT.
+  //     A kilépésnek friss ÁRRA kell várnia, nem RSS-re, sentimentre vagy LLM-re.
+  const quoteSnapshot: QuoteSnapshot = await fetchQuotes([...COIN_UNIVERSE], { now: () => Date.now() });
+  if (quoteSnapshot.degraded) {
+    console.warn(
+      `[tick] quote-adat HIÁNYOS vagy elavult (max kor ${quoteSnapshot.maxAgeMs} ms): ` +
+        quoteSnapshot.errors.map((e) => `${e.symbol}:${e.code}`).join(", "),
+    );
+  }
+
+  const collectResult = await collectAllWithOutcomes(collectors);
+  const events = collectResult.points;
+  const collectorOutcomes: CollectorOutcome[] = collectResult.outcomes;
   const llmEvents = events.filter((e) => e.source !== "binance");
 
-  // Aktuális ár symbolonként (a legfrissebb price-pont).
+  // Az árak ELSŐDLEGES forrása a friss quote; a collector-ár csak tartalék, és a
+  // frissesség-ellenőrzés a végrehajtás előtt akkor is lefut.
   const prices: Record<string, number> = {};
   const pricesDec: Record<string, Dec> = {};
   const latestTs: Record<string, number> = {};
@@ -214,6 +242,10 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       prices[e.symbol] = e.price.usd;
       pricesDec[e.symbol] = dec(e.price.usd);
     }
+  }
+  for (const [symbol, q] of Object.entries(quoteSnapshot.quotes)) {
+    prices[symbol] = toNumber(q.mid);
+    pricesDec[symbol] = q.mid;
   }
 
   const equityNow = (): Dec => equityAt(ledger, pricesDec);
@@ -248,7 +280,11 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   /** A stop/TP trigger az intentId-hoz kötve (a paper fill-modellnek). */
   const pendingTrigger = new Map<string, { kind: "stop-loss" | "take-profit"; triggerPrice: Dec }>();
 
-  const market = (symbol: string) => (pricesDec[symbol] ? { last: pricesDec[symbol] } : null);
+  const market = (symbol: string) => {
+    const q = quoteSnapshot.quotes[symbol];
+    if (q) return { bid: q.bid, ask: q.ask, last: q.mid };
+    return pricesDec[symbol] ? { last: pricesDec[symbol] } : null;
+  };
   const broker: ExecutionBroker = input.paperMode
     ? new PaperExecutionBroker({
         getLedger: () => ledger,
@@ -267,6 +303,8 @@ export async function runTick(input: TickInput): Promise<TickResult> {
 
   let weeklyRemaining: Dec | undefined;
   let intentSeq = 0;
+  /** Elavult vagy hiányzó ár miatt kihagyott orderek — mérhető állapot, nem néma. */
+  const staleSkips: { symbol: string; side: string; reason: string; ageMs: number | null }[] = [];
 
   const makeDeps = (origin: IntentRequest["origin"]): ExecuteIntentDeps => ({
     portfolioId,
@@ -328,6 +366,16 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   /** Egy order végrehajtása a közös úton. Visszaadja a fillt, vagy null-t. */
   const runIntent = async (req: IntentRequest): Promise<Fill | null> => {
     if (!tradingEnabled) return null;
+    // UTOLSÓ ellenőrzés a beküldés előtt: elavult árra NEM megy ki market order.
+    const check = checkExecutionQuote(quoteSnapshot, req.symbol, Date.now(), DEFAULT_QUOTE_MAX_AGE_MS);
+    if (!check.ok) {
+      console.warn(
+        `[tick] ${req.symbol} ${req.side} KIHAGYVA: a végrehajtási ár ${check.reason}` +
+          (check.ageMs !== null ? ` (${check.ageMs} ms)` : ""),
+      );
+      staleSkips.push({ symbol: req.symbol, side: req.side, reason: check.reason, ageMs: check.ageMs });
+      return null;
+    }
     const deps = makeDeps(req.origin);
     if (req.trigger) {
       // A trigger az intentId-hoz kötődik; az azonosítót a deps generálja.
@@ -609,6 +657,18 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       reason: dayGate.reason,
     },
     inceptionPnlPct,
+    quotes: {
+      maxAgeMs: quoteSnapshot.maxAgeMs,
+      degraded: quoteSnapshot.degraded,
+      errors: quoteSnapshot.errors.map((e) => ({ symbol: e.symbol, code: e.code })),
+      staleSkips,
+    },
+    collectors: collectorOutcomes.map((o) => ({
+      name: o.name,
+      ok: o.ok,
+      points: o.points,
+      durationMs: o.durationMs,
+    })),
     ml: {
       modelUsable: prediction.status.usable,
       modelDetail: prediction.status.usable ? null : prediction.status.detail,

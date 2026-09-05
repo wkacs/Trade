@@ -5,18 +5,92 @@ export interface DataCollector {
   collect(): Promise<DataPoint[]>;
 }
 
+export interface CollectorOutcome {
+  name: string;
+  ok: boolean;
+  points: number;
+  durationMs: number;
+  error?: string;
+}
+
+export interface CollectResult {
+  points: DataPoint[];
+  outcomes: CollectorOutcome[];
+  /** Igaz, ha BÁRMELYIK collector hibázott vagy időtúllépett — mérhető állapot. */
+  degraded: boolean;
+}
+
+/** Alapértelmezett collector-időkorlát: egy lassú hírforrás nem foghatja meg a ciklust. */
+export const DEFAULT_COLLECTOR_TIMEOUT_MS = 15_000;
+
+/** Időkorlátos ígéret. Túllépéskor a megadott hibával utasít el. */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}: időtúllépés (${timeoutMs} ms)`)), timeoutMs);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 /**
- * Az összes regisztrált collectort párhuzamosan lefuttatja,
- * és egyesíti az eredményeket. Hibák egy collectorban nem döntik
- * romba a teljes ciklust — a többi eredménye megmarad. Lásd spec §3.1.
+ * Az összes regisztrált collectort párhuzamosan lefuttatja, EGYENKÉNTI időkorláttal.
+ *
+ * T14: a részleges hiba nem tűnik el — a kimenet tartalmazza, melyik forrás mit adott,
+ * és mennyi ideig futott. Egy collector hibája nem dönti romba a ciklust (spec §3.1),
+ * de a `degraded` jelzés láthatóvá teszi.
+ *
+ * FONTOS: a VÉGREHAJTÁSI ár NEM innen jön. Azt a `market/quotes.ts` külön, rövid
+ * időkorláttal kéri le, hogy a kilépés ne várjon hírre vagy sentimentre.
  */
-export async function collectAll(collectors: DataCollector[]): Promise<DataPoint[]> {
-  const results = await Promise.allSettled(collectors.map((c) => c.collect()));
-  const ok: DataPoint[] = [];
-  for (const r of results) {
-    if (r.status === "fulfilled") ok.push(...r.value);
-    // rejected: logolunk, de nem dobunk — spec §6 (egy hiba nem omlik össze)
-    else console.error("[collectAll] collector hiba:", r.reason);
+export async function collectAllWithOutcomes(
+  collectors: DataCollector[],
+  opts: { timeoutMs?: number; now?: () => number } = {},
+): Promise<CollectResult> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_COLLECTOR_TIMEOUT_MS;
+  const now = opts.now ?? (() => Date.now());
+
+  const settled = await Promise.allSettled(
+    collectors.map(async (c) => {
+      const started = now();
+      try {
+        const points = await withTimeout(c.collect(), timeoutMs, c.name);
+        return { name: c.name, ok: true, points, durationMs: now() - started };
+      } catch (e) {
+        return { name: c.name, ok: false, points: [] as DataPoint[], durationMs: now() - started, error: String(e) };
+      }
+    }),
+  );
+
+  const points: DataPoint[] = [];
+  const outcomes: CollectorOutcome[] = [];
+  for (const r of settled) {
+    if (r.status === "fulfilled") {
+      points.push(...r.value.points);
+      outcomes.push({
+        name: r.value.name,
+        ok: r.value.ok,
+        points: r.value.points.length,
+        durationMs: r.value.durationMs,
+        error: r.value.error,
+      });
+      if (!r.value.ok) console.error(`[collectAll] ${r.value.name} hiba:`, r.value.error);
+    } else {
+      outcomes.push({ name: "ismeretlen", ok: false, points: 0, durationMs: 0, error: String(r.reason) });
+      console.error("[collectAll] collector hiba:", r.reason);
+    }
   }
-  return ok;
+  return { points, outcomes, degraded: outcomes.some((o) => !o.ok) };
+}
+
+/** Visszafelé kompatibilis alak (csak az adatpontok). */
+export async function collectAll(collectors: DataCollector[]): Promise<DataPoint[]> {
+  return (await collectAllWithOutcomes(collectors)).points;
 }

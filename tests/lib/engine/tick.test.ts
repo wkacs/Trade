@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Minden külső függőséget mockolunk, hogy a ciklus determinisztikusan tesztelhető legyen
 vi.mock("@/lib/collectors/base", () => ({
   collectAll: vi.fn(),
+  collectAllWithOutcomes: vi.fn(),
 }));
 vi.mock("@/lib/collectors/coingecko", () => ({ CoinGeckoCollector: vi.fn() }));
 vi.mock("@/lib/collectors/cryptopanic", () => ({ CryptoPanicCollector: vi.fn() }));
@@ -13,6 +14,10 @@ vi.mock("@/lib/collectors/feargreed", () => ({ FearGreedCollector: vi.fn() }));
 vi.mock("@/lib/collectors/reddit", () => ({ RedditCollector: vi.fn() }));
 vi.mock("@/lib/llm/phase1-filter", () => ({ shouldDecide: vi.fn() }));
 vi.mock("@/lib/llm/phase2-decide", () => ({ decide: vi.fn() }));
+vi.mock("@/lib/market/quotes", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/market/quotes")>();
+  return { ...actual, fetchQuotes: vi.fn(async () => mockQuoteSnapshot) };
+});
 vi.mock("@/lib/ml/predictor", () => ({
   predict: vi.fn(),
   predictWithStatus: vi.fn(() => ({
@@ -47,13 +52,45 @@ vi.mock("@/lib/execution/order-store", () => ({
   expireStaleReservations: vi.fn(async () => 0),
 }));
 
-import { collectAll } from "@/lib/collectors/base";
+import { collectAllWithOutcomes } from "@/lib/collectors/base";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
 import { decide } from "@/lib/llm/phase2-decide";
 import { predict } from "@/lib/ml/predictor";
 import { loadPortfolioState } from "@/lib/portfolio/accounting";
 import { runTick } from "@/lib/engine/tick";
 import type { DataPoint } from "@/lib/types";
+
+/** A quote-pillanatkép, amit a mockolt `fetchQuotes` visszaad (T14). */
+let mockQuoteSnapshot: any = { quotes: {}, errors: [], maxAgeMs: 0, degraded: false };
+
+/**
+ * A collector-eredmény ÉS a végrehajtási quote-ok beállítása egy lépésben.
+ * A quote a price-eseményekből származik (bid = ask = mid = ár), hogy a fill-ár
+ * a régi tesztek elvárásaival egyezzen.
+ */
+function mockMarket(points: any[], nowMs = Date.now()) {
+  (collectAllWithOutcomes as any).mockResolvedValue({
+    points,
+    outcomes: [{ name: "mock", ok: true, points: points.length, durationMs: 1 }],
+    degraded: false,
+  });
+  const quotes: Record<string, any> = {};
+  for (const p of points) {
+    if (p.kind === "price" && p.price) {
+      const v = String(p.price.usd);
+      quotes[p.symbol] = {
+        symbol: p.symbol,
+        bid: v,
+        ask: v,
+        mid: v,
+        exchangeTime: null,
+        receivedAt: nowMs,
+        source: "binance-book",
+      };
+    }
+  }
+  mockQuoteSnapshot = { quotes, errors: [], maxAgeMs: 0, degraded: false };
+}
 
 /** A v2 ledger pillanatképe, amit a mockolt order-store visszaad. */
 let mockLedgerFixture: any = { portfolioId: "pf-test", mode: "paper", cash: { USDT: "0" }, positions: {}, appliedFillKeys: [], realizedPnlQuote: "0" };
@@ -91,7 +128,7 @@ const priceEvent = (symbol: string, usd: number): DataPoint => ({
 describe("runTick — teljes döntési ciklus", () => {
   beforeEach(() => {
     vi.stubEnv("TRADING_MODE", "paper");
-    (collectAll as any).mockResolvedValue([priceEvent("BTC", 60000)]);
+    mockMarket([priceEvent("BTC", 60000)]);
     (predict as any).mockResolvedValue([]);
     setLedgerFixture(10000, []);
     (loadPortfolioState as any).mockResolvedValue({
@@ -199,5 +236,72 @@ describe("runTick — teljes döntési ciklus", () => {
     const result = await runTick({ tickId: "2026-06-28-15", paperMode: true });
     expect(result.process).toBeDefined();
     expect(result.cycleActions.every((a) => a.kind !== "momentum")).toBe(true);
+  });
+});
+
+describe("runTick — végrehajtási ár és adatfrissesség (T14)", () => {
+  beforeEach(() => {
+    vi.stubEnv("TRADING_MODE", "paper");
+    (predict as any).mockResolvedValue([]);
+    setLedgerFixture(10000, []);
+    (loadPortfolioState as any).mockResolvedValue({
+      portfolioId: "pf-test",
+      cashUsd: 10000,
+      initialCapitalUsd: 10000,
+      positions: [],
+      totalEquity: () => 10000,
+      dayPnlPct: 0,
+    });
+    (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
+    (decide as any).mockResolvedValue({
+      action: "BUY",
+      symbol: "BTC",
+      amountPct: 0.1,
+      confidence: 0.9,
+      reasoning: "bullish",
+    });
+  });
+
+  it("ELAVULT quote mellett NEM megy ki order, és ez mérhető állapot", async () => {
+    mockMarket([priceEvent("BTC", 60000)]);
+    // A quote 30 másodperces — a 10 s-os küszöb felett.
+    mockQuoteSnapshot = {
+      quotes: {
+        BTC: {
+          symbol: "BTC",
+          bid: "60000",
+          ask: "60000",
+          mid: "60000",
+          exchangeTime: null,
+          receivedAt: Date.now() - 30_000,
+          source: "binance-book",
+        },
+      },
+      errors: [],
+      maxAgeMs: 30_000,
+      degraded: true,
+    };
+
+    const result = await runTick({ tickId: "2026-06-25-15", paperMode: true });
+    expect(result.trade).toBeNull();
+    expect(result.quotes.staleSkips.some((s) => s.symbol === "BTC" && s.reason === "stale")).toBe(true);
+  });
+
+  it("hiányzó quote mellett sincs order", async () => {
+    mockMarket([priceEvent("BTC", 60000)]);
+    mockQuoteSnapshot = { quotes: {}, errors: [{ symbol: "BTC", code: "timeout" }], maxAgeMs: 0, degraded: true };
+
+    const result = await runTick({ tickId: "2026-06-25-16", paperMode: true });
+    expect(result.trade).toBeNull();
+    expect(result.quotes.degraded).toBe(true);
+  });
+
+  it("friss quote mellett a végrehajtás megtörténik, és a quote-állapot riportálódik", async () => {
+    mockMarket([priceEvent("BTC", 60000)]);
+    const result = await runTick({ tickId: "2026-06-25-17", paperMode: true });
+    expect(result.trade).toBeTruthy();
+    expect(result.quotes.degraded).toBe(false);
+    expect(result.quotes.staleSkips).toEqual([]);
+    expect(result.collectors.length).toBeGreaterThan(0);
   });
 });

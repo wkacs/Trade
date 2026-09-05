@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Külső függőségek mockolása — a profit-ciklus determinisztikus tesztelése DB nélkül.
-vi.mock("@/lib/collectors/base", () => ({ collectAll: vi.fn() }));
+vi.mock("@/lib/collectors/base", () => ({ collectAll: vi.fn(), collectAllWithOutcomes: vi.fn() }));
 vi.mock("@/lib/collectors/coingecko", () => ({ CoinGeckoCollector: vi.fn() }));
 vi.mock("@/lib/collectors/cryptopanic", () => ({ CryptoPanicCollector: vi.fn() }));
 vi.mock("@/lib/collectors/whalealert", () => ({ WhaleAlertCollector: vi.fn() }));
@@ -11,6 +11,10 @@ vi.mock("@/lib/collectors/feargreed", () => ({ FearGreedCollector: vi.fn() }));
 vi.mock("@/lib/collectors/reddit", () => ({ RedditCollector: vi.fn() }));
 vi.mock("@/lib/llm/phase1-filter", () => ({ shouldDecide: vi.fn() }));
 vi.mock("@/lib/llm/phase2-decide", () => ({ decide: vi.fn() }));
+vi.mock("@/lib/market/quotes", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/market/quotes")>();
+  return { ...actual, fetchQuotes: vi.fn(async () => mockQuoteSnapshot) };
+});
 vi.mock("@/lib/ml/predictor", () => ({
   predict: vi.fn(),
   predictWithStatus: vi.fn(() => ({
@@ -46,7 +50,7 @@ vi.mock("@/lib/execution/order-store", () => ({
   expireStaleReservations: vi.fn(async () => 0),
 }));
 
-import { collectAll } from "@/lib/collectors/base";
+import { collectAllWithOutcomes } from "@/lib/collectors/base";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
 import { decide } from "@/lib/llm/phase2-decide";
 import { predict } from "@/lib/ml/predictor";
@@ -54,6 +58,38 @@ import { loadPortfolioState, applyTrade, setStopPrice } from "@/lib/portfolio/ac
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { runTick } from "@/lib/engine/tick";
 import type { DataPoint } from "@/lib/types";
+
+/** A quote-pillanatkép, amit a mockolt `fetchQuotes` visszaad (T14). */
+let mockQuoteSnapshot: any = { quotes: {}, errors: [], maxAgeMs: 0, degraded: false };
+
+/**
+ * A collector-eredmény ÉS a végrehajtási quote-ok beállítása egy lépésben.
+ * A quote a price-eseményekből származik (bid = ask = mid = ár), hogy a fill-ár
+ * a régi tesztek elvárásaival egyezzen.
+ */
+function mockMarket(points: any[], nowMs = Date.now()) {
+  (collectAllWithOutcomes as any).mockResolvedValue({
+    points,
+    outcomes: [{ name: "mock", ok: true, points: points.length, durationMs: 1 }],
+    degraded: false,
+  });
+  const quotes: Record<string, any> = {};
+  for (const p of points) {
+    if (p.kind === "price" && p.price) {
+      const v = String(p.price.usd);
+      quotes[p.symbol] = {
+        symbol: p.symbol,
+        bid: v,
+        ask: v,
+        mid: v,
+        exchangeTime: null,
+        receivedAt: nowMs,
+        source: "binance-book",
+      };
+    }
+  }
+  mockQuoteSnapshot = { quotes, errors: [], maxAgeMs: 0, degraded: false };
+}
 
 /** A v2 ledger pillanatképe, amit a mockolt order-store visszaad. */
 let mockLedgerFixture: any = { portfolioId: "pf-test", mode: "paper", cash: { USDT: "0" }, positions: {}, appliedFillKeys: [], realizedPnlQuote: "0" };
@@ -124,7 +160,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
       stateWith([{ id: "p1", symbol: "ETH", qty: 0.1, entryPrice: 2000, stopPrice: 1900, valueUsd: 200 }]),
     );
     // ETH ár 1800 ≤ stop 1900; F&G magas → nincs DCA
-    (collectAll as any).mockResolvedValue([price("ETH", 1800, -10), fearGreed(60)]);
+    mockMarket([price("ETH", 1800, -10), fearGreed(60)]);
 
     const result = await runTick({ tickId: "2026-06-26-10", paperMode: true });
 
@@ -143,7 +179,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
       stateWith([{ id: "p1", symbol: "ETH", qty: 0.1, entryPrice: 2000, stopPrice: 1900, valueUsd: 200 }]),
     );
     // ETH 2300 = +15%, a +10% take-profit küszöb felett és a stop felett; F&G magas → nincs DCA
-    (collectAll as any).mockResolvedValue([price("ETH", 2300, 15), fearGreed(60)]);
+    mockMarket([price("ETH", 2300, 15), fearGreed(60)]);
 
     const result = await runTick({ tickId: "2026-06-26-11", paperMode: true });
 
@@ -157,7 +193,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
   it("DCA: F&G ≤25 + stabil ár + van keret → BUY 2% tőke a legolcsóbb coinra", async () => {
     (loadPortfolioState as any).mockResolvedValue(stateWith([], 1000)); // nincs pozíció
     // F&G 13 (extrém félelem); BTC -3%, SOL -5% (SOL a leginkább esett, de -8% felett)
-    (collectAll as any).mockResolvedValue([
+    mockMarket([
       price("BTC", 60000, -3),
       price("SOL", 150, -5),
       fearGreed(13),
@@ -178,7 +214,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
   it("DCA NEM fut, ha nincs heti keret (remaining 0)", async () => {
     (loadPortfolioState as any).mockResolvedValue(stateWith([], 1000));
     (remainingWeeklyBudget as any).mockResolvedValue("0");
-    (collectAll as any).mockResolvedValue([price("BTC", 60000, -3), fearGreed(13)]);
+    mockMarket([price("BTC", 60000, -3), fearGreed(13)]);
 
     const result = await runTick({ tickId: "2026-06-26-13", paperMode: true });
     expect(result.cycleActions.find((a) => a.kind === "dca")).toBeUndefined();
@@ -189,7 +225,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     // ha a DCA-keret elfogyott (csak a DCA-t fékezi a keret). Lásd tournament spec §6.
     (loadPortfolioState as any).mockResolvedValue(stateWith([], 1000));
     (remainingWeeklyBudget as any).mockResolvedValue("0");
-    (collectAll as any).mockResolvedValue([price("BTC", 60000, 1), fearGreed(60)]);
+    mockMarket([price("BTC", 60000, 1), fearGreed(60)]);
     (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
     (decide as any).mockResolvedValue({
       action: "BUY",
@@ -206,7 +242,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
 
   it("nincs profit-ciklus akció, ha nincs pozíció és F&G magas", async () => {
     (loadPortfolioState as any).mockResolvedValue(stateWith([], 1000));
-    (collectAll as any).mockResolvedValue([price("BTC", 60000, 1), fearGreed(70)]);
+    mockMarket([price("BTC", 60000, 1), fearGreed(70)]);
 
     const result = await runTick({ tickId: "2026-06-26-15", paperMode: true });
     expect(result.cycleActions).toEqual([]);
@@ -225,7 +261,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
         1000, // initialCapitalUsd
       ),
     );
-    (collectAll as any).mockResolvedValue([price("ETH", 1300, -35), fearGreed(60)]);
+    mockMarket([price("ETH", 1300, -35), fearGreed(60)]);
     (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
     (decide as any).mockResolvedValue({
       action: "BUY",
@@ -259,7 +295,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     );
     // Ár 65000-re emelkedett → ratchet: stop = 65000*0.95 = 61750 (> 57000).
     // 65000 > 61750, így EBBEN a tickben NEM tüzel a stop — csak a stop kúszik felljebb.
-    (collectAll as any).mockResolvedValue([price("BTC", 65000, 5), fearGreed(60)]);
+    mockMarket([price("BTC", 65000, 5), fearGreed(60)]);
 
     const result = await runTick({ tickId: "2026-06-26-17", paperMode: true });
 
@@ -281,7 +317,7 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
         10000,
       ),
     );
-    (collectAll as any).mockResolvedValue([price("BTC", 61000, -2), fearGreed(60)]);
+    mockMarket([price("BTC", 61000, -2), fearGreed(60)]);
 
     const result = await runTick({ tickId: "2026-06-26-18", paperMode: true });
 
