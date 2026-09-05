@@ -13,6 +13,13 @@ import { COIN_UNIVERSE, RISK_LIMITS } from "@/lib/config";
 import { DEFAULT_STRATEGY, STRATEGY_VERSION, type StrategyConfig } from "@/lib/strategy/config";
 import { fetchQuotes, checkExecutionQuote, DEFAULT_QUOTE_MAX_AGE_MS, type QuoteSnapshot } from "@/lib/market/quotes";
 import { planExits, exitPositionsFromLedger, type ExitPlan } from "@/lib/engine/plan-exits";
+import {
+  planProtection,
+  protectionGate,
+  type ProtectionOrder,
+  type ProtectionIncident,
+} from "@/lib/execution/protection";
+import type { SymbolFilters } from "@/lib/execution/exchange-rules";
 import { executeIntent, type ExecuteIntentDeps } from "@/lib/engine/execute-intent";
 import { PaperExecutionBroker } from "@/lib/execution/paper-broker";
 import { BinanceBroker, BinanceLegacyExecutionAdapter } from "@/lib/execution/binance-broker";
@@ -37,6 +44,10 @@ export interface FastExitInput {
 
 export interface FastExitDeps {
   fetchQuotes: typeof fetchQuotes;
+  /** A tőzsdén ÜLŐ védőorderek (live módban). Paperben üres. */
+  loadProtection: (scope: { portfolioId: string; mode: TradingMode }) => Promise<Record<string, ProtectionOrder | undefined>>;
+  /** A szimbólum-szűrők (T24). Paperben üres. */
+  loadFilters: () => Promise<Record<string, SymbolFilters | undefined>>;
   loadLedger: (scope: { portfolioId: string; mode: TradingMode }) => Promise<LedgerState>;
   loadReservations: typeof loadReservations;
   listUnsettledIntents: typeof listUnsettledIntents;
@@ -47,6 +58,10 @@ export interface FastExitDeps {
 
 export interface FastExitResult {
   cycleId: string;
+  /** Védőorder-incidensek (T26). Blokkoló incidens mellett ÚJ VÉTEL TILOS. */
+  protectionIncidents: ProtectionIncident[];
+  /** Igaz, ha a védelem állapota miatt új vétel nem indítható. */
+  newBuysBlocked: boolean;
   /** A ténylegesen végrehajtott kilépések. */
   fills: Fill[];
   plan: ExitPlan;
@@ -62,6 +77,9 @@ export interface FastExitResult {
 function defaultDeps(): FastExitDeps {
   return {
     fetchQuotes,
+    // Paper módban nincs tőzsdén ülő védőorder; a live út a T27-ben kapja meg a forrást.
+    loadProtection: async () => ({}),
+    loadFilters: async () => ({}),
     loadLedger: (scope) => loadLedgerState(scope),
     loadReservations,
     listUnsettledIntents,
@@ -100,6 +118,8 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
       cycleId: input.cycleId,
       fills: [],
       plan: emptyPlan,
+      protectionIncidents: [],
+      newBuysBlocked: false,
       quotes: { maxAgeMs: 0, degraded: true, missing: [] },
       halted: "unsettled_intents",
       stopUpdatesApplied: 0,
@@ -115,6 +135,8 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
       cycleId: input.cycleId,
       fills: [],
       plan: emptyPlan,
+      protectionIncidents: [],
+      newBuysBlocked: false,
       quotes: { maxAgeMs: 0, degraded: false, missing: [] },
       halted: "no_positions",
       stopUpdatesApplied: 0,
@@ -132,6 +154,8 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
       cycleId: input.cycleId,
       fills: [],
       plan: emptyPlan,
+      protectionIncidents: [],
+      newBuysBlocked: false,
       quotes: { maxAgeMs: quotes.maxAgeMs, degraded: true, missing },
       halted: "no_quotes",
       stopUpdatesApplied: 0,
@@ -219,10 +243,34 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
     }
   }
 
+  // ── 6) Védőorder-életciklus (T26). A DB-stop frissítése ÖNMAGÁBAN nem módosítja a
+  //      tőzsdén ülő ordert, ezért a tervet itt állítjuk elő; a blokkoló incidens
+  //      megtiltja az új vételt, amíg fenn nem oldódik.
+  const existingProtection = await deps.loadProtection(scope);
+  const protectionFilters = await deps.loadFilters();
+  const protection = planProtection(
+    {
+      positions: exitPositionsFromLedger(ledger.positions).map((p) => ({
+        symbol: p.symbol,
+        qty: p.qty,
+        desiredStop: p.stopPrice,
+      })),
+      existing: existingProtection,
+      filters: protectionFilters,
+    },
+    strategy,
+  );
+  const gate = protectionGate(protection.incidents);
+  for (const i of protection.incidents) {
+    if (i.blocksNewBuys) console.error(`[fast-exit] VÉDELMI INCIDENS ${i.code} (${i.symbol}): ${i.message}`);
+  }
+
   return {
     cycleId: input.cycleId,
     fills,
     plan,
+    protectionIncidents: protection.incidents,
+    newBuysBlocked: !gate.allowNewBuys,
     quotes: { maxAgeMs: quotes.maxAgeMs, degraded: quotes.degraded, missing },
     stopUpdatesApplied,
     rejections,
