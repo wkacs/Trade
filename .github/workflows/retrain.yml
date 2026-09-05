@@ -1,15 +1,20 @@
 name: weekly-retrain
 
-# Heti automatikus ML-újratanítás a legfrissebb Binance-adaton (regime-adaptáció).
-# Ha az új modell nem rosszabb a véletlennél (test AUC >= 0.5), commitolja az új
-# model.json-t → a Vercel auto-deploy felviszi. NEM kell secret (csak publikus Binance).
+# Heti ML-újratanítás a legfrissebb Binance-adaton (regime-adaptáció).
+#
+# T13 VÁLTOZÁS: a workflow SOHA nem cseréli le automatikusan az aktív modellt.
+# A régi kapu ("test AUC >= 0.5") csak azt jelentette, hogy a modell nem rosszabb a
+# véletlennél — ez nem bizonyított előny, és nem elég egy éles döntéshozó cseréjéhez.
+#
+# Amit a workflow csinál: betanít egy JELÖLTET (model.candidate.json), kiírja a
+# promóciós értékelést, és artefaktumként feltölti. A LÉPTETÉS KÉZI DÖNTÉS.
 on:
   schedule:
     - cron: "0 6 * * 1" # minden hétfő 06:00 UTC
   workflow_dispatch: {} # kézi indítás is
 
 permissions:
-  contents: write # hogy vissza tudja pusholni a frissített model.json-t
+  contents: read
 
 jobs:
   retrain:
@@ -24,21 +29,26 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Újratanítás + minőség-kapu + commit
+
+      - name: Jelölt modell betanítása (az aktív modell ÉRINTETLEN)
+        run: pnpm tsx scripts/train-model.ts | tee retrain-report.txt
+
+      - name: A jelölt és a jelentés feltöltése
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-candidate
+          path: |
+            src/lib/ml/model.candidate.json
+            retrain-report.txt
+          retention-days: 30
+
+      - name: Az aktív modell változatlanságának ellenőrzése
         run: |
-          pnpm tsx scripts/train-model.ts
-          if node -e "process.exit(require('./src/lib/ml/model.json').metrics.testAuc >= 0.5 ? 0 : 1)"; then
-            if ! git diff --quiet src/lib/ml/model.json; then
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git add src/lib/ml/model.json
-              git commit -m "chore(ml): heti automatikus újratanítás (friss Binance-adat)"
-              git push
-              echo "✅ Új modell deployolva."
-            else
-              echo "Nincs változás a modellben."
-            fi
-          else
-            echo "⚠ test AUC < 0.5 — a modellt NEM frissítjük (megtartjuk a régit)."
-            git checkout -- src/lib/ml/model.json
+          if ! git diff --quiet src/lib/ml/model.json; then
+            echo "::error::Az aktív model.json megváltozott — a tréning nem írhatja felül."
+            exit 1
           fi
+          echo "Az aktív model.json változatlan. A jelölt léptetése kézi döntés:"
+          echo "  1) töltsd le a model-candidate artefaktumot"
+          echo "  2) nézd meg a retrain-report.txt promóciós értékelését"
+          echo "  3) ha elfogadod: cp model.candidate.json src/lib/ml/model.json és commit"

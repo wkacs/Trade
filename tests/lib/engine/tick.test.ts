@@ -13,7 +13,13 @@ vi.mock("@/lib/collectors/feargreed", () => ({ FearGreedCollector: vi.fn() }));
 vi.mock("@/lib/collectors/reddit", () => ({ RedditCollector: vi.fn() }));
 vi.mock("@/lib/llm/phase1-filter", () => ({ shouldDecide: vi.fn() }));
 vi.mock("@/lib/llm/phase2-decide", () => ({ decide: vi.fn() }));
-vi.mock("@/lib/ml/predictor", () => ({ predict: vi.fn() }));
+vi.mock("@/lib/ml/predictor", () => ({
+  predict: vi.fn(),
+  predictWithStatus: vi.fn(() => ({
+    signals: [],
+    status: { usable: true, featureVersion: "test", trainedAtMs: 0 },
+  })),
+}));
 // Portfólió-réteg mock. FONTOS (T06): a régi 10 000 USD-s demo fallback MEGSZŰNT —
 // hiteles portfólió-állapot nélkül a tick nem köt. Ezért itt egy explicit teszt-portfóliót
 // adunk vissza; a "nincs DB" esetre külön teszt van lent.

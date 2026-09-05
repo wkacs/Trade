@@ -40,3 +40,4 @@ pnpm-debug.log*
 
 # audit/mérési exportok (pénzügyi adat — sosem kerül gitbe)
 audit-exports/
+src/lib/ml/model.candidate.json

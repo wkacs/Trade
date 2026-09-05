@@ -6,8 +6,8 @@ import { RSSCollector } from "@/lib/collectors/rss";
 import { BinanceOHLCCollector } from "@/lib/collectors/binance";
 import { FearGreedCollector } from "@/lib/collectors/feargreed";
 import { RedditCollector } from "@/lib/collectors/reddit";
-import { buildFeatures } from "@/lib/ml/features";
-import { predict } from "@/lib/ml/predictor";
+import { buildFeaturesWithDiagnostics } from "@/lib/ml/features";
+import { predictWithStatus } from "@/lib/ml/predictor";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
 import { decide } from "@/lib/llm/phase2-decide";
 import { applyRisk, riskContextFromLedger, originBudgetFor, DEFAULT_ORDER_RISK_PARAMS } from "@/lib/risk/risk-manager";
@@ -100,6 +100,13 @@ export interface TickResult {
   };
   /** Az INDULÁS ÓTA mért hozam — külön mutató, nem a napi kapu bemenete. */
   inceptionPnlPct: number | null;
+  /** Az ML-modell állapota és a kihagyott feature-ök (adathiány láthatósága). */
+  ml: {
+    modelUsable: boolean;
+    modelDetail: string | null;
+    signalCount: number;
+    skipped: { symbol: string; reason: string }[];
+  };
 }
 
 /** Szimulált díj — egyezik a paper fill-modellel (0.1%). */
@@ -458,9 +465,17 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     }
   }
 
-  // ── 4) ML jelek ───────────────────────────────────────────────────────────
-  const features = buildFeatures(events);
-  const mlSignals = await predict(features);
+  // ── 4) ML jelek. Inkompatibilis modell vagy hiányos ablak esetén NINCS jel —
+  //     és ez LÁTHATÓ, nem néma nulla. Lásd T13.
+  const featureResult = buildFeaturesWithDiagnostics(events);
+  const prediction = predictWithStatus(featureResult.features);
+  const mlSignals = prediction.signals;
+  if (!prediction.status.usable) {
+    console.warn(`[tick] ML-jel KIHAGYVA: ${prediction.status.detail}`);
+  }
+  for (const s of featureResult.skipped) {
+    console.warn(`[tick] nincs ML-feature ${s.symbol}: ${s.reason}`);
+  }
 
   // ── 5) Phase-1 / Phase-2 ──────────────────────────────────────────────────
   const phase1 = await shouldDecide(llmEvents);
@@ -594,5 +609,11 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       reason: dayGate.reason,
     },
     inceptionPnlPct,
+    ml: {
+      modelUsable: prediction.status.usable,
+      modelDetail: prediction.status.usable ? null : prediction.status.detail,
+      signalCount: mlSignals.length,
+      skipped: featureResult.skipped,
+    },
   };
 }

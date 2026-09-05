@@ -11,7 +11,13 @@ vi.mock("@/lib/collectors/feargreed", () => ({ FearGreedCollector: vi.fn() }));
 vi.mock("@/lib/collectors/reddit", () => ({ RedditCollector: vi.fn() }));
 vi.mock("@/lib/llm/phase1-filter", () => ({ shouldDecide: vi.fn() }));
 vi.mock("@/lib/llm/phase2-decide", () => ({ decide: vi.fn() }));
-vi.mock("@/lib/ml/predictor", () => ({ predict: vi.fn() }));
+vi.mock("@/lib/ml/predictor", () => ({
+  predict: vi.fn(),
+  predictWithStatus: vi.fn(() => ({
+    signals: [],
+    status: { usable: true, featureVersion: "test", trainedAtMs: 0 },
+  })),
+}));
 vi.mock("@/lib/portfolio/accounting", () => ({
   loadPortfolioState: vi.fn(),
   applyTrade: vi.fn().mockResolvedValue({ positionId: "persisted-id" }),
