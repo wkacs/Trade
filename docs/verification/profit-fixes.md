@@ -47,10 +47,14 @@ pnpm build
 pnpm shadow:paper -- --check
 ```
 
-Az aktuális forrásellenőrzésen `pnpm test` **67 fájl / 756 teszttel zöld**,
+Az aktuális forrásellenőrzésen `pnpm test` **68 fájl / 765 teszttel zöld**,
 `pnpm exec tsc --noEmit` zöld, és `pnpm build` zöld. A shadow konfigurációs parancs
 az `E5-stop-mode` baseline/`atr2` párost, 100 USD-s, külön paper számlákkal érvényesnek
-írja ki.
+írja ki. A lezárt forrásbeli hiányok: a worker ugyanazzal a lease-ownerrel adja tovább a
+fencing tokent; az SQL pénzmozgás elutasítja az elavult tokent; a BUY kezdeti stopot kap;
+a live entry a v2 Binance brokerre kerül; a protection terv tényleges cancel/place/replace
+műveletté válik; az indulási és 15 perces reconciliation vételi kaput vezérel; a shadow
+mérés tartós ciklus- és equity-riportot, közös logikai időt és opcionális decision replayt használ.
 
 Az integrációs suite szándékosan külön fut: `TEST_DATABASE_URL` nélkül fail-closed, hogy ne
 érinthessen normál adatbázist. A futtatási parancs `pnpm test:integration`; csak eldobható,
@@ -61,7 +65,8 @@ elkülönített PostgreSQL adatbázissal használható.
 - A GitHub Actions keret kifogyása miatt nincs aktív előremenő futás. A worker/scheduler
   éles újraindítása nem történt meg.
 - T31 akkor zárható le, ha az elkülönített shadow számlákon teljesül a 30 nap **és** 50
-  round-trip, majd elkészül a költség-, drawdown-, incidens- és bizonytalansági jelentés.
+  round-trip. A költség-, drawdown- és incidensriport automatikusan készül; a végső
+  bizonytalansági értékeléshez továbbra is kell a tényleges minta.
 - A PostgreSQL integrációs tesztekhez nincs itt `TEST_DATABASE_URL`; ezért order-recovery,
   protection-recovery, reconcile és shadow DB-folyamat nem kapott valódi DB-bizonyítékot.
 - A 24 órás worker-próba, az 5 perces exit késleltetési cél és a desktop+mobil UI-kör nem

@@ -171,4 +171,42 @@ describe("runFastExit — gyors kilépés LLM és hírek NÉLKÜL (T21)", () => 
     expect(typeof r.durationMs).toBe("number");
     expect(r.durationMs).toBeGreaterThanOrEqual(0);
   });
+
+  it("live módban végrehajtja a védőorder-tervet és a hibából vételi tiltást képez", async () => {
+    const executeProtection = vi.fn(async (actions: any[]) => actions.map((action) => ({ action, ok: false, error: "exchange down" })));
+    const h = harness(ledgerWith("0", { BTC: { qty: "0.001", cost: "60", stop: "57000" } }), snapshot({ BTC: "60000" }), {
+      loadProtection: async () => ({}),
+      loadFilters: async () => ({ BTC: { symbol: "BTCUSDT", baseAsset: "BTC", quoteAsset: "USDT", tickSize: "0.01", stepSize: "0.000001", minQty: "0.000001", maxQty: "100", minNotional: "5", maxNotional: null, percentPriceMultiplierUp: null, percentPriceMultiplierDown: null, avgPriceMins: 0, fetchedAt: NOW } as any }),
+      executeProtection,
+    });
+    const r = await runFastExit({ portfolioId: "pf", mode: "live", cycleId: "live-1", now: () => NOW, deps: h.deps });
+    expect(executeProtection).toHaveBeenCalledTimes(1);
+    expect(r.protectionOutcomes).toHaveLength(1);
+    expect(r.protectionIncidents.some((i) => i.code === "place_failed")).toBe(true);
+    expect(r.newBuysBlocked).toBe(true);
+  });
+
+  it("paper módban nem gyárt hamis védőorder-incidenst", async () => {
+    const executeProtection = vi.fn();
+    const h = harness(ledgerWith("0", { BTC: { qty: "0.001", cost: "60", stop: "57000" } }), snapshot({ BTC: "60000" }), { executeProtection });
+    const r = await run(h.deps);
+    expect(executeProtection).not.toHaveBeenCalled();
+    expect(r.protectionIncidents).toEqual([]);
+  });
+
+  it("live market exit előtt törli a készletet zároló védőordert", async () => {
+    const events: string[] = [];
+    const h = harness(ledgerWith("0", { BTC: { qty: "0.001", cost: "60", stop: "57000" } }), snapshot({ BTC: "56000" }), {
+      loadProtection: async () => ({ BTC: { symbol: "BTC", exchangeOrderId: "stop-1", clientOrderId: "p", qty: "0.001", stopPrice: "57000", limitPrice: "56900", state: "pending", placedAt: NOW } }),
+      loadFilters: async () => ({ BTC: { symbol: "BTCUSDT", baseAsset: "BTC", quoteAsset: "USDT", tickSize: "0.01", stepSize: "0.000001", minQty: "0.000001", maxQty: "100", minNotional: "5", maxNotional: null, percentPriceMultiplierUp: null, percentPriceMultiplierDown: null, avgPriceMins: 0, fetchedAt: NOW } as any }),
+      executeProtection: async (actions) => actions.map((action) => { events.push(action.kind); return { action, ok: true }; }),
+      makeBroker: () => ({
+        submit: async (intent: any) => { events.push(intent.order.side.toLowerCase()); return { exchangeOrderId: null, clientOrderId: "x", state: "rejected", fills: [], error: { code: "test", message: "test" } }; },
+        lookup: async () => ({ exchangeOrderId: null, clientOrderId: "x", state: "unknown", fills: [] }),
+      }),
+    });
+    await runFastExit({ portfolioId: "pf", mode: "live", cycleId: "live-exit", now: () => NOW, deps: h.deps });
+    expect(events[0]).toBe("cancel");
+    expect(events[1]).toBe("sell");
+  });
 });

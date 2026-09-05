@@ -41,6 +41,7 @@ export interface ScheduledTickOptions {
   slotMs?: number;
   /** A lease élettartama. Alapértelmezés: az idősáv 95%-a (tartós claim az adott sávra). */
   leaseTtlMs?: number;
+  allowNewBuys?: boolean;
 }
 
 /**
@@ -125,7 +126,12 @@ export async function executeScheduledTick(options: ScheduledTickOptions = {}): 
 
   // 3) A tényleges ciklus
   try {
-    const result = await runTick({ tickId, paperMode: process.env.TRADING_MODE !== "live" });
+    const result = await runTick({
+      tickId,
+      paperMode: process.env.TRADING_MODE !== "live",
+      allowNewBuys: options.allowNewBuys,
+      fence: { leaseKey: key, owner, fencingToken: lease.fencingToken },
+    });
 
     // 4) Döntés mentése. A mentés sikere KÜLÖN követett: sikertelen mentés nem
     //    eredményezhet siker-heartbeatet (a régi kód itt csendben továbbment).

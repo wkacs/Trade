@@ -312,7 +312,7 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 - Fájlok: `scripts/shadow-paper.ts`, `src/lib/backtest/shadow-accounts.ts`, `tests/integration/shadow-paper.test.ts`, `docs/experiments/forward-paper-v1.md`.
 - Elfogadás: elkülönült paper számlák azonos induló tőkével és inputokkal; javított baseline és jelölt párban, AI párok ott, ahol múlt nem rekonstruálható; nincs éles order vagy cross-account cash/keret. Legalább 30 nap megfigyelés és 50 lezárt round-trip cél, a korrelált kötések és piaci állapotok miatt ez önmagában nem statisztikai garancia.
 - Ellenőrzés: account isolation és replay integrációs teszt; végső jelentés a költségek utáni eltérésről, drawdownról, incidensekről és mintabizonytalanságról. Kevés kötés/egyoldalú piac esetén a mérési feladat nyitott marad, nem minősül sikernek néhány nap után.
-- **Forráskód-kész:** `shadow-accounts.ts`, `shadow-run.ts` és `scripts/shadow-paper.ts` elkülönített paper ledgeren indít baseline+jelölt párt; a baseline inputját replayeli a jelöltnek. A 30 napos/50 round-trip külső megfigyelési kapu és a valódi PostgreSQL integrációs futás még nyitott, ezért ez a feladat szándékosan nincs készre jelölve.
+- **Forráskód-kész:** az elkülönített számlák provisionálása egyetlen SQL-tranzakció; a baseline quote/collector pillanatképe, logikai ideje és `--ai` esetén nyers AI-döntése is változatlan replay. A ciklus/equity/incidens tartós, a `--report` nettó hozamot, drawdownt, USDT-díjat és round-tripet számol. A 30 napos/50 round-trip külső megfigyelési kapu és a valódi PostgreSQL integrációs futás még nyitott, ezért a feladat nincs készre jelölve.
 
 ### T32 — Teljes regresszió és audit-visszaellenőrzés
 
@@ -321,7 +321,7 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 - Fájlok: `docs/verification/profit-fixes.md`, `src/app/api/cron/tick/route.ts`, `tests/lib/api/cron-auth.test.ts`, `README.md`, `tasks/todo.md`.
 - Elfogadás: minden auditmegállapítás mellé javítás és bizonyíték; hosted order-trigger auth hiányában fail-closed, helyi teszt kivétel explicit; teljes folyamat friss és legacy fixture-rel, crash/recovery és minimumtőke mellett működik. Műszaki készültség és stratégiaeredmény külön verdict, live mód marad kikapcsolva.
 - Ellenőrzés: `pnpm test`, `pnpm exec tsc --noEmit`, `pnpm build`; összes izolált PostgreSQL-teszt; T31 jelentés, M5 tesztkörnyezeti bizonyíték; egy összesített desktop+mobil ellenőrzés. Nem teljesült külső/mérési kapu fel van tüntetve, a teljes terv addig nincs készre jelölve.
-- **Forráskód-kész:** `docs/verification/profit-fixes.md` összeköti az auditot a javításokkal; a cron route hosted környezetben hiányzó secret mellett fail-closed, a helyi kivétel explicit, unit teszttel fedett. A T31 időalapú mérés, a külön PostgreSQL integráció és a UI/worker bizonyíték hiányában a teljes kapu nyitott marad.
+- **Forráskód-kész:** `docs/verification/profit-fixes.md` összeköti az auditot a javításokkal; a cron auth fail-closed. A korábbi visszaellenőrzéskor talált lease/fencing, kezdeti stop, protection-végrehajtás, worker-reconciliation és shadow-riport hiányok implementálva. `pnpm test` 68 fájl / 765 teszt, `tsc --noEmit` és build zöld. A T31 időalapú mérés, a külön PostgreSQL integráció, a 24 órás worker és a testnet bizonyíték hiányában a teljes kapu nyitott marad.
 
 **C13 / M6:** Átadott javított demó, reprodukálható mérés, dokumentált futtatás és helyreállítás. A nyereség nem előre garantált; gyenge jelöltet elutasítani érvényes eredmény.
 

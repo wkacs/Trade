@@ -18,7 +18,9 @@ import {
   DEFAULT_ORDER_RISK_PARAMS,
 } from "@/lib/risk/risk-manager";
 import { PaperExecutionBroker } from "@/lib/execution/paper-broker";
-import { BinanceBroker, BinanceLegacyExecutionAdapter } from "@/lib/execution/binance-broker";
+import { BinanceExecutionBroker } from "@/lib/execution/binance-broker";
+import { BinanceLiveClient } from "@/lib/execution/binance-live";
+import { fetchSymbolFilters, pairFor } from "@/lib/execution/exchange-rules";
 import type { ExecutionBroker } from "@/lib/execution/broker";
 import type { Fill } from "@/lib/execution/contracts";
 import { COIN_UNIVERSE, RISK_LIMITS, RSS_SOURCES, REDDIT_SOURCES } from "@/lib/config";
@@ -31,6 +33,7 @@ import { DEFAULT_STRATEGY, STRATEGY_VERSION, type StrategyConfig } from "@/lib/s
 import { candlesFromDataPoints } from "@/lib/collectors/binance";
 import { TIMEFRAME_MS } from "@/lib/market/candles";
 import { executeIntent, type ExecuteIntentDeps, type IntentRequest } from "@/lib/engine/execute-intent";
+import { stopCandidate } from "@/lib/engine/plan-exits";
 import {
   loadLedgerState,
   hasLedgerState,
@@ -81,8 +84,14 @@ export interface TickInput {
    * hálózati pillanatképet kapnak, hanem ugyanazt a quote-ot és collector-kimenetet.
    */
   replay?: { quoteSnapshot: QuoteSnapshot; events: DataPoint[]; collectorOutcomes: CollectorOutcome[] };
+  /** Páros mérésnél a baseline nyers AI-döntése, változatlanul újrajátszva. */
+  decisionReplay?: RawDecision;
+  /** Logikai óra; replayben megakadályozza, hogy a második ág quote-ja közben elöregedjen. */
+  now?: () => number;
   /** A régi dashboard-vetület csak a fő portfólióra írható. Alap: true normál ticknél. */
   legacyProjection?: boolean;
+  allowNewBuys?: boolean;
+  fence?: { leaseKey: string; owner: string; fencingToken: number };
 }
 
 /** Egy kód-alapú profit-ciklus akció (stop-loss / take-profit / DCA). */
@@ -151,7 +160,13 @@ export interface TickResult {
     skipped: { symbol: string; reason: string }[];
   };
   /** A páros paper jelölteknek átadható, változatlan piaci és collector-bemenet. */
-  replayInput: { quoteSnapshot: QuoteSnapshot; events: DataPoint[]; collectorOutcomes: CollectorOutcome[] };
+  replayInput: {
+    quoteSnapshot: QuoteSnapshot;
+    events: DataPoint[];
+    collectorOutcomes: CollectorOutcome[];
+    rawDecision: RawDecision;
+    observedAt: number;
+  };
 }
 
 /** Szimulált díj — egyezik a paper fill-modellel (0.1%). */
@@ -193,6 +208,7 @@ function fillToTrade(fill: Fill, origin: CycleAction["kind"] | "ai"): Trade {
  *  6) Risk Manager (döntés-szinten) + végrehajtás a közös úton
  */
 export async function runTick(input: TickInput): Promise<TickResult> {
+  const now = input.now ?? (() => Date.now());
   const mode = input.paperMode ? "paper" : "live";
   const strategy = input.strategy ?? DEFAULT_STRATEGY;
   const strategyVersion = input.strategyVersion ?? STRATEGY_VERSION;
@@ -262,7 +278,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   // ── 2/a) VÉGREHAJTÁSI ÁR — külön, rövid időkorlátos úton, a hírgyűjtők ELŐTT.
   //     A kilépésnek friss ÁRRA kell várnia, nem RSS-re, sentimentre vagy LLM-re.
   const quoteSnapshot: QuoteSnapshot = await stage("quotes", () =>
-    input.replay ? Promise.resolve(input.replay.quoteSnapshot) : fetchQuotes([...COIN_UNIVERSE], { now: () => Date.now() }),
+    input.replay ? Promise.resolve(input.replay.quoteSnapshot) : fetchQuotes([...COIN_UNIVERSE], { now }),
   );
   if (quoteSnapshot.degraded) {
     console.warn(
@@ -311,7 +327,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
         mode,
         measurableEquity,
         dec(strategy.dailyLossCircuitBreakerPct),
-        Date.now(),
+        now(),
       )
     : {
         dayUtc: "",
@@ -334,18 +350,26 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     if (q) return { bid: q.bid, ask: q.ask, last: q.mid };
     return pricesDec[symbol] ? { last: pricesDec[symbol] } : null;
   };
+  const liveFilters = input.paperMode
+    ? {}
+    : (await stage("exchange-rules", async () => {
+        const loaded = await fetchSymbolFilters(COIN_UNIVERSE.map((symbol) => pairFor(symbol)), { now });
+        if (loaded.error) console.error(`[tick] Binance exchangeInfo hiba: ${loaded.error.message}`);
+        return loaded.filters;
+      }));
   const broker: ExecutionBroker = input.paperMode
     ? new PaperExecutionBroker({
         getLedger: () => ledger,
         getMarket: market,
-        now: () => Date.now(),
+        now,
         getTrigger: (intent) => pendingTrigger.get(intent.intentId) ?? null,
         params: { feePct: dec(PAPER_FEE_PCT), slippageBps: 5, spreadBps: 2, quoteAsset: "USDT" },
       })
-    : new BinanceLegacyExecutionAdapter(
-        new BinanceBroker(process.env.BINANCE_API_KEY ?? "", process.env.BINANCE_API_SECRET ?? ""),
-        RISK_LIMITS.stopLossPct,
-      );
+    : new BinanceExecutionBroker({
+        http: new BinanceLiveClient(process.env.BINANCE_API_KEY ?? "", process.env.BINANCE_API_SECRET ?? ""),
+        filters: liveFilters,
+        now,
+      });
 
   // Az aktív foglalások: két párhuzamos futó nem költheti el ugyanazt a keretet.
   const reservations = tradingEnabled ? await loadReservations(scope) : { bySymbol: {}, total: ZERO };
@@ -379,13 +403,13 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       maxPositionPct: dec(strategy.maxPositionPct),
       maxConcurrentPositions: strategy.maxConcurrentPositions,
     },
-    now: () => Date.now(),
+    now,
     newIntentId: () => `${input.tickId}-${origin}-${++intentSeq}`,
     // Keretfoglalás a beküldés ELŐTT. A fedezet-ellenőrzést a SZERVER végzi, ezért két
     // egyidejű BUY sem lépheti át ugyanazt a keretet.
     reserve: async (intent, quote) => {
       if (!dbState) return false;
-      return reserveBudget(intent, quote, cashOf(ledger, "USDT"));
+      return reserveBudget(intent, quote, cashOf(ledger, "USDT"), undefined, input.fence);
     },
     releaseReservation: async (intent) => {
       if (dbState) await releaseReservation(intent.intentId);
@@ -397,7 +421,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     // Hiba esetén DOB — nincs log-és-továbbmegy hamis siker (audit A. szakasz).
     persist: async (intent, fill, deltas) => {
       if (!dbState) return;
-      await persistFill(intent, fill, deltas);
+      await persistFill(intent, fill, input.fence ? { ...deltas, fence: input.fence } : deltas);
       // A v1 táblák innentől CSAK VETÜLET a régi dashboard-olvasóknak (a T23 vezeti ki).
       // A hibája nem buktatja a ticket, mert nem igazságforrás — de hangosan látszik.
       try {
@@ -419,8 +443,12 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   /** Egy order végrehajtása a közös úton. Visszaadja a fillt, vagy null-t. */
   const runIntent = async (req: IntentRequest): Promise<Fill | null> => {
     if (!tradingEnabled) return null;
+    if (req.side === "BUY" && input.allowNewBuys === false) {
+      console.warn(`[tick] ${req.symbol} BUY KIHAGYVA: az utolsó reconciliation/protection állapot tiltja az új vételt.`);
+      return null;
+    }
     // UTOLSÓ ellenőrzés a beküldés előtt: elavult árra NEM megy ki market order.
-    const check = checkExecutionQuote(quoteSnapshot, req.symbol, Date.now(), DEFAULT_QUOTE_MAX_AGE_MS);
+    const check = checkExecutionQuote(quoteSnapshot, req.symbol, now(), DEFAULT_QUOTE_MAX_AGE_MS);
     if (!check.ok) {
       console.warn(
         `[tick] ${req.symbol} ${req.side} KIHAGYVA: a végrehajtási ár ${check.reason}` +
@@ -454,7 +482,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   const cycleActions: CycleAction[] = [];
 
   if (tradingEnabled) {
-    weeklyRemaining = await remainingWeeklyBudget(equityNow(), { portfolioId, mode }, Date.now());
+    weeklyRemaining = await remainingWeeklyBudget(equityNow(), { portfolioId, mode }, now());
 
     const fgEvent = events.find((e) => e.kind === "sentiment" && e.sentiment);
     const fearGreedValue = fgEvent?.sentiment?.value ?? null;
@@ -560,7 +588,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
               desiredQuote: dec(o.amountUsd ?? 0),
               origin: o.kind,
               referencePrice: px,
-              stopPrice: undefined,
+              stopPrice: stopCandidate(px, dec(atrBySymbol[o.symbol] ?? 0), strategy),
             });
       if (!fill) continue;
       cycleActions.push({
@@ -592,7 +620,9 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   // Árnyék/control futásban az AI teljesen ki van kapcsolva: még phase-1 hívás sem
   // történhet, mert az külön bemenetet és külön költséget hozna minden számlára.
   const phase1 = await stage("phase1", () =>
-    input.aiEnabled === false
+    input.decisionReplay
+      ? Promise.resolve({ shouldDecide: true, summary: "Megosztott baseline-döntés újrajátszása." })
+      : input.aiEnabled === false
       ? Promise.resolve({ shouldDecide: false, summary: "AI explicit módon kikapcsolva ehhez a futáshoz." })
       : shouldDecide(llmEvents),
   );
@@ -609,7 +639,9 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     model: "phase1/glm-4-flash",
   };
 
-  if (input.aiEnabled !== false && phase1.shouldDecide) {
+  if (input.decisionReplay) {
+    rawDecision = { ...input.decisionReplay };
+  } else if (input.aiEnabled !== false && phase1.shouldDecide) {
     const performance = await getPerformanceSummary();
     const equityForAi = equityNow();
 
@@ -719,6 +751,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
             desiredQuote: mul(equityNow(), dec(decision.amountPct)),
             origin: "ai",
             referencePrice: px,
+            stopPrice: stopCandidate(px, dec(signalsBySymbol[decision.symbol]?.atr ?? 0), strategy),
           })
         : // SELL: a hányad a BIRTOKOLT MENNYISÉGRE vonatkozik — cash-független.
           await runIntent({
@@ -844,6 +877,6 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       signalCount: mlSignals.length,
       skipped: featureResult.skipped,
     },
-    replayInput: { quoteSnapshot, events, collectorOutcomes },
+    replayInput: { quoteSnapshot, events, collectorOutcomes, rawDecision, observedAt: now() },
   };
 }

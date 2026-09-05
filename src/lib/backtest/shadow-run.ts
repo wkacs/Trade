@@ -31,7 +31,13 @@ function portfolioState(account: ShadowAccount): PortfolioState {
   };
 }
 
-function tickInput(account: ShadowAccount, cycleId: string, replay?: TickInput["replay"]): TickInput {
+function tickInput(
+  account: ShadowAccount,
+  cycleId: string,
+  replay?: TickInput["replay"],
+  decisionReplay?: TickInput["decisionReplay"],
+  observedAt?: number,
+): TickInput {
   return {
     // Az intentId globálisan egyedi; a közös logikai cycleId mellé ezért számla-id kerül.
     tickId: `${cycleId}-${account.id}`,
@@ -41,6 +47,8 @@ function tickInput(account: ShadowAccount, cycleId: string, replay?: TickInput["
     strategyVersion: `shadow/${account.id}`,
     aiEnabled: account.aiEnabled,
     replay,
+    decisionReplay,
+    now: observedAt === undefined ? undefined : () => observedAt,
     legacyProjection: false,
   };
 }
@@ -62,7 +70,15 @@ export async function runShadowCycle(
   results[baseline.id] = baselineResult;
 
   for (const candidate of accounts.filter((a) => !a.isBaseline)) {
-    results[candidate.id] = await deps.runTick(tickInput(candidate, cycleId, baselineResult.replayInput));
+    results[candidate.id] = await deps.runTick(
+      tickInput(
+        candidate,
+        cycleId,
+        baselineResult.replayInput,
+        baseline.aiEnabled ? baselineResult.replayInput.rawDecision : undefined,
+        baselineResult.replayInput.observedAt,
+      ),
+    );
   }
   return { cycleId, results };
 }

@@ -16,6 +16,8 @@ import { planExits, exitPositionsFromLedger, type ExitPlan } from "@/lib/engine/
 import {
   planProtection,
   protectionGate,
+  incidentsFromOutcomes,
+  type ExecutionOutcome,
   type ProtectionOrder,
   type ProtectionIncident,
 } from "@/lib/execution/protection";
@@ -38,6 +40,7 @@ export interface FastExitInput {
   strategy?: StrategyConfig;
   now?: () => number;
   maxQuoteAgeMs?: number;
+  fence?: { leaseKey: string; owner: string; fencingToken: number };
   /** Teszthez injektálható függőségek. */
   deps?: Partial<FastExitDeps>;
 }
@@ -54,6 +57,7 @@ export interface FastExitDeps {
   persistFill: typeof persistFill;
   persistStopPrice: typeof persistStopPrice;
   makeBroker: (getLedger: () => LedgerState, quotes: QuoteSnapshot, now: () => number) => ExecutionBroker;
+  executeProtection: (actions: import("@/lib/execution/protection").ProtectionAction[]) => Promise<ExecutionOutcome[]>;
 }
 
 export interface FastExitResult {
@@ -72,6 +76,7 @@ export interface FastExitResult {
   /** Az elutasított kilépések oka (kockázati kapu vagy broker). */
   rejections: Record<string, number>;
   durationMs: number;
+  protectionOutcomes: ExecutionOutcome[];
 }
 
 function defaultDeps(): FastExitDeps {
@@ -94,6 +99,7 @@ function defaultDeps(): FastExitDeps {
         },
         now,
       }),
+    executeProtection: async () => [],
   };
 }
 
@@ -125,6 +131,7 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
       stopUpdatesApplied: 0,
       rejections,
       durationMs: now() - started,
+      protectionOutcomes: [],
     };
   }
 
@@ -142,6 +149,7 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
       stopUpdatesApplied: 0,
       rejections,
       durationMs: now() - started,
+      protectionOutcomes: [],
     };
   }
 
@@ -161,6 +169,7 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
       stopUpdatesApplied: 0,
       rejections,
       durationMs: now() - started,
+      protectionOutcomes: [],
     };
   }
 
@@ -169,6 +178,13 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
     { positions, quotes: quotes.quotes, nowMs: now(), maxQuoteAgeMs, inFlightSymbols: [] },
     strategy,
   );
+
+  // Live számlán a pihenő stop-order zárolja a készletet. A market exit előtt ezért
+  // koordináltan töröljük; sikertelen cancel után nem küldünk eleve fedezethiányos SELL-t.
+  const existingProtection = input.mode === "live" ? await deps.loadProtection(scope) : {};
+  const protectionFilters = input.mode === "live" ? await deps.loadFilters() : {};
+  const protectionOutcomes: ExecutionOutcome[] = [];
+  const protectionFilledSymbols = new Set<string>();
 
   // 4) Trailing ratchet perzisztálása (sosem lefelé).
   let stopUpdatesApplied = 0;
@@ -184,6 +200,24 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
   let seq = 0;
 
   for (const exit of plan.exits) {
+    const resting = existingProtection[exit.symbol];
+    if (input.mode === "live" && resting) {
+      const [cancelOutcome] = await deps.executeProtection([{
+        kind: "cancel", symbol: exit.symbol, cancelOrderId: resting.exchangeOrderId,
+        reason: `A ${exit.kind} market exit előtt a zárolt készlet felszabadítása.`,
+      }]);
+      if (cancelOutcome) protectionOutcomes.push(cancelOutcome);
+      if (cancelOutcome?.filledDuringReplace) {
+        protectionFilledSymbols.add(exit.symbol);
+        delete existingProtection[exit.symbol];
+      }
+      if (!cancelOutcome?.ok || cancelOutcome.filledDuringReplace) {
+        rejections[cancelOutcome?.filledDuringReplace ? "protection_filled_before_exit" : "protection_cancel_failed"] =
+          (rejections[cancelOutcome?.filledDuringReplace ? "protection_filled_before_exit" : "protection_cancel_failed"] ?? 0) + 1;
+        continue;
+      }
+      delete existingProtection[exit.symbol];
+    }
     const check = checkExecutionQuote(quotes, exit.symbol, now(), maxQuoteAgeMs);
     if (!check.ok) {
       rejections[`quote_${check.reason}`] = (rejections[`quote_${check.reason}`] ?? 0) + 1;
@@ -215,7 +249,7 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
       now,
       newIntentId: () => `${input.cycleId}-${exit.kind}-${++seq}`,
       persist: async (intent, fill, deltas) => {
-        await deps.persistFill(intent, fill, deltas);
+        await deps.persistFill(intent, fill, input.fence ? { ...deltas, fence: input.fence } : deltas);
       },
     };
 
@@ -246,11 +280,9 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
   // ── 6) Védőorder-életciklus (T26). A DB-stop frissítése ÖNMAGÁBAN nem módosítja a
   //      tőzsdén ülő ordert, ezért a tervet itt állítjuk elő; a blokkoló incidens
   //      megtiltja az új vételt, amíg fenn nem oldódik.
-  const existingProtection = await deps.loadProtection(scope);
-  const protectionFilters = await deps.loadFilters();
-  const protection = planProtection(
+  const protection = input.mode === "live" ? planProtection(
     {
-      positions: exitPositionsFromLedger(ledger.positions).map((p) => ({
+      positions: exitPositionsFromLedger(ledger.positions).filter((p) => !protectionFilledSymbols.has(p.symbol)).map((p) => ({
         symbol: p.symbol,
         qty: p.qty,
         desiredStop: p.stopPrice,
@@ -259,9 +291,11 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
       filters: protectionFilters,
     },
     strategy,
-  );
-  const gate = protectionGate(protection.incidents);
-  for (const i of protection.incidents) {
+  ) : { actions: [], incidents: [] };
+  if (input.mode === "live") protectionOutcomes.push(...await deps.executeProtection(protection.actions));
+  const protectionIncidents = [...protection.incidents, ...incidentsFromOutcomes(protectionOutcomes)];
+  const gate = protectionGate(protectionIncidents);
+  for (const i of protectionIncidents) {
     if (i.blocksNewBuys) console.error(`[fast-exit] VÉDELMI INCIDENS ${i.code} (${i.symbol}): ${i.message}`);
   }
 
@@ -269,7 +303,8 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
     cycleId: input.cycleId,
     fills,
     plan,
-    protectionIncidents: protection.incidents,
+    protectionIncidents,
+    protectionOutcomes,
     newBuysBlocked: !gate.allowNewBuys,
     quotes: { maxAgeMs: quotes.maxAgeMs, degraded: quotes.degraded, missing },
     stopUpdatesApplied,

@@ -31,6 +31,7 @@ export interface WorkerConfig {
    * időt az adatnak; a régi cron :07-kor futott, ezt tartjuk.
    */
   entryOffsetMs?: number;
+  reconcileIntervalMs?: number;
   /** A lease élettartama a sáv hosszának hányadaként. */
   leaseTtlRatio?: number;
   owner?: string;
@@ -56,9 +57,16 @@ export interface WorkerDeps {
   sleep: (ms: number, signal: { aborted: boolean }) => Promise<void>;
   acquireLease: (key: string, owner: string, ttlMs: number) => Promise<Lease>;
   releaseLease: (key: string, owner: string) => Promise<boolean>;
-  runExit: (slot: string) => Promise<void>;
-  runEntry: (slot: string) => Promise<void>;
+  runExit: (slot: string, context: WorkerCycleContext) => Promise<void>;
+  runEntry: (slot: string, context: WorkerCycleContext) => Promise<void>;
   onEvent?: (event: WorkerEvent) => void;
+}
+
+export interface WorkerCycleContext {
+  leaseKey: string;
+  owner: string;
+  fencingToken: number;
+  allowNewBuys: boolean;
 }
 
 /** A KÖVETKEZŐ sávkezdet (offsettel). Ha épp most van, a következőt adja. */
@@ -159,8 +167,14 @@ export class TradingWorker {
     this.emit({ type: "cycle-start", kind, slot, at: started });
     let ok = true;
     try {
-      if (kind === "entry") await this.deps.runEntry(slot);
-      else await this.deps.runExit(slot);
+      const context: WorkerCycleContext = {
+        leaseKey: key,
+        owner: this.owner,
+        fencingToken: lease.fencingToken,
+        allowNewBuys: this.canBuy(),
+      };
+      if (kind === "entry") await this.deps.runEntry(slot, context);
+      else await this.deps.runExit(slot, context);
     } catch (e) {
       ok = false;
       this.stats[kind].errors++;
@@ -194,28 +208,34 @@ export class TradingWorker {
   }
 
   /** Igaz, ha az utolsó egyeztetés szerint biztonságos új vételt indítani. */
-  private buysAllowed = true;
+  private reconcileAllowsBuys = true;
+  private protectionAllowsBuys = true;
 
   /** Az utolsó egyeztetés összefoglalója (naplóhoz és állapotjelzéshez). */
   lastReconcileSummary: string | null = null;
 
   /** Az egyeztetés lefuttatása. Hiba esetén KONZERVATÍV: a vétel tiltott marad. */
   async reconcileNow(): Promise<boolean> {
-    if (!this.deps.reconcile) return this.buysAllowed;
+    if (!this.deps.reconcile) return this.canBuy();
     try {
       const r = await this.deps.reconcile();
-      this.buysAllowed = r.safeToBuy;
+      this.reconcileAllowsBuys = r.safeToBuy;
       this.lastReconcileSummary = r.summary;
     } catch (e) {
-      this.buysAllowed = false;
+      this.reconcileAllowsBuys = false;
       this.lastReconcileSummary = `Az egyeztetés hibára futott: ${String(e)} — ÚJ VÉTEL TILOS.`;
     }
-    return this.buysAllowed;
+    return this.canBuy();
+  }
+
+  updateProtectionGate(allowNewBuys: boolean, summary: string): void {
+    this.protectionAllowsBuys = allowNewBuys;
+    if (!allowNewBuys) this.lastReconcileSummary = summary;
   }
 
   /** Szabad-e új vételt indítani az utolsó egyeztetés szerint? */
   canBuy(): boolean {
-    return this.buysAllowed;
+    return this.reconcileAllowsBuys && this.protectionAllowsBuys;
   }
 
   /** A worker indítása. A visszaadott ígéret a leállásig fut. */
@@ -227,8 +247,19 @@ export class TradingWorker {
     // INDULÁSKORI EGYEZTETÉS: a nyitott orderek és az egyenleg összevetése a tőzsdével.
     await this.reconcileNow();
     this.loops = [this.loop("exit"), this.loop("entry")];
+    if (this.deps.reconcile) this.loops.push(this.reconcileLoop());
     await Promise.all(this.loops);
     this.emit({ type: "stopped", at: this.deps.now() });
+  }
+
+  private async reconcileLoop(): Promise<void> {
+    const interval = this.config.reconcileIntervalMs ?? SLOT_MS.reconcile;
+    while (this.running) {
+      const now = this.deps.now();
+      await this.deps.sleep(Math.max(0, nextSlotStart(now, interval) - now), this.signal);
+      if (!this.running) break;
+      await this.reconcileNow();
+    }
   }
 
   /** Leállítás: új ciklus nem indul, a folyamatban lévő befejeződik. */

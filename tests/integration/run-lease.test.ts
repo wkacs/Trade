@@ -80,4 +80,23 @@ describe("run-lease — valódi PostgreSQL", () => {
     expect(a.acquired).toBe(true);
     expect(b.acquired).toBe(true);
   });
+
+  it("a régi fencing token pénzmozgását maga az adatbázis utasítja el", async () => {
+    const key = "entry:stale-write";
+    const old = await acquireLease(key, "old", 60_000);
+    await testSql()`UPDATE run_leases SET expires_at = now() - interval '1 second' WHERE lease_key = ${key}`;
+    const current = await acquireLease(key, "new", 60_000);
+    expect(current.fencingToken).toBeGreaterThan(old.fencingToken);
+    await testSql()`INSERT INTO ledger_cash(portfolio_id, mode, asset, amount) VALUES ('pf-fence', 'paper', 'USDT', 100)`;
+
+    const fill = { fillId: "paper:o:t", intentId: "i", portfolioId: "pf-fence", mode: "paper", symbol: "BTC", side: "BUY",
+      exchangeOrderId: "o", exchangeTradeId: "t", filledBaseQty: "0.001", grossQuoteAmount: "50", fillPrice: "50000",
+      feeAmount: "0", feeAsset: "USDT", executedAt: Date.now(), provenance: "live-v2" };
+    const deltas = { cash: [{ asset: "USDT", delta: "-50" }], position: { symbol: "BTC", qtyDelta: "0.001", costDelta: "50", stopPrice: "47500" },
+      reservation: null, fence: { leaseKey: key, owner: "old", fencingToken: old.fencingToken } };
+    const result = await testSql()`SELECT apply_fill_v2(${JSON.stringify(fill)}::jsonb, ${JSON.stringify(deltas)}::jsonb) AS r` as { r: { applied: boolean; reason: string } }[];
+    expect(result[0].r).toEqual({ applied: false, reason: "fenced" });
+    const cash = await testSql()`SELECT amount::text AS amount FROM ledger_cash WHERE portfolio_id = 'pf-fence' AND asset = 'USDT'` as { amount: string }[];
+    expect(cash[0].amount).toBe("100");
+  });
 });

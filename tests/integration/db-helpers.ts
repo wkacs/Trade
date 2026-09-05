@@ -36,6 +36,7 @@ export async function truncateAll(): Promise<void> {
   const sql = testSql();
   await sql`
     TRUNCATE TABLE
+      shadow_cycles, shadow_experiments, bot_protection_orders,
       execution_fills, execution_intents, budget_reservations, ledger_cash,
       ledger_positions, daily_equity, run_leases, ledger_epochs,
       trades, positions, portfolios, decisions, risk_overrides, tick_runs,

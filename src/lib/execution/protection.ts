@@ -249,8 +249,8 @@ export function incidentsFromOutcomes(outcomes: ExecutionOutcome[]): ProtectionI
       out.push({
         code: "fill_during_replace",
         symbol: o.action.symbol,
-        message: `A ${o.action.symbol} pozíció a védőorder cseréje KÖZBEN teljesült — a készlet elfogyott, új védőorder nem kell.`,
-        blocksNewBuys: false,
+        message: `A ${o.action.symbol} pozíció a védőorder kezelése KÖZBEN teljesült — a készlet elfogyott, új védőorder nem kell.`,
+        blocksNewBuys: true,
       });
       continue;
     }

@@ -27,12 +27,14 @@ function hasFlag(name: string): boolean {
 
 async function main() {
   const { EXPERIMENTS, protocolHash } = await import("./experiment-configs");
-  const { defineShadowSet, validateShadowSet, shadowProgress } = await import("@/lib/backtest/shadow-accounts");
+  const { defineShadowSet, validateShadowSet } = await import("@/lib/backtest/shadow-accounts");
   const { runShadowCycle } = await import("@/lib/backtest/shadow-run");
   const { runTick } = await import("@/lib/engine/tick");
   const { getDb } = await import("@/db/client");
-  const { hasLedgerState, seedLedger } = await import("@/lib/execution/order-store");
+  const { hasLedgerState, loadLedgerState } = await import("@/lib/execution/order-store");
+  const { equityAt } = await import("@/lib/portfolio/ledger");
   const { dec } = await import("@/lib/portfolio/money");
+  const { provisionShadowExperiment, recordShadowCycle, shadowReport } = await import("@/lib/backtest/shadow-store");
 
   const experimentId = option("experiment") ?? "E5-stop-mode";
   const experiment = EXPERIMENTS.find((e) => e.id === experimentId);
@@ -51,8 +53,8 @@ async function main() {
   }
   const namespace = option("namespace") ?? `shadow-${experiment.id.toLowerCase()}`;
   const accounts = defineShadowSet(
-    { id: "baseline", label: baseline.label, strategy: baseline.strategy, aiEnabled: false },
-    [{ id: candidate.id, label: candidate.label, strategy: candidate.strategy, aiEnabled: false }],
+    { id: "baseline", label: baseline.label, strategy: baseline.strategy, aiEnabled: hasFlag("ai") },
+    [{ id: candidate.id, label: candidate.label, strategy: candidate.strategy, aiEnabled: hasFlag("ai") }],
     { namespace, startingCapitalUsd },
   );
   const issues = validateShadowSet(accounts);
@@ -71,18 +73,15 @@ async function main() {
       aiEnabled: a.aiEnabled,
     })),
     target: { minDays: 30, minRoundTrips: 50 },
-    ai: "AI nélküli páros kontroll. AI-jelölt csak előre rögzített, megosztott decision replayjel indítható.",
+    ai: hasFlag("ai")
+      ? "AI-s páros mérés: a baseline nyers döntése változatlan decision replayként megy a jelöltnek."
+      : "AI nélküli páros kontroll.",
   };
 
   if (hasFlag("provision")) {
     if (!getDb()) throw new Error("A --provision külön DATABASE_URL-t és migrált PostgreSQL sémát igényel.");
-    for (const account of accounts) {
-      const scope = { portfolioId: account.portfolioId, mode: "paper" as const };
-      if (await hasLedgerState(scope)) {
-        throw new Error(`${account.portfolioId} ledger már létezik. Új méréshez adj más --namespace értéket.`);
-      }
-      await seedLedger(scope, dec(account.startingCapitalUsd), []);
-    }
+    await provisionShadowExperiment({ namespace, protocolHash: protocolHash(), experimentId: experiment.id,
+      candidateId: candidate.id, startingCapital: startingCapitalUsd, accounts: accounts.map((a) => ({ portfolioId: a.portfolioId })) });
   }
 
   let cycle: { cycleId: string; actions: Record<string, number> } | null = null;
@@ -93,18 +92,28 @@ async function main() {
         throw new Error(`${account.portfolioId} nincs provisionálva. Előbb: pnpm shadow:paper -- --provision`);
       }
     }
+    const frozen = await shadowReport(namespace);
+    if (frozen.protocolHash !== protocolHash() || frozen.experimentId !== experiment.id || frozen.candidateId !== candidate.id) {
+      throw new Error("A provisionált mérés protokollja vagy jelöltje eltér a jelenlegi konfigurációtól. Új namespace kell.");
+    }
     const cycleId = new Date().toISOString().replace(/[:.]/g, "-");
     const output = await runShadowCycle(accounts, cycleId, { runTick });
+    for (const account of accounts) {
+      const result = output.results[account.id];
+      const ledger = await loadLedgerState({ portfolioId: account.portfolioId, mode: "paper" });
+      const equity = equityAt(ledger, Object.fromEntries(Object.entries(result.prices).map(([s, p]) => [s, dec(p)])));
+      await recordShadowCycle({ namespace, cycleId, accountId: account.id, portfolioId: account.portfolioId,
+        equityQuote: equity, actions: result.cycleActions.length + (result.trade ? 1 : 0), degraded: result.quotes.degraded,
+        incident: result.quotes.staleSkips.length ? { staleSkips: result.quotes.staleSkips } : undefined });
+    }
     cycle = {
       cycleId,
       actions: Object.fromEntries(Object.entries(output.results).map(([id, r]) => [id, r.cycleActions.length + (r.trade ? 1 : 0)])),
     };
   }
 
-  // A pillanatnyi target csak a futás elindítását jelzi. A tartós, tényleges haladást
-  // a dokumentált végső jelentés számolja a DB fill-ledgerből, nem ebből a konzolból.
-  const progress = shadowProgress(Date.now(), Date.now(), 0);
-  console.log(JSON.stringify({ ...description, cycle, progress: progress.message }, null, 2));
+  const report = hasFlag("report") || hasFlag("once") ? await shadowReport(namespace) : null;
+  console.log(JSON.stringify({ ...description, cycle, report }, null, 2));
 }
 
 main().catch((error) => {

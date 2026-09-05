@@ -25,11 +25,19 @@ function arg(name: string): string | null {
 
 async function main() {
   const { TradingWorker, realSleep } = await import("@/lib/engine/worker");
-  const { acquireLease, releaseLease } = await import("@/lib/engine/run-lease");
+  const { acquireLease, releaseLease, leaseKey, slotId, SLOT_MS } = await import("@/lib/engine/run-lease");
   const { runFastExit } = await import("@/lib/engine/fast-exit");
   const { executeScheduledTick } = await import("@/lib/engine/run-scheduled-tick");
   const { loadPortfolioState } = await import("@/lib/portfolio/accounting");
-  const { expireStaleReservations, listUnsettledIntents } = await import("@/lib/execution/order-store");
+  const { expireStaleReservations, listUnsettledIntents, loadLedgerState, listKnownFillIds, intentIdsByExchangeOrder, persistFill, recordProtectionOrder } = await import("@/lib/execution/order-store");
+  const { applyFill } = await import("@/lib/portfolio/ledger");
+  const { mul, dec } = await import("@/lib/portfolio/money");
+  const { DEFAULT_STRATEGY } = await import("@/lib/strategy/config");
+  const { BinanceLiveClient } = await import("@/lib/execution/binance-live");
+  const { BinanceExecutionBroker } = await import("@/lib/execution/binance-broker");
+  const { fetchSymbolFilters, pairFor } = await import("@/lib/execution/exchange-rules");
+  const { reconcile, reconcileGate, formatReconcile } = await import("@/lib/execution/reconcile");
+  const { COIN_UNIVERSE } = await import("@/lib/config");
   const { getTradingMode, schedulerGuard } = await import("@/lib/config");
 
   const once = arg("once");
@@ -58,6 +66,19 @@ async function main() {
   }
   const mode = getTradingMode();
   const scope = { portfolioId: portfolio.portfolioId, mode };
+  const liveClient = mode === "live"
+    ? new BinanceLiveClient(process.env.BINANCE_API_KEY ?? "", process.env.BINANCE_API_SECRET ?? "")
+    : null;
+  let liveSnapshot: Awaited<ReturnType<InstanceType<typeof BinanceLiveClient>["snapshot"]>> | null = null;
+  let liveFilters: Awaited<ReturnType<typeof fetchSymbolFilters>>["filters"] = {};
+
+  const refreshLive = async () => {
+    if (!liveClient) return;
+    const filters = await fetchSymbolFilters(COIN_UNIVERSE.map((s) => pairFor(s)));
+    if (filters.error) throw new Error(`exchangeInfo: ${filters.error.message}`);
+    liveFilters = filters.filters;
+    liveSnapshot = await liveClient.snapshot([...COIN_UNIVERSE]);
+  };
 
   // Indulási egyeztetés: a lejárt foglalások felszabadulnak, és megnézzük, maradt-e
   // ismeretlen állapotú megbízás. Ilyenkor a ciklusok maguk állnak meg.
@@ -74,7 +95,8 @@ async function main() {
     );
   }
 
-  const worker = new TradingWorker(
+  let worker: InstanceType<typeof TradingWorker>;
+  worker = new TradingWorker(
     {
       portfolioId: scope.portfolioId,
       mode,
@@ -87,15 +109,69 @@ async function main() {
       sleep: realSleep,
       acquireLease,
       releaseLease,
-      runExit: async (slot) => {
-        const r = await runFastExit({ portfolioId: scope.portfolioId, mode, cycleId: `exit-${slot}` });
+      reconcile: mode === "live" ? async () => {
+        const key = leaseKey("reconcile", slotId(Date.now(), SLOT_MS.reconcile));
+        const lease = await acquireLease(key, worker.owner, Math.floor(SLOT_MS.reconcile * 0.9));
+        if (!lease.acquired) return { safeToBuy: false, summary: "Az egyeztetési lease-t más folyamat tartja." };
+        try {
+          await refreshLive();
+          for (const protection of Object.values(liveClient!.protectionFrom(liveSnapshot!))) {
+            if (protection) await recordProtectionOrder(scope.portfolioId, protection.exchangeOrderId, protection.symbol);
+          }
+          let ledger = await loadLedgerState(scope);
+          const intentMap = await intentIdsByExchangeOrder(scope);
+          const known = await listKnownFillIds(scope);
+          let result = reconcile(ledger, liveSnapshot!, mode, { knownFillIds: known, intentIdForOrder: intentMap });
+          const fence = { leaseKey: key, owner: worker.owner, fencingToken: lease.fencingToken };
+          // Csak a bot saját orderId-jához köthető fill importálható automatikusan. A kézi kötés
+          // továbbra is blokkoló eltérés, mert annak eredetét nem találgatjuk.
+          for (const fill of result.newFills.filter((f) => !f.intentId.startsWith("manual:"))) {
+            const applied = applyFill(ledger, fill, {
+              stopPrice: fill.side === "BUY" ? mul(fill.fillPrice, dec(1 - DEFAULT_STRATEGY.stopLossPct)) : undefined,
+            });
+            if (!applied.applied || !applied.deltas) continue;
+            await persistFill({
+              intentId: fill.intentId, portfolioId: scope.portfolioId, mode: "live", strategyVersion: "reconcile",
+              origin: "manual", expiresAt: liveSnapshot!.fetchedAt, contractVersion: 2, referencePrice: fill.fillPrice,
+              order: fill.side === "BUY"
+                ? { side: "BUY", symbol: fill.symbol, maxQuoteSpend: fill.grossQuoteAmount }
+                : { side: "SELL", symbol: fill.symbol, baseQty: fill.filledBaseQty },
+            }, fill, { ...applied.deltas, fence });
+            ledger = applied.state;
+            known.push(fill.fillId);
+          }
+          result = reconcile(ledger, liveSnapshot!, mode, { knownFillIds: known, intentIdForOrder: intentMap });
+          const gate = reconcileGate(result);
+          return { safeToBuy: gate.allowNewBuys, summary: formatReconcile(result) };
+        } finally {
+          await releaseLease(key, worker.owner);
+        }
+      } : undefined,
+      runExit: async (slot, context) => {
+        if (liveClient) await refreshLive();
+        const r = await runFastExit({
+          portfolioId: scope.portfolioId,
+          mode,
+          cycleId: `exit-${slot}`,
+          fence: { leaseKey: context.leaseKey, owner: context.owner, fencingToken: context.fencingToken },
+          deps: liveClient && liveSnapshot ? {
+            loadProtection: async () => liveClient.protectionFrom(liveSnapshot!),
+            loadFilters: async () => Object.fromEntries(COIN_UNIVERSE.map((symbol) => [symbol, liveFilters[pairFor(symbol)]])),
+            makeBroker: (_getLedger, _quotes, now) => new BinanceExecutionBroker({ http: liveClient, filters: liveFilters, now }),
+            executeProtection: (actions) => liveClient.executeProtection(actions),
+          } : undefined,
+        });
+        for (const outcome of r.protectionOutcomes) {
+          if (outcome.ok && outcome.newOrderId) await recordProtectionOrder(scope.portfolioId, outcome.newOrderId, outcome.action.symbol);
+        }
+        worker.updateProtectionGate(!r.newBuysBlocked, r.protectionIncidents.map((i) => `[${i.code}] ${i.message}`).join("\n"));
         console.log(
           `[worker] exit ${slot}: ${r.fills.length} kilépés, ${r.stopUpdatesApplied} stop-frissítés, ` +
             `quote-kor ${r.quotes.maxAgeMs} ms${r.halted ? `, megállt: ${r.halted}` : ""} (${r.durationMs} ms)`,
         );
       },
-      runEntry: async (slot) => {
-        const r = await executeScheduledTick();
+      runEntry: async (slot, context) => {
+        const r = await executeScheduledTick({ owner: context.owner, allowNewBuys: context.allowNewBuys });
         console.log(
           `[worker] entry ${slot}: ${r.ok ? "ok" : "HIBA"} ${r.action ?? ""}${r.skipped ? ` (skip: ${r.reason})` : ""}` +
             `${r.error ? ` — ${r.error}` : ""}`,

@@ -62,6 +62,7 @@ import { decide } from "@/lib/llm/phase2-decide";
 import { predict } from "@/lib/ml/predictor";
 import { loadPortfolioState } from "@/lib/portfolio/accounting";
 import { runTick } from "@/lib/engine/tick";
+import { persistFill } from "@/lib/execution/order-store";
 import type { DataPoint } from "@/lib/types";
 
 /** A phase-2 döntés mockolása az ÚJ (T16) alakban: {decision, usage, promptChars}. */
@@ -204,6 +205,19 @@ describe("runTick — teljes döntési ciklus", () => {
     expect(result.trade?.mode).toBe("paper");
     expect(result.trade?.symbol).toBe("BTC");
     expect(result.trade?.side).toBe("BUY");
+    const deltas = (persistFill as any).mock.calls.at(-1)[2];
+    expect(Number(deltas.position.stopPrice)).toBeGreaterThan(0);
+    expect(Number(deltas.position.stopPrice)).toBeLessThan(result.trade!.price);
+  });
+
+  it("reconciliation vagy protection tiltás mellett az új BUY nem jut el a brokerig", async () => {
+    (persistFill as any).mockClear();
+    (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
+    mockDecision({ action: "BUY", symbol: "BTC", amountPct: 0.1, confidence: 0.9, reasoning: "bullish" });
+    const result = await runTick({ tickId: "2026-06-25-gated", paperMode: true, allowNewBuys: false });
+    expect(result.rawAction).toBe("BUY");
+    expect(result.trade).toBeNull();
+    expect(persistFill).not.toHaveBeenCalled();
   });
 
   it("phase-2 HOLD esetén nincs tranzakció", async () => {

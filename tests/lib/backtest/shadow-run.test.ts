@@ -39,7 +39,11 @@ function result(input: TickInput): TickResult {
     signals: {},
     llm: null,
     ml: { modelUsable: true, modelDetail: null, signalCount: 0, skipped: [] },
-    replayInput: input.replay ?? { quoteSnapshot: { quotes: {}, errors: [], maxAgeMs: 0, degraded: false }, events: [], collectorOutcomes: [] },
+    replayInput: {
+      ...(input.replay ?? { quoteSnapshot: { quotes: {}, errors: [], maxAgeMs: 0, degraded: false }, events: [], collectorOutcomes: [] }),
+      rawDecision: { action: "HOLD", symbol: "", amountPct: 0, confidence: 0, reasoning: "test", model: "test" },
+      observedAt: 123,
+    },
   };
 }
 
@@ -58,6 +62,7 @@ describe("páros shadow-paper futás", () => {
     expect(candidate.portfolioState?.portfolioId).not.toBe(baseline.portfolioState?.portfolioId);
     expect(candidate.legacyProjection).toBe(false);
     expect(candidate.replay).toBe(output.results.baseline.replayInput);
+    expect(candidate.now?.()).toBe(123);
   });
 
   it("hibás számlakészletet a hálózati futás előtt elutasít", async () => {
@@ -66,5 +71,13 @@ describe("páros shadow-paper futás", () => {
     const runTick = vi.fn();
     await expect(runShadowCycle(invalid, "cycle", { runTick })).rejects.toThrow(/ÉLES számla/);
     expect(runTick).not.toHaveBeenCalled();
+  });
+
+  it("AI-s párnál a jelölt ugyanazt a nyers döntést kapja, új LLM-hívás helyett", async () => {
+    const aiAccounts = accounts().map((a) => ({ ...a, aiEnabled: true }));
+    const runTick = vi.fn(async (input: TickInput) => result(input));
+    await runShadowCycle(aiAccounts, "ai-cycle", { runTick });
+    const candidate = runTick.mock.calls[1][0] as TickInput;
+    expect(candidate.decisionReplay).toEqual({ action: "HOLD", symbol: "", amountPct: 0, confidence: 0, reasoning: "test", model: "test" });
   });
 });

@@ -91,6 +91,19 @@ describe("runOnce — egyszeri futás, lease-szel", () => {
     expect(worker.stats.exit.runs).toBe(1);
   });
 
+  it("a megszerzett lease fencing adatait és az összetett vételi kaput adja a ciklusnak", async () => {
+    const runEntry = vi.fn(async () => {});
+    const { worker } = makeWorker({
+      acquireLease: async (key, owner) => ({ key, owner, fencingToken: 42, expiresAtMs: T0 + MIN, acquired: true }),
+      runEntry,
+    }, { owner: "worker-fixed" });
+    worker.updateProtectionGate(false, "nincs védelem");
+    await worker.runOnce("entry");
+    const context = (runEntry as any).mock.calls[0][1];
+    expect(context).toMatchObject({ owner: "worker-fixed", fencingToken: 42, allowNewBuys: false });
+    expect(context.leaseKey).toMatch(/^entry:/);
+  });
+
   it("NEM fut, ha más tartja a lease-t", async () => {
     const runExit = vi.fn(async () => {});
     const { worker } = makeWorker({ acquireLease: async () => lease(false), runExit });

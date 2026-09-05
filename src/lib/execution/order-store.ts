@@ -150,14 +150,16 @@ export async function reserveBudget(
   quote: Dec,
   cashCap: Dec,
   ttlMs = RESERVATION_TTL_MS,
+  fence?: { leaseKey: string; owner: string; fencingToken: number },
 ): Promise<boolean> {
   const raw = getSql();
   if (!raw) throw new PersistenceError("no_database", "Nincs adatbázis-kapcsolat a foglaláshoz.");
   try {
     const rows = (await raw`
-      SELECT reserve_budget_v2(
+      SELECT reserve_budget_v3(
         ${intent.intentId}, ${intent.portfolioId}, ${intent.mode}, ${intent.origin},
-        ${intent.order.symbol}, ${quote}::numeric, ${cashCap}::numeric, ${ttlMs}::bigint
+        ${intent.order.symbol}, ${quote}::numeric, ${cashCap}::numeric, ${ttlMs}::bigint,
+        ${fence?.leaseKey ?? null}, ${fence?.owner ?? null}, ${fence?.fencingToken ?? null}::bigint
       ) AS r
     `) as { r: { reserved: boolean; reason: string } }[];
     return rows[0]?.r?.reserved === true;
@@ -346,6 +348,39 @@ export async function listUnsettledIntents(
     console.error("[order-store] listUnsettledIntents hiba:", e);
     return [];
   }
+}
+
+/** Reconciliation deduplikáció: a már könyvelt fill-kulcsok ebben a live scope-ban. */
+export async function listKnownFillIds(scope: LedgerScope, dbOverride?: Db | null): Promise<string[]> {
+  const db = dbOverride !== undefined ? dbOverride : getDb();
+  if (!db) return [];
+  const rows = await db.select({ fillKey: schema.executionFills.fillKey }).from(schema.executionFills)
+    .where(and(eq(schema.executionFills.portfolioId, scope.portfolioId), eq(schema.executionFills.mode, scope.mode)));
+  return rows.map((r) => r.fillKey);
+}
+
+/** A Binance orderId és a bot intentje közötti kapcsolat az automatikus fill-importhoz. */
+export async function intentIdsByExchangeOrder(scope: LedgerScope, dbOverride?: Db | null): Promise<Record<string, string>> {
+  const db = dbOverride !== undefined ? dbOverride : getDb();
+  if (!db) return {};
+  const rows = await db.select({ orderId: schema.executionIntents.exchangeOrderId, intentId: schema.executionIntents.intentId })
+    .from(schema.executionIntents)
+    .where(and(eq(schema.executionIntents.portfolioId, scope.portfolioId), eq(schema.executionIntents.mode, scope.mode)));
+  const mapped = Object.fromEntries(rows.filter((r): r is { orderId: string; intentId: string } => Boolean(r.orderId)).map((r) => [r.orderId, r.intentId]));
+  const raw = getSql();
+  if (raw && scope.mode === "live") {
+    const protections = await raw`SELECT exchange_order_id FROM bot_protection_orders WHERE portfolio_id = ${scope.portfolioId}` as { exchange_order_id: string }[];
+    for (const p of protections) mapped[p.exchange_order_id] = `protection:${p.exchange_order_id}`;
+  }
+  return mapped;
+}
+
+/** A bot által feladott védőorder orderId-ja megmarad a későbbi stop-fill egyeztetéséhez. */
+export async function recordProtectionOrder(portfolioId: string, exchangeOrderId: string, symbol: string): Promise<void> {
+  const raw = getSql();
+  if (!raw) throw new PersistenceError("no_database", "Nincs adatbázis a védőorder naplózásához.");
+  await raw`INSERT INTO bot_protection_orders(portfolio_id, exchange_order_id, symbol)
+    VALUES (${portfolioId}, ${exchangeOrderId}, ${symbol}) ON CONFLICT DO NOTHING`;
 }
 
 /** A ledger nyitóállapotának felvétele (T11 epoch, illetve első inicializálás). */

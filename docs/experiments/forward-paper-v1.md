@@ -10,8 +10,10 @@ kiderüljön: a fillmodell, a költség és a valós adatfolyam mellett is van-e
 - azonos induló tőke minden számlán;
 - a baseline gyűjti be egyszer a quote-ot és a collector-kimenetet, a jelölt ezt kapja replayben;
 - az árnyékszámla nem ír a régi dashboard-portfólióba;
-- AI nélküli kontrollt futtat. AI-s összevetéshez ugyanazt az előre naplózott AI-döntést kell
-  minden párra replayelni; külön AI-hívás számlánként már eltérő bemenet lenne.
+- alapból AI nélküli kontrollt futtat; `--ai` mellett a baseline egyetlen nyers AI-döntése
+  változatlan replayként kerül a jelölthöz;
+- a provisionált protokoll hashét, a ciklusokat, ciklusonkénti equityt és adatincidenst
+  tartósan tárolja; eltérő protokollal ugyanaz a namespace nem folytatható.
 
 ## Indítás külön paper adatbázisban
 
@@ -22,6 +24,7 @@ $env:DATABASE_URL = "postgres://...külön-shadow-paper-adatbázis..."
 pnpm shadow:paper -- --check
 pnpm shadow:paper -- --provision
 pnpm shadow:paper -- --once
+pnpm shadow:paper -- --report
 ```
 
 Az alapértelmezett pár az `E5-stop-mode` baseline és `atr2`. Más előre rögzített pár:
@@ -34,6 +37,9 @@ pnpm shadow:paper -- --experiment E2-momentum --candidate momentum-on --namespac
 Az `--once` explicit egyszeri ciklus. A rendszer jelenleg nem aktív, mert a GitHub Actions
 kerete kifogyott; a számlák provisionálása önmagában nem indít ütemezőt. Indításkor egyetlen,
 megbízható külső ütemező hívhatja ezt az egyszeri parancsot, és csak a külön shadow adatbázisban.
+Az `--once` minden futás végén ugyanazt a tartós riportot írja ki, amely külön `--report`
+kapcsolóval is lekérhető. A riport equityt, nettó hozamot, max drawdownt, USDT-díjat,
+lezárt round-tripet, ciklusszámot és degradált ciklust mutat.
 
 ## Döntési szabály
 

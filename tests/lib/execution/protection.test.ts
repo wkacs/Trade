@@ -167,10 +167,10 @@ describe("végrehajtási kimenetel → incidensek", () => {
     expect(inc[0].blocksNewBuys).toBe(true);
   });
 
-  it("a csere KÖZBEN bekövetkezett fill külön eset, nem hiba", () => {
+  it("a csere KÖZBEN bekövetkezett fill külön eset és reconciliationig blokkol", () => {
     const inc = incidentsFromOutcomes([{ action: placeAction, ok: false, filledDuringReplace: true }]);
     expect(inc[0].code).toBe("fill_during_replace");
-    expect(inc[0].blocksNewBuys).toBe(false);
+    expect(inc[0].blocksNewBuys).toBe(true);
   });
 
   it("sikeres műveletek nem generálnak incidenst", () => {

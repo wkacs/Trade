@@ -79,6 +79,7 @@ export interface SqlDeltas {
   cash: { asset: string; delta: Dec }[];
   position: { symbol: string; qtyDelta: Dec; costDelta: Dec; stopPrice: Dec | null } | null;
   reservation: { intentId: string; consumeQuote: Dec } | null;
+  fence?: { leaseKey: string; owner: string; fencingToken: number };
 }
 
 export interface ApplyFillResult {
