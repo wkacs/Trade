@@ -13,6 +13,8 @@ import type { TickProcess } from "@/lib/engine/tick-process";
  */
 
 export interface PortfolioState {
+  /** A portfolios sor azonosítója — MINDEN v2 intent és fill ezt a hatókört hordozza. */
+  portfolioId: string;
   cashUsd: number;
   /**
    * Kezdőtőke (a portfolios sorból). Szükséges a mark-to-market napi P&L
@@ -63,6 +65,7 @@ export async function loadPortfolioState(): Promise<PortfolioState | null> {
     const initialCapitalUsd = portfolio.initialCapitalUsd;
 
     return {
+      portfolioId: portfolio.id,
       cashUsd,
       initialCapitalUsd,
       positions: positionsWithValue,

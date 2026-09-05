@@ -52,6 +52,7 @@ const fearGreed = (value: number): DataPoint => ({
 });
 
 const stateWith = (positions: any[], cashUsd = 1000, initialCapitalUsd = 1000) => ({
+  portfolioId: "pf-test",
   cashUsd,
   initialCapitalUsd,
   positions,
@@ -118,8 +119,9 @@ describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
     const dca = result.cycleActions.find((a) => a.kind === "dca");
     expect(dca).toBeTruthy();
     expect(dca).toMatchObject({ side: "BUY", symbol: "SOL" });
-    // 2% az 1000 equity-ből = 20 USD
-    expect(dca!.amountUsd).toBeCloseTo(20, 2);
+    // 2% az 1000 equity-ből = 20 USD KÖLTÉSI KERET. A v2-ben a keret a DÍJAT IS
+    // tartalmazza, ezért a bruttó 20/1,001, és bruttó + díj pontosan 20.
+    expect(dca!.amountUsd).toBeCloseTo(20 / 1.001, 6);
     const buys = (applyTrade as any).mock.calls.filter((c: any[]) => c[0].side === "BUY" && c[0].symbol === "SOL");
     expect(buys.length).toBe(1);
   });

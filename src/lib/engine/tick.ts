@@ -10,20 +10,31 @@ import { buildFeatures } from "@/lib/ml/features";
 import { predict } from "@/lib/ml/predictor";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
 import { decide } from "@/lib/llm/phase2-decide";
-import { applyRisk } from "@/lib/risk/risk-manager";
-import { PaperBroker } from "@/lib/execution/paper-broker";
-import { BinanceBroker } from "@/lib/execution/binance-broker";
-import type { Broker } from "@/lib/execution/broker";
+import { applyRisk, riskContextFromLedger, originBudgetFor, DEFAULT_ORDER_RISK_PARAMS } from "@/lib/risk/risk-manager";
+import { PaperExecutionBroker } from "@/lib/execution/paper-broker";
+import { BinanceBroker, BinanceLegacyExecutionAdapter } from "@/lib/execution/binance-broker";
+import type { ExecutionBroker } from "@/lib/execution/broker";
+import type { Fill } from "@/lib/execution/contracts";
 import { COIN_UNIVERSE, RISK_LIMITS, RSS_SOURCES, REDDIT_SOURCES } from "@/lib/config";
 import { loadPortfolioState, applyTrade, setStopPrice } from "@/lib/portfolio/accounting";
 import { buildTickProcess } from "@/lib/engine/tick-process";
 import { getPerformanceSummary } from "@/lib/portfolio/evaluate";
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { planProfitCycle } from "@/lib/engine/profit-cycle";
-import { DEFAULT_STRATEGY } from "@/lib/strategy/config";
+import { DEFAULT_STRATEGY, STRATEGY_VERSION } from "@/lib/strategy/config";
 import { computeAtr } from "@/lib/strategy/atr";
 import { passesTrendFilter } from "@/lib/strategy/entry-filter";
 import { passesMomentum } from "@/lib/strategy/momentum";
+import { executeIntent, type ExecuteIntentDeps, type IntentRequest } from "@/lib/engine/execute-intent";
+import {
+  emptyLedger,
+  cashOf,
+  equityAt,
+  positionQty,
+  setStop,
+  type LedgerState,
+} from "@/lib/portfolio/ledger";
+import { type Dec, ZERO, add, div, mul, dec, toNumber, isPositive } from "@/lib/portfolio/money";
 import type { Decision, Trade, DataPoint, RawDecision } from "@/lib/types";
 
 export interface TickInput {
@@ -60,76 +71,75 @@ export interface TickResult {
   cycleActions: CycleAction[];
   /** A tick teljes folyamat-pillanatképe (átláthatóság, tick_runs napló). */
   process: import("@/lib/engine/tick-process").TickProcess;
+  /**
+   * Igaz, ha a tick ténylegesen KÖTHETETT volna (volt hiteles portfólió-állapot).
+   * Hamis esetén a döntés naplózódik, de order SOHA nem megy ki.
+   */
+  tradingEnabled: boolean;
 }
 
-/** Fallback demo tőke, ha nincs DB vagy nincs inicializált portfólió (pl. tesztek). */
-const PAPER_CAPITAL_FALLBACK_USD = 10000;
-
-/** Szimulált díj — egyezik a PaperBroker-rel (0.1%). */
+/** Szimulált díj — egyezik a paper fill-modellel (0.1%). */
 const PAPER_FEE_PCT = 0.001;
+
+/** A Fill visszafordítása a régi Trade alakra (a v1 perzisztencia és a UI kedvéért). */
+function fillToTrade(fill: Fill, origin: CycleAction["kind"] | "ai"): Trade {
+  return {
+    id: fill.fillId,
+    orderId: fill.exchangeOrderId,
+    symbol: fill.symbol,
+    side: fill.side,
+    amountUsd: toNumber(fill.grossQuoteAmount),
+    price: toNumber(fill.fillPrice),
+    qty: toNumber(fill.filledBaseQty),
+    feeUsd: toNumber(fill.feeAmount),
+    executedAt: fill.executedAt,
+    mode: fill.mode,
+    origin,
+  };
+}
 
 /**
  * A teljes óránkénti ciklus vezérlője. Lásd spec §4.
  *
+ * V2 (T06): MINDEN order — AI, DCA, momentum, stop-loss, take-profit — ugyanazon a
+ * kockázati kapun és ugyanazon a fill-könyvelőn megy át (execute-intent).
+ *
+ * FONTOS: ha nincs hiteles portfólió-állapot (nincs DB vagy nincs inicializált portfólió),
+ * a tick NEM kereskedik. A régi 10 000 USD fallback tőke eltűnt: hiányzó DB nem
+ * aktiválhat valódi ordert (audit + terv §3).
+ *
  * Lépések:
- *  1) Portfólió-állapot betöltése DB-ből (ha van); nélküle demo fallback
+ *  1) Portfólió-állapot betöltése és v2 ledgerré alakítása
  *  2) Data Collectors → events
- *  3) ML feature + predict → mlSignals
- *  4) Phase-1 (GLM-4-Flash): érdemes-e dönteni?
- *  5) Ha igen → Phase-2 (GLM-5.2): strukturált döntés + érvelés
- *  6) Risk Manager validál/módosít
- *  7) Execution (paper vagy binance)
- *  8) Ha volt trade és van DB: perzisztencia (cash/positions/trades)
+ *  3) Kód-alapú profit-ciklus (stop/TP/trailing/DCA/momentum) a közös úton
+ *  4) ML feature + predict → mlSignals
+ *  5) Phase-1, majd szükség esetén Phase-2 (LLM)
+ *  6) Risk Manager (döntés-szinten) + végrehajtás a közös úton
  */
 export async function runTick(input: TickInput): Promise<TickResult> {
-  // 1) Portfólió-állapot betöltése. Ha nincs DB / nincs portfólió, demo fallback —
-  // így a unit tesztek DB nélkül is determinisztikusan futnak.
+  const mode = input.paperMode ? "paper" : "live";
   const dbState = await loadPortfolioState();
-  // Munka-állapot: a profit-ciklus akciói (stop/profit/DCA) menet közben frissítik,
-  // hogy az AI-lánc (és a Risk Manager) már a valós, aktualizált egyenleget lássa.
-  let cashUsd = dbState?.cashUsd ?? PAPER_CAPITAL_FALLBACK_USD;
-  let workingPositions = (dbState?.positions ?? []).map((p) => ({ ...p }));
-  // A napi P&L betöltéskor a realized SELL-ekből áll; az MTM blokk (lent) felülírja
-  // az aktuális-ár-alapú equity/initialCapital aránnyal, ha van DB. Lásd spec §A.
-  let dayPnlPct = dbState?.dayPnlPct ?? 0;
-  const totalEquityNow = () =>
-    cashUsd + workingPositions.reduce((s, p) => s + p.valueUsd, 0);
 
-  /** Egy végrehajtott trade tükrözése a munka-állapotban (cash + pozíciók). */
-  const recordTrade = (trade: Trade) => {
-    if (trade.side === "BUY") {
-      cashUsd -= trade.amountUsd;
-      const ex = workingPositions.find((p) => p.symbol === trade.symbol);
-      if (ex) {
-        const newQty = ex.qty + trade.qty;
-        ex.entryPrice = (ex.qty * ex.entryPrice + trade.qty * trade.price) / newQty;
-        ex.qty = newQty;
-        ex.valueUsd += trade.amountUsd;
-        ex.stopPrice = trade.price * (1 - RISK_LIMITS.stopLossPct);
-      } else {
-        workingPositions.push({
-          id: "",
-          symbol: trade.symbol,
-          qty: trade.qty,
-          entryPrice: trade.price,
-          stopPrice: trade.price * (1 - RISK_LIMITS.stopLossPct),
-          valueUsd: trade.amountUsd,
-        });
-      }
-    } else {
-      cashUsd += trade.amountUsd;
-      const ex = workingPositions.find((p) => p.symbol === trade.symbol);
-      if (ex) {
-        ex.qty -= trade.qty;
-        ex.valueUsd = Math.max(0, ex.valueUsd - trade.qty * ex.entryPrice);
-        if (ex.qty <= 1e-7) workingPositions = workingPositions.filter((p) => p !== ex);
-      }
+  // ── 1) Ledger a DB-állapotból. DB nélkül NINCS kereskedés. ─────────────────
+  const portfolioId = dbState?.portfolioId ?? "no-portfolio";
+  let ledger: LedgerState = emptyLedger(portfolioId, mode, dec(dbState?.cashUsd ?? 0));
+  /** A v1 positions sorok id-ja symbolonként — a stop perzisztálásához kell. */
+  const positionIdBySymbol: Record<string, string> = {};
+  if (dbState) {
+    for (const p of dbState.positions) {
+      if (!(p.qty > 0)) continue;
+      positionIdBySymbol[p.symbol] = p.id;
+      ledger.positions[p.symbol] = {
+        symbol: p.symbol,
+        qty: dec(p.qty),
+        costBasisQuote: mul(dec(p.qty), dec(p.entryPrice)),
+        stopPrice: p.stopPrice > 0 ? dec(p.stopPrice) : null,
+      };
     }
-  };
+  }
+  const tradingEnabled = dbState !== null;
 
-  // 2) Collectors — kulcs nélküliek mindig: CoinGecko (aktuális ár), Binance (OHLC
-  // gyertyák az ML-hez), RSS (hír-kontextus), Fear & Greed (piaci hangulat).
-  // A kulcsosak (CryptoPanic/WhaleAlert) csak ha van token.
+  // ── 2) Collectors ─────────────────────────────────────────────────────────
   const collectors: DataCollector[] = [
     new CoinGeckoCollector([...COIN_UNIVERSE]),
     new BinanceOHLCCollector([...COIN_UNIVERSE]),
@@ -140,123 +150,123 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     collectors.push(new CryptoPanicCollector(process.env.CRYPTOPANIC_TOKEN, [...COIN_UNIVERSE]));
   if (process.env.WHALEALERT_KEY)
     collectors.push(new WhaleAlertCollector(process.env.WHALEALERT_KEY, [...COIN_UNIVERSE]));
-  // Reddit OAuth-ot igényel (a kulcs nélküli JSON-t a Reddit 403-mal tiltja) — kulcs-gate.
   if (process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET)
     collectors.push(
       new RedditCollector(process.env.REDDIT_CLIENT_ID, process.env.REDDIT_CLIENT_SECRET, REDDIT_SOURCES),
     );
 
   const events = await collectAll(collectors);
-
-  // Az LLM-nek tisztított nézet: a Binance nyers gyertyák (24×3 ár-pont) az ML-t
-  // etetik, de a prompt-ot nem terheljük velük. Az LLM az aktuális árat (CoinGecko),
-  // a hírt (RSS) és a hangulatot (Fear & Greed) látja + az ML-jeleket.
   const llmEvents = events.filter((e) => e.source !== "binance");
 
-  // Aktuális ár symbolonként (a legfrissebb price-pont) — a döntés ref-jéhez + kiértékeléshez.
+  // Aktuális ár symbolonként (a legfrissebb price-pont).
   const prices: Record<string, number> = {};
+  const pricesDec: Record<string, Dec> = {};
   const latestTs: Record<string, number> = {};
   for (const e of events) {
     if (e.kind === "price" && e.price && (latestTs[e.symbol] === undefined || e.timestamp > latestTs[e.symbol])) {
       latestTs[e.symbol] = e.timestamp;
       prices[e.symbol] = e.price.usd;
+      pricesDec[e.symbol] = dec(e.price.usd);
     }
   }
 
-  // ── MARK-TO-MARKET (MTM): a workingPositions értékét az AKTUÁLIS árral számoljuk,
-  //    nem a belépésivel. Így a totalEquityNow() és a napi P&L valódi, és a napi -3%
-  //    circuit breaker (RISK_LIMITS.dailyLossCircuitBreakerPct) nem vak a nem-realizált
-  //    veszteségre. Lásd profit-cycle spec kiegészítés (MTM, §A).
-  //    Csak DB-állapot (dbState) esetén — DB nélkül (unit tesztek) a régi viselkedés él.
-  if (dbState) {
-    for (const p of workingPositions) {
-      const px = prices[p.symbol];
-      if (px !== undefined) {
-        p.valueUsd = px * p.qty;
-      }
-    }
-    // Napi P&L MTM-alapú: totalEquityNow/initialCapital - 1.
-    // A dbState.initialCapitalUsd a portfolios sorból jön (loadPortfolioState).
-    const initialCapitalUsd = dbState.initialCapitalUsd;
-    const mtmDayPnlPct =
-      initialCapitalUsd > 0 ? totalEquityNow() / initialCapitalUsd - 1 : 0;
-    dayPnlPct = mtmDayPnlPct;
+  // Napi P&L a mark-to-market equityből. A VALÓDI napkezdő baseline a T07-ben érkezik;
+  // addig a kezdőtőkéhez mért érték marad, de már a közös ledgerből számolva.
+  const equityNow = (): Dec => equityAt(ledger, pricesDec);
+  let dayPnlPct = 0;
+  if (dbState && dbState.initialCapitalUsd > 0) {
+    dayPnlPct = toNumber(div(equityNow(), dec(dbState.initialCapitalUsd))) - 1;
   }
 
-  // ── KÓD-ALAPÚ PROFIT-CIKLUS (az AI-lánc ELŐTT). Lásd profit-cycle spec §2–§4.
-  //    Sorrend: stop-loss → take-profit → fear-greedy DCA. Determinisztikus, nem
-  //    függ AI-intuíciótól. Csak ha van DB (perzisztencia + valós pozíciók); DB nélkül
-  //    (unit tesztek) a ciklus kimarad, és a régi viselkedés érvényes.
-  const cycleActions: CycleAction[] = [];
-  let weeklyRemaining: number | undefined;
+  // ── Végrehajtási függőségek (a broker CSAK jóváhagyott intentet kaphat) ────
+  /** A stop/TP trigger az intentId-hoz kötve (a paper fill-modellnek). */
+  const pendingTrigger = new Map<string, { kind: "stop-loss" | "take-profit"; triggerPrice: Dec }>();
 
-  /** Egy profit-ciklus order végrehajtása + perzisztálása + munka-állapot frissítése. */
-  const executeCycleOrder = async (
-    side: "BUY" | "SELL",
-    symbol: string,
-    opts: { qty?: number; amountUsd?: number },
-    price: number,
-    origin: "dca" | "stop-loss" | "take-profit" | "momentum",
-  ): Promise<Trade | null> => {
-    let trade: Trade | null = null;
-    if (input.paperMode) {
-      // Paper: közvetlen trade-építés. A SELL PONTOS qty-vel megy (a stop a teljes, a
-      // take-profit a fél pozíciót zárja), a BUY USD-összeg + cash-clamp alapú.
-      let gross: number;
-      let qty: number;
-      if (side === "SELL") {
-        qty = opts.qty ?? 0;
-        gross = qty * price;
-      } else {
-        gross = Math.min(opts.amountUsd ?? 0, Math.max(0, cashUsd));
-        qty = (gross - gross * PAPER_FEE_PCT) / price;
-      }
-      if (gross <= 0 || qty <= 0) return null;
-      trade = {
-        id: crypto.randomUUID(),
-        orderId: crypto.randomUUID(),
-        symbol,
-        side,
-        amountUsd: gross,
-        price,
-        qty,
-        feeUsd: gross * PAPER_FEE_PCT,
-        executedAt: Date.now(),
-        mode: "paper",
-      };
-    } else {
-      // Live: valódi Binance order (mint az AI-úton). A SELL amountUsd ≈ qty * ár.
-      const amountUsd = side === "SELL" ? (opts.qty ?? 0) * price : opts.amountUsd ?? 0;
-      if (amountUsd <= 0) return null;
-      const broker = new BinanceBroker(
-        process.env.BINANCE_API_KEY ?? "",
-        process.env.BINANCE_API_SECRET ?? "",
+  const market = (symbol: string) => (pricesDec[symbol] ? { last: pricesDec[symbol] } : null);
+  const broker: ExecutionBroker = input.paperMode
+    ? new PaperExecutionBroker({
+        getLedger: () => ledger,
+        getMarket: market,
+        now: () => Date.now(),
+        getTrigger: (intent) => pendingTrigger.get(intent.intentId) ?? null,
+        params: { feePct: dec(PAPER_FEE_PCT), slippageBps: 5, spreadBps: 2, quoteAsset: "USDT" },
+      })
+    : new BinanceLegacyExecutionAdapter(
+        new BinanceBroker(process.env.BINANCE_API_KEY ?? "", process.env.BINANCE_API_SECRET ?? ""),
+        RISK_LIMITS.stopLossPct,
       );
-      trade = await broker.execute(
-        { side, symbol, amountUsd, stopLossPct: RISK_LIMITS.stopLossPct },
-        price,
-      );
-    }
-    if (!trade) return null;
-    trade.origin = origin;
-    // Perzisztencia (mindkét módban): a DB az egyenleg tükre. stopPrice = entry*(1−stop%).
-    if (dbState) {
+
+  let weeklyRemaining: Dec | undefined;
+  let intentSeq = 0;
+
+  const makeDeps = (origin: IntentRequest["origin"]): ExecuteIntentDeps => ({
+    portfolioId,
+    mode,
+    strategyVersion: STRATEGY_VERSION,
+    broker,
+    getLedger: () => ledger,
+    getRiskContext: () => ({
+      ledger,
+      prices: pricesDec,
+      reservedQuoteBySymbol: {},
+      reservedQuoteTotal: ZERO,
+      originBudgetQuote: originBudgetFor(origin, { weeklyDcaRemaining: weeklyRemaining }),
+      // A valódi napi latch a T07-ben kapcsolódik be; addig a mért napi hozam dönt.
+      dailyLossLatched: dayPnlPct <= -RISK_LIMITS.dailyLossCircuitBreakerPct,
+      dayBaselineMissing: false,
+      allowedSymbols: [...COIN_UNIVERSE],
+      quoteAsset: "USDT",
+    }),
+    riskParams: {
+      ...DEFAULT_ORDER_RISK_PARAMS,
+      maxPositionPct: dec(RISK_LIMITS.maxPositionPct),
+      maxConcurrentPositions: RISK_LIMITS.maxConcurrentPositions,
+    },
+    now: () => Date.now(),
+    newIntentId: () => `${input.tickId}-${origin}-${++intentSeq}`,
+    // Perzisztencia: a v1 trades/positions táblákba. A tranzakciós v2 út a T09-ben jön.
+    persist: async (_intent, fill) => {
+      if (!dbState) return;
+      const trade = fillToTrade(fill, origin === "ai" ? "ai" : (origin as CycleAction["kind"]));
       const stopPrice =
-        trade.side === "BUY" ? trade.price * (1 - RISK_LIMITS.stopLossPct) : trade.price;
-      await applyTrade(trade, stopPrice);
+        fill.side === "BUY" ? toNumber(mul(fill.fillPrice, dec(1 - RISK_LIMITS.stopLossPct))) : toNumber(fill.fillPrice);
+      const persisted = await applyTrade(trade, stopPrice);
+      if (persisted?.positionId) positionIdBySymbol[fill.symbol] = persisted.positionId;
+    },
+  });
+
+  /** Egy order végrehajtása a közös úton. Visszaadja a fillt, vagy null-t. */
+  const runIntent = async (req: IntentRequest): Promise<Fill | null> => {
+    if (!tradingEnabled) return null;
+    const deps = makeDeps(req.origin);
+    if (req.trigger) {
+      // A trigger az intentId-hoz kötődik; az azonosítót a deps generálja.
+      const originalNewId = deps.newIntentId;
+      deps.newIntentId = () => {
+        const id = originalNewId();
+        pendingTrigger.set(id, req.trigger!);
+        return id;
+      };
     }
-    recordTrade(trade);
-    return trade;
+    const outcome = await executeIntent(req, deps);
+    if (outcome.status === "executed") {
+      ledger = outcome.ledger;
+      return outcome.fills[0] ?? null;
+    }
+    if (outcome.status === "unknown") {
+      console.error("[tick] ismeretlen order-állapot, egyeztetés szükséges:", outcome.message);
+    }
+    return null;
   };
 
-  if (dbState) {
-    // KÓD-ALAPÚ PROFIT-CIKLUS a közös, tiszta planProfitCycle()-lel — a backtest UGYANEZT
-    // hívja, így nincs drift. A planner DÖNT (ratchet→stop/TP→DCA); a végrehajtás itt marad.
-    weeklyRemaining = await remainingWeeklyBudget(totalEquityNow());
+  // ── 3) Kód-alapú profit-ciklus ────────────────────────────────────────────
+  const cycleActions: CycleAction[] = [];
+
+  if (tradingEnabled) {
+    weeklyRemaining = dec(await remainingWeeklyBudget(toNumber(equityNow())));
 
     const fgEvent = events.find((e) => e.kind === "sentiment" && e.sentiment);
     const fearGreedValue = fgEvent?.sentiment?.value ?? null;
-    // A 24h változás a CoinGecko ár-pontból jön (a kosár coinjaira, symbolonként egyszer).
     const coinChanges = events
       .filter(
         (e) =>
@@ -269,14 +279,11 @@ export async function runTick(input: TickInput): Promise<TickResult> {
 
     // Live candle-band: low=high=close=aktuális ár (csak a spot ismert).
     const candles: Record<string, { low: number; high: number; close: number }> = {};
-    for (const p of workingPositions) {
-      const px = prices[p.symbol];
-      if (px !== undefined) candles[p.symbol] = { low: px, high: px, close: px };
+    for (const symbol of Object.keys(ledger.positions)) {
+      const px = prices[symbol];
+      if (px !== undefined) candles[symbol] = { low: px, high: px, close: px };
     }
 
-    // Per-symbol ATR + trend-flag a Binance OHLC events-ből (a buildFeatures is ezt eszi).
-    // A DataPoint csak price.usd-t hordoz → close-only buffer (high=low=close). A default
-    // stopMode:"fixed"+entryFilter:"off" miatt ez NEM befolyásolja a live viselkedést (parity).
     const ohlcBySymbol: Record<string, { high: number; low: number; close: number }[]> = {};
     for (const e of events) {
       if (e.source === "binance" && e.kind === "price" && e.price) {
@@ -291,27 +298,23 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       atrBySymbol[sym] = computeAtr(buf, DEFAULT_STRATEGY.atrPeriod);
       const closes = buf.map((b) => b.close);
       trendOkBySymbol[sym] = passesTrendFilter(closes, DEFAULT_STRATEGY.entryFilterSmaPeriod);
-      momentumOkBySymbol[sym] = passesMomentum(
-        closes,
-        DEFAULT_STRATEGY.momentumSmaPeriod,
-        DEFAULT_STRATEGY.momentumLookback,
-      );
+      momentumOkBySymbol[sym] = passesMomentum(closes, DEFAULT_STRATEGY.momentumSmaPeriod, DEFAULT_STRATEGY.momentumLookback);
     }
 
     const plan = planProfitCycle(
       {
-        positions: workingPositions.map((p) => ({
-          id: p.id,
+        positions: Object.values(ledger.positions).map((p) => ({
+          id: positionIdBySymbol[p.symbol] ?? p.symbol,
           symbol: p.symbol,
-          qty: p.qty,
-          entryPrice: p.entryPrice,
-          stopPrice: p.stopPrice,
+          qty: toNumber(p.qty),
+          entryPrice: isPositive(p.qty) ? toNumber(div(p.costBasisQuote, p.qty)) : 0,
+          stopPrice: p.stopPrice ? toNumber(p.stopPrice) : 0,
         })),
         candles,
         fearGreedValue,
         coinChanges,
-        weeklyBudgetRemainingUsd: weeklyRemaining,
-        totalEquity: totalEquityNow(),
+        weeklyBudgetRemainingUsd: toNumber(weeklyRemaining),
+        totalEquity: toNumber(equityNow()),
         atrBySymbol,
         trendOkBySymbol,
         momentumOkBySymbol,
@@ -319,46 +322,64 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       DEFAULT_STRATEGY,
     );
 
-    // Trailing-stop ratchet perzisztálása + munka-állapot frissítése (túléli a tickeket).
+    // Trailing ratchet: a stop CSAK felfelé kúszik, és a rávásárlás sem viszi lejjebb.
     for (const u of plan.stopUpdates) {
-      const pos = workingPositions.find((p) => p.id === u.positionId);
-      if (pos) pos.stopPrice = u.newStop;
-      await setStopPrice(u.positionId, u.newStop);
+      const symbol = Object.values(ledger.positions).find(
+        (p) => (positionIdBySymbol[p.symbol] ?? p.symbol) === u.positionId,
+      )?.symbol;
+      if (!symbol) continue;
+      ledger = setStop(ledger, symbol, dec(u.newStop));
+      const dbId = positionIdBySymbol[symbol];
+      if (dbId) await setStopPrice(dbId, u.newStop);
     }
 
-    // Orderek végrehajtása: a SELL-ek ELŐBB (a felszabaduló cash a DCA-nak hasznosul).
-    const sells = plan.orders.filter((o) => o.side === "SELL");
-    const buys = plan.orders.filter((o) => o.side === "BUY");
-    for (const o of [...sells, ...buys]) {
-      const px = prices[o.symbol];
-      if (px === undefined) continue;
-      const trade =
+    // A SELL-ek ELŐBB (a felszabaduló cash a DCA-nak hasznosul).
+    const ordered = [...plan.orders.filter((o) => o.side === "SELL"), ...plan.orders.filter((o) => o.side === "BUY")];
+    for (const o of ordered) {
+      const px = pricesDec[o.symbol];
+      if (!px) continue;
+      const fill =
         o.side === "SELL"
-          ? await executeCycleOrder("SELL", o.symbol, { qty: o.qty }, o.triggerPrice ?? px, o.kind)
-          : await executeCycleOrder("BUY", o.symbol, { amountUsd: o.amountUsd }, px, o.kind);
-      if (trade) {
-        cycleActions.push({
-          kind: o.kind,
-          side: o.side,
-          symbol: o.symbol,
-          amountUsd: trade.amountUsd,
-          qty: trade.qty,
-        });
-        // A DCA után az AI BUY-ja a CSÖKKENTETT heti keretet lássa a Risk Manager kapujában.
-        if (o.side === "BUY") weeklyRemaining -= trade.amountUsd;
+          ? await runIntent({
+              side: "SELL",
+              symbol: o.symbol,
+              baseQty: dec(o.qty ?? 0),
+              origin: o.kind,
+              referencePrice: px,
+              trigger:
+                o.kind === "stop-loss" || o.kind === "take-profit"
+                  ? { kind: o.kind, triggerPrice: dec(o.triggerPrice ?? toNumber(px)) }
+                  : undefined,
+            })
+          : await runIntent({
+              side: "BUY",
+              symbol: o.symbol,
+              desiredQuote: dec(o.amountUsd ?? 0),
+              origin: o.kind,
+              referencePrice: px,
+              stopPrice: undefined,
+            });
+      if (!fill) continue;
+      cycleActions.push({
+        kind: o.kind,
+        side: o.side,
+        symbol: o.symbol,
+        amountUsd: toNumber(fill.grossQuoteAmount),
+        qty: toNumber(fill.filledBaseQty),
+      });
+      if (o.side === "BUY" && o.kind === "dca" && weeklyRemaining) {
+        weeklyRemaining = add(weeklyRemaining, mul(fill.grossQuoteAmount, "-1"));
       }
     }
   }
 
-  // 3) ML signals — a TELJES events-ből (a Binance idősorral) számol valódi feature-t
+  // ── 4) ML jelek ───────────────────────────────────────────────────────────
   const features = buildFeatures(events);
   const mlSignals = await predict(features);
 
-  // 4) Phase-1: érdemes-e dönteni? (GLM-4-Flash, ingyenes, minden órában)
+  // ── 5) Phase-1 / Phase-2 ──────────────────────────────────────────────────
   const phase1 = await shouldDecide(llmEvents);
 
-  // Alapértelmezett döntés: HOLD a phase-1 összegzésével.
-  // Ha phase-1 nemet mond, NEM hívjuk a phase-2-t — ez a ciklus 90%-a.
   let phase2Snapshot: import("@/lib/engine/tick-process").TickProcess["phase2"] = null;
   let rawDecision: RawDecision = {
     action: "HOLD",
@@ -370,13 +391,19 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   };
 
   if (phase1.shouldDecide) {
-    // 5) Phase-2: GLM-5.2 strukturált döntés érveléssel (tisztított LLM-nézet).
-    // A korábbi döntések „bejött volna?" összegzése visszacsatolásként megy be.
     const performance = await getPerformanceSummary();
     const phase2 = await decide({
       events: llmEvents,
       mlSignals,
-      portfolio: { cashUsd, positions: workingPositions.map((p) => ({ symbol: p.symbol, qty: p.qty, entryPrice: 0 })) },
+      // Az AI VALÓS belépési árat és pozícióértéket lát (a régi kód 0-t küldött).
+      portfolio: {
+        cashUsd: toNumber(cashOf(ledger, "USDT")),
+        positions: Object.values(ledger.positions).map((p) => ({
+          symbol: p.symbol,
+          qty: toNumber(p.qty),
+          entryPrice: isPositive(p.qty) ? toNumber(div(p.costBasisQuote, p.qty)) : 0,
+        })),
+      },
       performance: {
         actionable: performance.actionable,
         hitRate: performance.hitRate,
@@ -400,17 +427,13 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     };
   }
 
-  // 6) Risk Manager — a limitek érvényesítése az AI döntése felett (max pozíció %, max
-  //    egyidejű pozíció, napi circuit breaker). A heti DCA-keret már NEM gátolja az AI
-  //    BUY-t (csak a DCA-t a planner-ben) → nincs HOLD-fagyás. Lásd tournament spec §6.
+  // ── 6) Döntés-szintű kapu + végrehajtás a KÖZÖS úton ──────────────────────
   const decision = applyRisk(
     rawDecision,
-    {
-      cashUsd,
-      positions: workingPositions,
-      totalEquity: totalEquityNow,
+    riskContextFromLedger(ledger, pricesDec, {
       dayPnlPct,
-    },
+      allowedSymbols: [...COIN_UNIVERSE],
+    }),
     {
       maxPositionPct: RISK_LIMITS.maxPositionPct,
       maxConcurrentPositions: RISK_LIMITS.maxConcurrentPositions,
@@ -418,40 +441,31 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     },
   );
 
-  // 7) Execution — a broker a mód szerint cserélődik (spec §3.3):
-  //    paper → PaperBroker (szimuláció), live → BinanceBroker (valódi Binance order).
-  //    A Risk Manager limitjei már a broker ELŐTT érvényesültek.
   let trade: Trade | null = null;
   let positionId: string | null = null;
-  if (decision.action !== "HOLD" && decision.symbol) {
-    const priceEvent = events.find(
-      (e) => e.symbol === decision.symbol && e.kind === "price",
-    );
-    const price = priceEvent?.price?.usd;
-    if (price) {
-      const order = {
-        side: decision.action,
-        symbol: decision.symbol,
-        amountUsd: cashUsd * decision.amountPct,
-        stopLossPct: RISK_LIMITS.stopLossPct,
-      };
-      const broker: Broker = input.paperMode
-        ? new PaperBroker({
-            cashUsd,
-            positions: workingPositions.map((p) => ({ symbol: p.symbol, qty: p.qty, valueUsd: p.valueUsd })),
+  if (tradingEnabled && decision.action !== "HOLD" && decision.symbol && pricesDec[decision.symbol]) {
+    const px = pricesDec[decision.symbol];
+    const fill =
+      decision.action === "BUY"
+        ? // BUY: a hányad a TELJES EQUITY-re vonatkozik (nem a készpénzre).
+          await runIntent({
+            side: "BUY",
+            symbol: decision.symbol,
+            desiredQuote: mul(equityNow(), dec(decision.amountPct)),
+            origin: "ai",
+            referencePrice: px,
           })
-        : new BinanceBroker(process.env.BINANCE_API_KEY ?? "", process.env.BINANCE_API_SECRET ?? "");
-      trade = await broker.execute(order, price);
-      if (trade) trade.origin = "ai";
-
-      // 8) Perzisztencia — a DB-egyenleget mindkét módban frissítjük (live módban ez a
-      // valós Binance-számla TÜKRE; a stopPrice = entry * (1 - stopLoss%)).
-      if (dbState && trade) {
-        const stopPrice =
-          trade.side === "BUY" ? trade.price * (1 - RISK_LIMITS.stopLossPct) : trade.price;
-        const persisted = await applyTrade(trade, stopPrice);
-        positionId = persisted?.positionId ?? null;
-      }
+        : // SELL: a hányad a BIRTOKOLT MENNYISÉGRE vonatkozik — cash-független.
+          await runIntent({
+            side: "SELL",
+            symbol: decision.symbol,
+            baseQty: mul(positionQty(ledger, decision.symbol), dec(decision.amountPct)),
+            origin: "ai",
+            referencePrice: px,
+          });
+    if (fill) {
+      trade = fillToTrade(fill, "ai");
+      positionId = positionIdBySymbol[fill.symbol] ?? null;
     }
   }
 
@@ -478,12 +492,11 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     decision,
     trade,
     positionId,
-    // A Risk Manager ELŐTTI eredeti döntés — a cron route ebből naplózza a
-    // risk_overrides sort, ha a Risk Manager módosított/elutasított. Lásd spec §3.4.
     rawAction: rawDecision.action,
     rawAmountPct: rawDecision.amountPct,
     prices,
     cycleActions,
     process: tickProcess,
+    tradingEnabled,
   };
 }

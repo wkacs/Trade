@@ -14,11 +14,13 @@ vi.mock("@/lib/collectors/reddit", () => ({ RedditCollector: vi.fn() }));
 vi.mock("@/lib/llm/phase1-filter", () => ({ shouldDecide: vi.fn() }));
 vi.mock("@/lib/llm/phase2-decide", () => ({ decide: vi.fn() }));
 vi.mock("@/lib/ml/predictor", () => ({ predict: vi.fn() }));
-// Portfólió-réteg mock: nincs DB → loadPortfolioState null (demo fallback),
-// applyTrade nem persistál (tick DB nélküli tesztelése). Így a 4 teszt determinisztikus.
+// Portfólió-réteg mock. FONTOS (T06): a régi 10 000 USD-s demo fallback MEGSZŰNT —
+// hiteles portfólió-állapot nélkül a tick nem köt. Ezért itt egy explicit teszt-portfóliót
+// adunk vissza; a "nincs DB" esetre külön teszt van lent.
 vi.mock("@/lib/portfolio/accounting", () => ({
-  loadPortfolioState: vi.fn().mockResolvedValue(null),
+  loadPortfolioState: vi.fn(),
   applyTrade: vi.fn().mockResolvedValue({ positionId: null }),
+  setStopPrice: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/lib/portfolio/evaluate", () => ({
   getPerformanceSummary: vi.fn().mockResolvedValue({ evaluated: 0, actionable: 0, hitRate: null, avgHypotheticalPnlPct: 0 }),
@@ -29,6 +31,7 @@ import { collectAll } from "@/lib/collectors/base";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
 import { decide } from "@/lib/llm/phase2-decide";
 import { predict } from "@/lib/ml/predictor";
+import { loadPortfolioState } from "@/lib/portfolio/accounting";
 import { runTick } from "@/lib/engine/tick";
 import type { DataPoint } from "@/lib/types";
 
@@ -45,6 +48,14 @@ describe("runTick — teljes döntési ciklus", () => {
     vi.stubEnv("TRADING_MODE", "paper");
     (collectAll as any).mockResolvedValue([priceEvent("BTC", 60000)]);
     (predict as any).mockResolvedValue([]);
+    (loadPortfolioState as any).mockResolvedValue({
+      portfolioId: "pf-test",
+      cashUsd: 10000,
+      initialCapitalUsd: 10000,
+      positions: [],
+      totalEquity: () => 10000,
+      dayPnlPct: 0,
+    });
   });
 
   it("phase-1 'ne dönts' → HOLD, nincs tranzakció", async () => {
@@ -116,6 +127,25 @@ describe("runTick — teljes döntési ciklus", () => {
     const result = await runTick({ tickId: "2026-06-25-13", paperMode: true });
     expect(result.decision.amountPct).toBe(0.2);
     expect(result.decision.overridden).toBe(true);
+  });
+
+  it("hiteles portfólió-állapot NÉLKÜL nincs kötés (nincs 10 000 USD fallback)", async () => {
+    (loadPortfolioState as any).mockResolvedValue(null);
+    (shouldDecide as any).mockResolvedValue({ shouldDecide: true, summary: "x", notableEvents: [] });
+    (decide as any).mockResolvedValue({
+      action: "BUY",
+      symbol: "BTC",
+      amountPct: 0.1,
+      confidence: 0.9,
+      reasoning: "bullish",
+    });
+    const result = await runTick({ tickId: "2026-06-25-14", paperMode: true });
+    expect(result.tradingEnabled).toBe(false);
+    expect(result.trade).toBeNull();
+    // Az AI eredeti szándéka naplózódik (rawAction), de a kapu HOLD-ra váltja:
+    // nulla equity mellett nincs szabad keret, és order sem megy ki.
+    expect(result.rawAction).toBe("BUY");
+    expect(result.decision.action).toBe("HOLD");
   });
 
   it("momentum-wiring (default OFF): a tick lefut, process megvan, nincs momentum cycle-action", async () => {

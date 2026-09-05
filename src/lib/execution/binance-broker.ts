@@ -1,6 +1,8 @@
 import { createHmac, randomUUID } from "crypto";
 import type { Order, Trade } from "@/lib/types";
-import type { Broker } from "./broker";
+import type { Broker, ExecutionBroker, ExecutionReceipt } from "./broker";
+import { clientOrderId, fillKey, isIntentExpired, toLegacyOrder, type ExecutionIntent } from "./contracts";
+import { dec } from "@/lib/portfolio/money";
 
 const BINANCE_BASE = "https://api.binance.com";
 
@@ -126,6 +128,75 @@ export class BinanceBroker implements Broker {
       feeUsd,
       executedAt: Date.now(),
       mode: "live",
+    };
+  }
+}
+
+/**
+ * ÁTMENETI adapter: a v1 BinanceBrokert a v2 ExecutionBroker felületre húzza, hogy a live
+ * mód is a KÖZÖS végrehajtási úton (execute-intent + risk gate + ledger) menjen.
+ *
+ * Korlátai — ezeket a T25 oldja meg: nincs stabil client order ID a tőzsdén, nincs
+ * státusz-lekérdezés timeout után, és a részleges teljesülés sem különül el. Amíg ez az
+ * adapter él, a live mód NEM tekinthető auditáltnak.
+ */
+export class BinanceLegacyExecutionAdapter implements ExecutionBroker {
+  constructor(
+    private broker: BinanceBroker,
+    private stopLossPct: number,
+    private now: () => number = () => Date.now(),
+  ) {}
+
+  async submit(intent: ExecutionIntent): Promise<ExecutionReceipt> {
+    const coid = clientOrderId(intent.intentId);
+    if (isIntentExpired(intent, this.now())) {
+      return { exchangeOrderId: null, clientOrderId: coid, state: "rejected", fills: [], error: { code: "intent_expired", message: "Az intent lejárt" } };
+    }
+    const legacy = toLegacyOrder(intent.order, intent.referencePrice, this.stopLossPct);
+    let trade: Trade;
+    try {
+      trade = await this.broker.execute(legacy, Number(intent.referencePrice));
+    } catch (e) {
+      // Ismeretlen kimenetel: a hívó egyeztetést indít, NEM küld új azonosítójú ordert.
+      return { exchangeOrderId: null, clientOrderId: coid, state: "unknown", fills: [], error: { code: "submit_failed", message: String(e) } };
+    }
+    if (!(trade.qty > 0) || !(trade.amountUsd > 0)) {
+      return { exchangeOrderId: trade.orderId ?? null, clientOrderId: coid, state: "rejected", fills: [], error: { code: "zero_fill", message: "A megbízás nem teljesült" } };
+    }
+    const exchangeTradeId = `${trade.orderId}-1`;
+    return {
+      exchangeOrderId: trade.orderId,
+      clientOrderId: coid,
+      state: "filled",
+      fills: [
+        {
+          fillId: fillKey("live", trade.orderId, exchangeTradeId),
+          intentId: intent.intentId,
+          portfolioId: intent.portfolioId,
+          mode: "live",
+          symbol: trade.symbol,
+          side: trade.side,
+          exchangeOrderId: trade.orderId,
+          exchangeTradeId,
+          filledBaseQty: dec(trade.qty),
+          grossQuoteAmount: dec(trade.amountUsd),
+          fillPrice: dec(trade.price),
+          feeAmount: dec(trade.feeUsd),
+          feeAsset: "USDT",
+          executedAt: trade.executedAt,
+        },
+      ],
+    };
+  }
+
+  async lookup(intent: ExecutionIntent): Promise<ExecutionReceipt> {
+    // A v1 broker nem tud állapotot lekérdezni — ezt a T25 pótolja.
+    return {
+      exchangeOrderId: null,
+      clientOrderId: clientOrderId(intent.intentId),
+      state: "unknown",
+      fills: [],
+      error: { code: "lookup_unsupported", message: "A v1 adapter nem tud order-állapotot lekérdezni (T25)" },
     };
   }
 }

@@ -25,6 +25,13 @@ export interface StrategyConfig {
 }
 
 /**
+ * A futó stratégia verziója. MINDEN intent és fill ezt hordozza, hogy a naplók később
+ * egyértelműen visszavezethetők legyenek arra a paraméterkészletre, ami őket okozta.
+ * Változtasd, ha a DEFAULT_STRATEGY bármely értéke módosul.
+ */
+export const STRATEGY_VERSION = "v2-2026-09-05";
+
+/**
  * A live stratégia — a tick ezt használja, a tournament ettől tér el.
  * Hangolva 2026-06-28 (Approach A robust tournament #1 nyertese, IS Sharpe 1.93 /
  * OOS 2.60, mindkét ablakban pozitív): a korábbi „mai" parity-defaulthoz képest
