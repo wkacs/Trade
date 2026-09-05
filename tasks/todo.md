@@ -166,37 +166,41 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 
 ### T17 — Végrehajtási idő és backtest-paritás
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T05, T06, T12, T15. Méret: M.
 - Fájlok: `src/lib/backtest/types.ts`, `src/lib/backtest/engine.ts`, `src/lib/backtest/fill-sim.ts`, `tests/lib/backtest/engine.test.ts`, `tests/lib/backtest/parity.test.ts`.
 - Elfogadás: közös risk+ledger minden ordernél; jel után következő elérhető áron fill, nincs jövőinformáció; polling és függő exchange stop külön modell, 1/5/15/60 perces ellenőrzés megfelelő adatról fut.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/backtest/engine.test.ts tests/lib/backtest/parity.test.ts tests/lib/backtest/fill-sim.test.ts`; stop+TP ugyanazon gyertyán, gap, részleges fill, eltűnő quote; azonos input/időzítés paper és backtest cash/qty/fees egyezik.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/backtest/` → 38 teszt zöld (engine, fill-sim, parity); `pnpm test` 52 fájl / 469 teszt; `tsc --noEmit` tiszta; `pnpm build` sikeres. Bizonyított: a backtest ugyanazt az `evaluateOrder` kaput és `applyFill` könyvelőt használja, mint az éles út; NINCS look-ahead — a jel a lezárt gyertyából születik és a KÖVETKEZŐ nyitón teljesül (külön teszt bizonyítja, hogy a következő gyertya zuhanását nem lehet visszamenőleg megvenni); a `polling` és az `exchange-stop` mód ugyanazon az adaton KÜLÖNBÖZŐ eredményt ad, mert a polling bot nem látja a gyertyán belüli mélypontot; ugyanazon a gyertyán a stop nyer; eltűnő gyertya és minimum-notional elutasítás a `rejections` riportban látszik; a BUY keret a díjat is tartalmazza, egyezően a paper brokerrel.
 
 ### T18 — Nettó metrikák és részleges eladások
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T04, T11, T17. Méret: M.
 - Fájlok: `src/lib/backtest/metrics.ts`, `src/lib/portfolio/analytics.ts`, `src/lib/backtest/engine.ts`, `tests/lib/backtest/metrics.test.ts`, `tests/lib/portfolio/analytics.test.ts`.
 - Elfogadás: minden részleges realizálás és díj bekerül, kezdőtőke a legelső kötés előtt; időkerethez helyes Sharpe/MTM drawdown, pénzmozgások és költségek elkülönítve; hit rate/PF meghatározás közös, örökölt bizonytalan adat külön látszik.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/backtest/metrics.test.ts tests/lib/portfolio/analytics.test.ts`; kézi ledgerpéldák, csak nyerő/üres/részlegesen zárt sor, JSON serialization és díjak miatti nullszaldó.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/backtest/metrics.test.ts tests/lib/portfolio/analytics.test.ts` → 27 teszt zöld; `pnpm test` 52 fájl / 478 teszt. Bizonyított: MINDEN realizálás számít, a részleges zárás is (a régi kód csak a végső eladást vette); a Sharpe a TÉNYLEGES mintavételi közhöz évesít (napi mintán a Sharpe az órás √24-ed része); a végtelen profit factor `null` + explicit jelző, a JSON nem tartalmaz Infinityt; a `replayFills` a kezdőtőkétől indítja a görbét, a `legacy-unverified` sorokat KIZÁRJA a metrikákból de jelenti a darabszámukat, a nem könyvelhető sorokat pedig problémaként adja vissza. A `summarizeClosedPosition` a vételi díjat is költségnek veszi.
 
 ### T19 — Független teszt és benchmarkok
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T17, T18. Méret: M.
 - Fájlok: `src/lib/backtest/walk-forward.ts`, `src/lib/backtest/benchmarks.ts`, `scripts/tournament.ts`, `scripts/backtest.ts`, `tests/lib/backtest/walk-forward.test.ts`.
 - Elfogadás: időben gördülő tanítás/validálás és zárolt végső teszt; jelölt nem választható a végső teszt eredményéből; cash/BTC/DCA referencia, 100 és 10 000 USD, minimum-order és költségstressz, seed/adathash/configverzió a jelentésben. Warmup múltból jön, jövőből soha.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/backtest/walk-forward.test.ts`; módosított teszteredmény nem változtatja a már kiválasztott jelöltet; azonos adathash kétszer azonos riportot ad.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/backtest/holdout.test.ts tests/lib/backtest/walk-forward.test.ts` → 22 teszt zöld; `pnpm test` 53 fájl / 497 teszt; `pnpm build` sikeres. Bizonyított: a holdout adat EL SEM JUT a `selectCandidate`-hez, ezért a MÓDOSÍTOTT holdout-eredmény sem változtatja a már kiválasztott jelöltet; a rangsor a leggyengébb validációs szelet szerint megy, a sikertelen jelöltek megmaradnak; a warmup a validáció ELŐTTI adatból jön; azonos adat → azonos `dataHash`, egyetlen ár változása más hash; a `buildProvenance` rögzíti a stratégia-verziót, a díjat, a csúszást, a tőkét és a keretszámokat. Alapvonalak: cash és buy-and-hold (első NYITÓN, egy díjjal), 100 és 10 000 USD, alap és kétszeres költség; kötés nélküli stratégia NEM ELDÖNTHETŐ, nem nulla hozam.
 
 **C7:** T17–T19 után közös execution-paritás és metrikák bizonyítva; a régi tournament győztese nem automatikus új alapértelmezés.
 
 ### T20 — AI értékelés és visszajátszhatóság
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T16, T17, T18, T19. Méret: M.
 - Fájlok: `src/lib/backtest/decision-replay.ts`, `src/lib/portfolio/evaluate.ts`, `src/lib/engine/run-scheduled-tick.ts`, `tests/lib/backtest/decision-replay.test.ts`, `tests/lib/portfolio/evaluate.test.ts`.
 - Elfogadás: korábban rögzített intent/model/input időponttal replayelhető, AI nélküli kontroll ugyanazon feltételekkel; hiányzó történelmi AI nem pótolható bizonyítéknak nevezett utólagos generálással; 1h iránytalálat megfelelő historikus horizontra számolódik, nem a következő tetszőleges tick árára, és nem azonos a profitmutatóval.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/backtest/decision-replay.test.ts tests/lib/portfolio/evaluate.test.ts`; többnapos üzemszünet, hiányzó price, jövőbeli intent tiltás és elszámolt AI-költség.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/backtest/decision-replay.test.ts tests/lib/portfolio/evaluate.test.ts` → 30 teszt zöld; `pnpm test` 54 fájl / 523 teszt; `pnpm build` sikeres. Bizonyított: csak AKKOR rögzített döntés játszható vissza — a jövőbeli intent, a pillanatkép nélküli sor, az UTÓLAG gyártott sor (késői recordedAt), a hiányzó ár és az ismeretlen szimbólum mind elutasításra kerül, kódonként összesítve; a replay a közös kapun és könyvelőn fut a DÖNTÉSKORI árakon; az AI nélküli kontroll ugyanazon a feltételrendszeren fut, és az AI értéke a KÜLÖNBSÉG az LLM-költség után; kevés végrehajtott döntésnél NEM ELDÖNTHETŐ. Az 1 órás pontozás a HORIZONT árán történik: 72 órás késésű ár esetén `stale_horizon`, nincs pontszám. A `hypotheticalPnlPct` és a `wouldProfit` mező megszűnt, helyettük `directionalScorePct` és `directionHit` — ez diagnosztika, nem profit.
 
 **C8 / M3:** AI/backtest paritás és korlátok dokumentálva; teljes suite + típusellenőrzés + build.
 
