@@ -53,9 +53,13 @@ describe("runBacktest", () => {
   });
 
   it("stop-loss zuhanásnál → lezárt trade + legalább egy trade", () => {
+    // A polling modellben a jel a LEZÁRT gyertyából születik, és a KÖVETKEZŐ nyitón
+    // teljesül — ezért a stop észlelése után még kell egy keret a végrehajtáshoz.
     const history = after(warmup(), [
-      (i) => frame(i, { o: 100, h: 100, l: 100, c: 100 }, 20), // DCA BUY @ ~100, stop ~95
-      (i) => frame(i, { o: 100, h: 100, l: 90, c: 92 }, 50), // low 90 ≤ stop ~95 → stop-loss
+      (i) => frame(i, { o: 100, h: 100, l: 100, c: 100 }, 20), // DCA-terv
+      (i) => frame(i, { o: 100, h: 100, l: 100, c: 100 }, 50), // itt teljesül a BUY, stop ~95
+      (i) => frame(i, { o: 100, h: 100, l: 90, c: 92 }, 50), // a megfigyelt 92 ≤ stop → stop-terv
+      (i) => frame(i, { o: 92, h: 93, l: 91, c: 92 }, 50), // itt teljesül a stop-eladás
     ]);
     const result = runBacktest(history, cfg);
     expect(result.closedTrades.length).toBeGreaterThanOrEqual(1);

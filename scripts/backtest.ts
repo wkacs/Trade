@@ -42,7 +42,7 @@ async function main() {
   console.log(`Max drawdown : ${(m.maxDrawdownPct * 100).toFixed(2)}%`);
   console.log(`Hit rate     : ${(m.hitRate * 100).toFixed(1)}%  (${m.tradesCount} lezárt trade)`);
   console.log(`Avg win/loss : +${(m.avgWinPct * 100).toFixed(2)}% / ${(m.avgLossPct * 100).toFixed(2)}%`);
-  console.log(`Profit factor: ${m.profitFactor.toFixed(2)}`);
+  console.log(`Profit factor: ${m.profitFactorInfinite ? "∞ (nem volt veszteség)" : m.profitFactor === null ? "n/a" : m.profitFactor.toFixed(2)}`);
   console.log(`Exposure     : ${(m.exposurePct * 100).toFixed(1)}%`);
 }
 

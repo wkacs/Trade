@@ -87,7 +87,7 @@ async function main() {
     oos: runBacktest(outSample, btCfg, DEFAULT_STRATEGY),
   };
   const fmt = (r: BacktestResult) =>
-    `ret ${(r.metrics.totalReturnPct * 100).toFixed(1)}% · Sharpe ${r.metrics.sharpe.toFixed(2)} · PF ${r.metrics.profitFactor.toFixed(2)} · maxDD ${(r.metrics.maxDrawdownPct * 100).toFixed(1)}% · ${r.metrics.tradesCount} trade`;
+    `ret ${(r.metrics.totalReturnPct * 100).toFixed(1)}% · Sharpe ${r.metrics.sharpe.toFixed(2)} · PF ${r.metrics.profitFactorInfinite ? "inf" : r.metrics.profitFactor === null ? "n/a" : r.metrics.profitFactor.toFixed(2)} · maxDD ${(r.metrics.maxDrawdownPct * 100).toFixed(1)}% · ${r.metrics.tradesCount} trade`;
   const desc = (c: StrategyConfig) =>
     `stop ${c.stopMode === "atr" ? `atr×${c.atrMult}` : `fix${(c.stopLossPct * 100).toFixed(0)}%`} · TP ${(c.takeProfitPct * 100).toFixed(0)}%/${c.takeProfitFraction} · FG${c.dcaFgThreshold} · dca ${(c.dcaBuyPct * 100).toFixed(0)}%/${(c.dcaWeeklyBudgetPct * 100).toFixed(0)}% · ${c.entryFilter}${c.entryFilter === "trend" ? c.entryFilterSmaPeriod : ""}`;
 

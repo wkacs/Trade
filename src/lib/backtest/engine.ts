@@ -4,27 +4,55 @@ import type {
   BacktestResult,
   EquityPoint,
   ClosedTradePnl,
+  RealizationEvent,
+  ExecutionModel,
 } from "./types";
 import { planProfitCycle, computeAllSignals } from "@/lib/engine/profit-cycle";
-import { simulateFill } from "./fill-sim";
+import { simulateFill, protectionTriggers } from "./fill-sim";
 import { computeMetrics } from "./metrics";
 import { DEFAULT_STRATEGY, type StrategyConfig } from "@/lib/strategy/config";
-
-interface SimPosition {
-  id: string;
-  symbol: string;
-  qty: number;
-  entryPrice: number;
-  stopPrice: number;
-}
+import {
+  emptyLedger,
+  applyFill,
+  setStop,
+  cashOf,
+  positionQty,
+  equityAt,
+  type LedgerState,
+} from "@/lib/portfolio/ledger";
+import { evaluateOrder, type OrderRiskContext, type OrderRiskParams } from "@/lib/risk/risk-manager";
+import { fillKey, type Fill } from "@/lib/execution/contracts";
+import { dec, toNumber, mul, div, isPositive, type Dec } from "@/lib/portfolio/money";
 
 const HOUR = 3600_000;
+const PORTFOLIO_ID = "backtest";
+const QUOTE = "USDT";
+
+/** Egy következő gyertyára ütemezett order (nincs look-ahead). */
+interface PendingOrder {
+  kind: "stop-loss" | "take-profit" | "dca" | "momentum" | "ai";
+  side: "BUY" | "SELL";
+  symbol: string;
+  qty?: number;
+  amountUsd?: number;
+  triggerPrice?: number;
+}
 
 /**
- * Determinisztikus backtest: a runTick profit-ciklusát (a közös planProfitCycle-t)
- * futtatja történelmi kereteken, gyertya-fill szimulációval, a `strategy` (StrategyConfig)
- * vezérlésével. Policy = HOLD (LLM kívül; a belépők a kód-alapú DCA-ból jönnek).
- * Tiszta a hálózat felé — a history-t a hívó tölti be. Nincs Date.now/IO. Lásd spec.
+ * Determinisztikus backtest (T17) — a runTick KÖZÖS kapuját (evaluateOrder) és KÖZÖS
+ * könyvelőjét (ledger.applyFill) futtatja történelmi kereteken.
+ *
+ * Amit az audit §7-hez képest javít:
+ *  - NINCS look-ahead: a jel a LEZÁRT gyertyából születik, és a KÖVETKEZŐ gyertya
+ *    nyitóján teljesül. A régi kód ugyanannak a gyertyának a záróján vett, miután
+ *    látta a gyertya high/low-ját.
+ *  - A `polling` és az `exchange-stop` mód KÜLÖN modell: a futó bot óránként egy
+ *    pillanatképet lát, nem a gyertyán belüli mélypontot.
+ *  - Minden order ugyanazon a kockázati kapun megy át, mint élesben, és ugyanaz a
+ *    fill-könyvelő számolja a készpénzt, a készletet és a díjat.
+ *  - A RÉSZLEGES realizálások is bekerülnek a statisztikába.
+ *
+ * Tiszta a hálózat felé — a history-t a hívó tölti be. Nincs Date.now/IO.
  */
 export function runBacktest(
   history: HistoryFrame[],
@@ -32,35 +60,223 @@ export function runBacktest(
   strategy: StrategyConfig = DEFAULT_STRATEGY,
 ): BacktestResult {
   const frames = [...history].sort((a, b) => a.ts - b.ts);
-  let cashUsd = config.initialCapitalUsd;
-  let positions: SimPosition[] = [];
+  const model: ExecutionModel = config.executionModel ?? "polling";
+  const riskParams: OrderRiskParams = {
+    maxPositionPct: dec(strategy.maxPositionPct),
+    maxConcurrentPositions: strategy.maxConcurrentPositions,
+    minOrderQuote: dec(config.minOrderQuote ?? 1),
+    feeReservePct: dec(config.feePct),
+  };
+
+  let ledger: LedgerState = emptyLedger(PORTFOLIO_ID, "paper", dec(config.initialCapitalUsd), QUOTE);
   const equity: EquityPoint[] = [];
+  const realizations: RealizationEvent[] = [];
   const closedTrades: ClosedTradePnl[] = [];
+  const rejections: Record<string, number> = {};
   const buyLog: { ts: number; amountUsd: number }[] = []; // gördülő heti keret
-  let hoursInMarket = 0;
-  let nextId = 1;
-  // Per-symbol gyertya-buffer az ATR/SMA-hoz (gördülő ablak). A nyitóidő is kell,
-  // hogy a réseket a TICK-kel AZONOS módon ismerjük fel (T15 paritás).
   const buffers: Record<string, { openTime: number; high: number; low: number; close: number }[]> = {};
+  /** Az előző keretben megtervezett, MOST végrehajtandó orderek. */
+  let pending: PendingOrder[] = [];
+  let hoursInMarket = 0;
+  let fillSeq = 0;
 
-  const closeAt = (frame: HistoryFrame, sym: string): number | undefined => frame.candles[sym]?.close;
-  const equityNow = (frame: HistoryFrame): number =>
-    cashUsd + positions.reduce((s, p) => s + (closeAt(frame, p.symbol) ?? p.entryPrice) * p.qty, 0);
+  const priceMap = (frame: HistoryFrame): Record<string, Dec> => {
+    const out: Record<string, Dec> = {};
+    for (const sym of config.symbols) {
+      const k = frame.candles[sym];
+      if (k) out[sym] = dec(k.close);
+    }
+    return out;
+  };
 
-  // Mód-érzékeny stop-ár egy belépéskor (atr → fillPrice − atrMult*ATR; fixed → fillPrice*(1−stop%)).
-  const buyStopPrice = (fillPrice: number, atr: number): number =>
-    strategy.stopMode === "atr" && atr > 0
-      ? fillPrice - strategy.atrMult * atr
-      : fillPrice * (1 - strategy.stopLossPct);
+  const riskContext = (frame: HistoryFrame, originBudget?: Dec): OrderRiskContext => ({
+    ledger,
+    prices: priceMap(frame),
+    reservedQuoteBySymbol: {},
+    reservedQuoteTotal: "0",
+    originBudgetQuote: originBudget,
+    dailyLossLatched: false,
+    dayBaselineMissing: false,
+    allowedSymbols: config.symbols,
+    quoteAsset: QUOTE,
+  });
+
+  /** Egy szimulált fill elkönyvelése a KÖZÖS ledgerrel. */
+  const book = (
+    frame: HistoryFrame,
+    symbol: string,
+    side: "BUY" | "SELL",
+    sim: { fillPrice: number; qty: number; amountUsd: number; feeUsd: number },
+    kind: PendingOrder["kind"],
+    stopPrice: Dec | null,
+  ): boolean => {
+    const orderId = `bt-${++fillSeq}`;
+    const fill: Fill = {
+      fillId: fillKey("paper", orderId, "1"),
+      intentId: orderId,
+      portfolioId: PORTFOLIO_ID,
+      mode: "paper",
+      symbol,
+      side,
+      exchangeOrderId: orderId,
+      exchangeTradeId: "1",
+      filledBaseQty: dec(sim.qty),
+      grossQuoteAmount: dec(sim.amountUsd),
+      fillPrice: dec(sim.fillPrice),
+      feeAmount: dec(sim.feeUsd),
+      feeAsset: QUOTE,
+      executedAt: frame.ts,
+    };
+    const before = ledger.positions[symbol];
+    const costBasisBefore = before?.costBasisQuote ?? "0";
+    const qtyBefore = before?.qty ?? "0";
+
+    const result = applyFill(ledger, fill, {
+      quoteAsset: QUOTE,
+      ...(side === "BUY" && stopPrice !== null ? { stopPrice } : {}),
+    });
+    if (!result.applied) return false;
+    ledger = result.state;
+
+    if (side === "SELL") {
+      const closes = !ledger.positions[symbol];
+      const costBasisUsed = isPositive(qtyBefore)
+        ? toNumber(mul(costBasisBefore, div(dec(sim.qty), qtyBefore)))
+        : 0;
+      realizations.push({
+        ts: frame.ts,
+        symbol,
+        qty: sim.qty,
+        exitPrice: sim.fillPrice,
+        pnlUsd: toNumber(result.realizedPnlQuote),
+        costBasisUsd: costBasisUsed,
+        feeUsd: sim.feeUsd,
+        closesPosition: closes,
+        kind: kind === "stop-loss" || kind === "take-profit" ? kind : "market",
+      });
+      if (closes) {
+        const entryPrice = isPositive(qtyBefore) ? toNumber(div(costBasisBefore, qtyBefore)) : sim.fillPrice;
+        closedTrades.push({
+          symbol,
+          entryPrice,
+          exitPrice: sim.fillPrice,
+          qty: sim.qty,
+          pnlUsd: toNumber(result.realizedPnlQuote),
+          pnlPct: costBasisUsed > 0 ? toNumber(result.realizedPnlQuote) / costBasisUsed : 0,
+        });
+      }
+    } else {
+      buyLog.push({ ts: frame.ts, amountUsd: sim.amountUsd + sim.feeUsd });
+    }
+    return true;
+  };
+
+  const reject = (code: string) => {
+    rejections[code] = (rejections[code] ?? 0) + 1;
+  };
 
   for (let fi = 0; fi < frames.length; fi++) {
     const frame = frames[fi];
 
-    // Mark-to-market equity (cash + pozíciók close-on).
-    const totalEquity = equityNow(frame);
-    if (positions.length > 0) hoursInMarket++;
+    // ── 1) A tőzsdén ÜLŐ védőorderek: a gyertyán belül is tüzelhetnek. ────────
+    if (model === "exchange-stop") {
+      for (const symbol of Object.keys(ledger.positions)) {
+        const k = frame.candles[symbol];
+        const pos = ledger.positions[symbol];
+        if (!k || !pos) continue;
+        const entry = isPositive(pos.qty) ? toNumber(div(pos.costBasisQuote, pos.qty)) : 0;
+        const tp = entry > 0 ? entry * (1 + strategy.takeProfitPct) : null;
+        const trigger = protectionTriggers(k, pos.stopPrice ? toNumber(pos.stopPrice) : null, tp, model);
+        if (!trigger) continue;
+        const qty = toNumber(pos.qty) * (trigger === "take-profit" ? strategy.takeProfitFraction : 1);
+        const sim = simulateFill(
+          {
+            side: "SELL",
+            kind: trigger,
+            model,
+            qty,
+            triggerPrice: trigger === "stop-loss" ? toNumber(pos.stopPrice ?? "0") : tp ?? undefined,
+            candle: k,
+          },
+          config.feePct,
+          config.slippageBps,
+        );
+        if (sim) book(frame, symbol, "SELL", sim, trigger, null);
+      }
+    }
 
-    // Per-symbol jelek a gördülő bufferből — UGYANAZ a függvény, mint a runTickben.
+    // ── 2) Az ELŐZŐ keretben tervezett orderek végrehajtása a MOSTANI nyitón. ──
+    for (const order of pending) {
+      const k = frame.candles[order.symbol];
+      if (!k) {
+        reject("no_candle");
+        continue;
+      }
+      if (order.side === "SELL") {
+        const verdict = evaluateOrder(
+          { side: "SELL", symbol: order.symbol, baseQty: dec(order.qty ?? 0) },
+          riskContext(frame),
+          riskParams,
+        );
+        if (!verdict.allowed) {
+          reject(verdict.code);
+          continue;
+        }
+        const qty = toNumber(verdict.order.side === "SELL" ? verdict.order.baseQty : "0");
+        const sim = simulateFill(
+          {
+            side: "SELL",
+            kind: order.kind === "stop-loss" || order.kind === "take-profit" ? order.kind : "market",
+            model,
+            qty,
+            triggerPrice: order.triggerPrice,
+            candle: k,
+            at: "open",
+          },
+          config.feePct,
+          config.slippageBps,
+        );
+        if (sim) book(frame, order.symbol, "SELL", sim, order.kind, null);
+      } else {
+        const weekAgo = frame.ts - 7 * 24 * HOUR;
+        const spent7d = buyLog.filter((b) => b.ts > weekAgo).reduce((s, b) => s + b.amountUsd, 0);
+        const weeklyRemaining = Math.max(
+          0,
+          strategy.dcaWeeklyBudgetPct * toNumber(equityAt(ledger, priceMap(frame), QUOTE)) - spent7d,
+        );
+        const originBudget = order.kind === "dca" ? dec(weeklyRemaining) : undefined;
+        const verdict = evaluateOrder(
+          { side: "BUY", symbol: order.symbol, desiredQuote: dec(order.amountUsd ?? 0) },
+          riskContext(frame, originBudget),
+          riskParams,
+        );
+        if (!verdict.allowed) {
+          reject(verdict.code);
+          continue;
+        }
+        const budget = toNumber(verdict.order.side === "BUY" ? verdict.order.maxQuoteSpend : "0");
+        const sim = simulateFill(
+          { side: "BUY", kind: "market", model, amountUsd: budget, candle: k, at: "open" },
+          config.feePct,
+          config.slippageBps,
+        );
+        if (!sim) {
+          reject("no_fill");
+          continue;
+        }
+        const atr = buffers[order.symbol]
+          ? computeAllSignals({ [order.symbol]: buffers[order.symbol] }, strategy, HOUR)[order.symbol].atr
+          : 0;
+        const stopPrice =
+          strategy.stopMode === "atr" && atr > 0
+            ? dec(sim.fillPrice - strategy.atrMult * atr)
+            : dec(sim.fillPrice * (1 - strategy.stopLossPct));
+        book(frame, order.symbol, "BUY", sim, order.kind, stopPrice);
+      }
+    }
+    pending = [];
+
+    // ── 3) Jelek és terv a MOSTANI, LEZÁRT gyertyából. ───────────────────────
     for (const sym of config.symbols) {
       const k = frame.candles[sym];
       if (!k) continue;
@@ -78,35 +294,40 @@ export function runBacktest(
       momentumOkBySymbol[sym] = sig.momentumOk;
     }
 
-    // Heti DCA-keret: dcaWeeklyBudgetPct * equity − az utolsó 7 nap BUY-jai.
+    const prices = priceMap(frame);
+    const totalEquity = toNumber(equityAt(ledger, prices, QUOTE));
+    if (Object.keys(ledger.positions).length > 0) hoursInMarket++;
+
     const weekAgo = frame.ts - 7 * 24 * HOUR;
     const spent7d = buyLog.filter((b) => b.ts > weekAgo).reduce((s, b) => s + b.amountUsd, 0);
     const weeklyRemaining = Math.max(0, strategy.dcaWeeklyBudgetPct * totalEquity - spent7d);
 
-    // 24h változás a close-okból (24 frame-mel korábbi close).
     const prevFrame = frames[fi - 24];
     const coinChanges = config.symbols.map((sym) => {
-      const now = closeAt(frame, sym);
-      const before = prevFrame ? closeAt(prevFrame, sym) : undefined;
-      const change24hPct = now && before ? ((now - before) / before) * 100 : 0;
-      return { symbol: sym, change24hPct };
+      const now = frame.candles[sym]?.close;
+      const before = prevFrame ? prevFrame.candles[sym]?.close : undefined;
+      return { symbol: sym, change24hPct: now && before ? ((now - before) / before) * 100 : 0 };
     });
 
-    // Candle-band a planhez.
+    // A polling modell a MEGFIGYELT árat látja: low=high=close (nem a gyertyán belüli szél).
     const candles: Record<string, { low: number; high: number; close: number }> = {};
     for (const sym of config.symbols) {
       const k = frame.candles[sym];
-      if (k) candles[sym] = { low: k.low, high: k.high, close: k.close };
+      if (!k) continue;
+      candles[sym] =
+        model === "exchange-stop"
+          ? { low: k.low, high: k.high, close: k.close }
+          : { low: k.close, high: k.close, close: k.close };
     }
 
     const plan = planProfitCycle(
       {
-        positions: positions.map((p) => ({
-          id: p.id,
+        positions: Object.values(ledger.positions).map((p) => ({
+          id: p.symbol,
           symbol: p.symbol,
-          qty: p.qty,
-          entryPrice: p.entryPrice,
-          stopPrice: p.stopPrice,
+          qty: toNumber(p.qty),
+          entryPrice: isPositive(p.qty) ? toNumber(div(p.costBasisQuote, p.qty)) : 0,
+          stopPrice: p.stopPrice ? toNumber(p.stopPrice) : 0,
         })),
         candles,
         fearGreedValue: frame.fearGreedValue,
@@ -120,86 +341,55 @@ export function runBacktest(
       strategy,
     );
 
-    // Stop-update-ek (trailing ratchet → következő gyertya stopja).
+    // Trailing ratchet: a stop a KÖVETKEZŐ gyertyára érvényes.
     for (const u of plan.stopUpdates) {
-      const pos = positions.find((p) => p.id === u.positionId);
-      if (pos) pos.stopPrice = u.newStop;
+      if (ledger.positions[u.positionId]) ledger = setStop(ledger, u.positionId, dec(u.newStop));
     }
 
-    // Orderek: SELL-ek előbb (a felszabaduló cash a DCA-nak), majd BUY-ok.
-    const sells = plan.orders.filter((o) => o.side === "SELL");
-    const buys = plan.orders.filter((o) => o.side === "BUY");
-    for (const o of [...sells, ...buys]) {
-      const k = frame.candles[o.symbol];
-      if (!k) continue;
-
-      if (o.side === "SELL") {
-        const pos = positions.find((p) => p.symbol === o.symbol);
-        if (!pos) continue;
-        const fill = simulateFill(
-          {
-            side: "SELL",
-            // momentum/dca = market-szerű BUY-kind; a SELL-ágba sosem jut, de a típus kedvéért market.
-            kind: o.kind === "dca" || o.kind === "momentum" ? "market" : o.kind,
-            qty: Math.min(o.qty ?? 0, pos.qty),
-            triggerPrice: o.triggerPrice,
-            candle: k,
-          },
-          config.feePct,
-          config.slippageBps,
-        );
-        if (!fill) continue;
-        cashUsd += fill.amountUsd - fill.feeUsd;
-        pos.qty -= fill.qty;
-        if (pos.qty <= 1e-7) {
-          closedTrades.push({
-            symbol: pos.symbol,
-            entryPrice: pos.entryPrice,
-            exitPrice: fill.fillPrice,
-            qty: fill.qty,
-            pnlUsd: (fill.fillPrice - pos.entryPrice) * fill.qty,
-            pnlPct: (fill.fillPrice - pos.entryPrice) / pos.entryPrice,
-          });
-          positions = positions.filter((p) => p !== pos);
-        }
-      } else {
-        // BUY (DCA) — clamp a cash-re.
-        const amountUsd = Math.min(o.amountUsd ?? 0, Math.max(0, cashUsd));
-        if (amountUsd <= 0) continue;
-        const fill = simulateFill({ side: "BUY", kind: "market", amountUsd, candle: k }, config.feePct, config.slippageBps);
-        if (!fill) continue;
-        cashUsd -= amountUsd;
-        buyLog.push({ ts: frame.ts, amountUsd });
-        const stopPrice = buyStopPrice(fill.fillPrice, atrBySymbol[o.symbol] ?? 0);
-        const ex = positions.find((p) => p.symbol === o.symbol);
-        if (ex) {
-          const newQty = ex.qty + fill.qty;
-          ex.entryPrice = (ex.qty * ex.entryPrice + fill.qty * fill.fillPrice) / newQty;
-          ex.qty = newQty;
-          ex.stopPrice = stopPrice;
-        } else {
-          positions.push({
-            id: String(nextId++),
-            symbol: o.symbol,
-            qty: fill.qty,
-            entryPrice: fill.fillPrice,
-            stopPrice,
-          });
-        }
-      }
+    // Az `exchange-stop` modellben a védőordert már az 1) lépés kezeli, ezért innen
+    // csak a NEM védelmi orderek kerülnek sorba. A `polling` modellben minden ide jön.
+    for (const o of plan.orders) {
+      const isProtection = o.kind === "stop-loss" || o.kind === "take-profit";
+      if (model === "exchange-stop" && isProtection) continue;
+      pending.push({
+        kind: o.kind,
+        side: o.side,
+        symbol: o.symbol,
+        qty: o.qty,
+        amountUsd: o.amountUsd,
+        triggerPrice: o.triggerPrice,
+      });
     }
+    // SELL-ek előbb: a felszabaduló készpénz a következő keretben a BUY-nak hasznosul.
+    pending.sort((a, b) => (a.side === b.side ? 0 : a.side === "SELL" ? -1 : 1));
 
-    // Policy = HOLD (MVP) — nincs AI-belépő (a tournament a kód-ciklust méri).
-
-    equity.push({ ts: frame.ts, equityUsd: equityNow(frame) });
+    equity.push({ ts: frame.ts, equityUsd: toNumber(equityAt(ledger, prices, QUOTE)) });
   }
 
+  const totalFeesUsd = realizations.reduce((s, r) => s + r.feeUsd, 0);
+  const samplingHours =
+    frames.length > 1 ? Math.max(1, Math.round((frames[1].ts - frames[0].ts) / HOUR)) : 1;
+
   return {
-    metrics: computeMetrics(equity, closedTrades, hoursInMarket),
+    metrics: computeMetrics(equity, realizations, hoursInMarket, { samplingHours, buyFeesUsd: buyFeeTotal(buyLog, config.feePct) + totalFeesUsd }),
     equityCurve: equity,
     closedTrades,
+    realizations,
     config,
     from: frames[0]?.ts ?? 0,
     to: frames[frames.length - 1]?.ts ?? 0,
+    rejections,
   };
 }
+
+/** A vételi díjak összege (a buyLog a díjjal együtti költést tárolja). */
+function buyFeeTotal(buyLog: { amountUsd: number }[], feePct: number): number {
+  return buyLog.reduce((s, b) => s + (b.amountUsd * feePct) / (1 + feePct), 0);
+}
+
+/** Segéd a paritás-teszthez: a backtest ledger-állapota a futás végén. */
+export function backtestFinalCash(result: BacktestResult): number {
+  return result.equityCurve.length > 0 ? result.equityCurve[result.equityCurve.length - 1].equityUsd : 0;
+}
+
+export { cashOf, positionQty };
