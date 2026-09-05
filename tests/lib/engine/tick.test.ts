@@ -399,4 +399,13 @@ describe("runTick — AI-intent és valós portfóliókontextus (T16)", () => {
     const result = await runTick({ tickId: "2026-06-25-23", paperMode: true });
     expect(result.llm).toBeNull();
   });
+
+  it("explicit AI-kikapcsolásnál phase-1 és phase-2 hívás sem történik", async () => {
+    setLedgerFixture(10000, []);
+    const result = await runTick({ tickId: "2026-06-25-shadow", paperMode: true, aiEnabled: false });
+    expect(shouldDecide).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
+    expect(result.llm).toBeNull();
+    expect(result.process.phase1.shouldDecide).toBe(false);
+  });
 });

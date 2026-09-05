@@ -15,7 +15,8 @@
     "audit:state": "tsx scripts/audit-state.ts",
     "migrate:ledger": "tsx scripts/migrate-paper-ledger.ts",
     "worker": "tsx scripts/worker.ts",
-    "worker:once": "tsx scripts/worker.ts --once exit"
+    "worker:once": "tsx scripts/worker.ts --once exit",
+    "shadow:paper": "tsx scripts/shadow-paper.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "0.9.1",

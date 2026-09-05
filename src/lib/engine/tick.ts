@@ -22,12 +22,12 @@ import { BinanceBroker, BinanceLegacyExecutionAdapter } from "@/lib/execution/bi
 import type { ExecutionBroker } from "@/lib/execution/broker";
 import type { Fill } from "@/lib/execution/contracts";
 import { COIN_UNIVERSE, RISK_LIMITS, RSS_SOURCES, REDDIT_SOURCES } from "@/lib/config";
-import { loadPortfolioState, applyTrade, setStopPrice } from "@/lib/portfolio/accounting";
+import { loadPortfolioState, applyTrade, setStopPrice, type PortfolioState } from "@/lib/portfolio/accounting";
 import { buildTickProcess } from "@/lib/engine/tick-process";
 import { getPerformanceSummary } from "@/lib/portfolio/evaluate";
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { planProfitCycle, computeAllSignals, type SymbolSignals } from "@/lib/engine/profit-cycle";
-import { DEFAULT_STRATEGY, STRATEGY_VERSION } from "@/lib/strategy/config";
+import { DEFAULT_STRATEGY, STRATEGY_VERSION, type StrategyConfig } from "@/lib/strategy/config";
 import { candlesFromDataPoints } from "@/lib/collectors/binance";
 import { TIMEFRAME_MS } from "@/lib/market/candles";
 import { executeIntent, type ExecuteIntentDeps, type IntentRequest } from "@/lib/engine/execute-intent";
@@ -64,6 +64,25 @@ import type { Decision, Trade, DataPoint, RawDecision } from "@/lib/types";
 export interface TickInput {
   tickId: string; // YYYY-MM-DD-HH
   paperMode: boolean;
+  /**
+   * Elkülönített paper futtatás explicit állapota. A v2 ledger a tartós igazságforrás;
+   * ez az első seedhez és a napi referenciahoz kell. Hiányában a normál portfolio
+   * betöltés marad érvényben.
+   */
+  portfolioState?: PortfolioState;
+  /** Jelölt stratégia. Hiányában a futó DEFAULT_STRATEGY. */
+  strategy?: StrategyConfig;
+  /** Naplózott stratégia-verzió; árnyékkísérletnél számlánként egyedi. */
+  strategyVersion?: string;
+  /** AI nélküli kontrollhoz és páros forward paper méréshez. Alap: engedélyezett. */
+  aiEnabled?: boolean;
+  /**
+   * A baseline által már felvett, változatlan bemenet. Így a jelöltek nem saját
+   * hálózati pillanatképet kapnak, hanem ugyanazt a quote-ot és collector-kimenetet.
+   */
+  replay?: { quoteSnapshot: QuoteSnapshot; events: DataPoint[]; collectorOutcomes: CollectorOutcome[] };
+  /** A régi dashboard-vetület csak a fő portfólióra írható. Alap: true normál ticknél. */
+  legacyProjection?: boolean;
 }
 
 /** Egy kód-alapú profit-ciklus akció (stop-loss / take-profit / DCA). */
@@ -131,6 +150,8 @@ export interface TickResult {
     signalCount: number;
     skipped: { symbol: string; reason: string }[];
   };
+  /** A páros paper jelölteknek átadható, változatlan piaci és collector-bemenet. */
+  replayInput: { quoteSnapshot: QuoteSnapshot; events: DataPoint[]; collectorOutcomes: CollectorOutcome[] };
 }
 
 /** Szimulált díj — egyezik a paper fill-modellel (0.1%). */
@@ -173,6 +194,9 @@ function fillToTrade(fill: Fill, origin: CycleAction["kind"] | "ai"): Trade {
  */
 export async function runTick(input: TickInput): Promise<TickResult> {
   const mode = input.paperMode ? "paper" : "live";
+  const strategy = input.strategy ?? DEFAULT_STRATEGY;
+  const strategyVersion = input.strategyVersion ?? STRATEGY_VERSION;
+  const legacyProjection = input.legacyProjection ?? input.portfolioState === undefined;
   /** Szakasz-időmérés (stage latency) — melyik lépés mennyi ideig tartott. */
   const stageMs: Record<string, number> = {};
   const stage = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
@@ -183,7 +207,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       stageMs[name] = Date.now() - t0;
     }
   };
-  const dbState = await loadPortfolioState();
+  const dbState = input.portfolioState ?? (await loadPortfolioState());
 
   // ── 1) Ledger. DB nélkül NINCS kereskedés. ────────────────────────────────
   //     Az igazságforrás a v2 ledger (ledger_cash + ledger_positions). Ha ez a hatókör
@@ -238,7 +262,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   // ── 2/a) VÉGREHAJTÁSI ÁR — külön, rövid időkorlátos úton, a hírgyűjtők ELŐTT.
   //     A kilépésnek friss ÁRRA kell várnia, nem RSS-re, sentimentre vagy LLM-re.
   const quoteSnapshot: QuoteSnapshot = await stage("quotes", () =>
-    fetchQuotes([...COIN_UNIVERSE], { now: () => Date.now() }),
+    input.replay ? Promise.resolve(input.replay.quoteSnapshot) : fetchQuotes([...COIN_UNIVERSE], { now: () => Date.now() }),
   );
   if (quoteSnapshot.degraded) {
     console.warn(
@@ -247,7 +271,11 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     );
   }
 
-  const collectResult = await stage("collectors", () => collectAllWithOutcomes(collectors));
+  const collectResult = await stage("collectors", () =>
+    input.replay
+      ? Promise.resolve({ points: input.replay.events, outcomes: input.replay.collectorOutcomes })
+      : collectAllWithOutcomes(collectors),
+  );
   const events = collectResult.points;
   const collectorOutcomes: CollectorOutcome[] = collectResult.outcomes;
   const llmEvents = events.filter((e) => e.source !== "binance");
@@ -282,7 +310,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
         portfolioId,
         mode,
         measurableEquity,
-        dec(RISK_LIMITS.dailyLossCircuitBreakerPct),
+        dec(strategy.dailyLossCircuitBreakerPct),
         Date.now(),
       )
     : {
@@ -332,7 +360,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   const makeDeps = (origin: IntentRequest["origin"]): ExecuteIntentDeps => ({
     portfolioId,
     mode,
-    strategyVersion: STRATEGY_VERSION,
+    strategyVersion,
     broker,
     getLedger: () => ledger,
     getRiskContext: () => ({
@@ -348,8 +376,8 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     }),
     riskParams: {
       ...DEFAULT_ORDER_RISK_PARAMS,
-      maxPositionPct: dec(RISK_LIMITS.maxPositionPct),
-      maxConcurrentPositions: RISK_LIMITS.maxConcurrentPositions,
+      maxPositionPct: dec(strategy.maxPositionPct),
+      maxConcurrentPositions: strategy.maxConcurrentPositions,
     },
     now: () => Date.now(),
     newIntentId: () => `${input.tickId}-${origin}-${++intentSeq}`,
@@ -376,10 +404,12 @@ export async function runTick(input: TickInput): Promise<TickResult> {
         const trade = fillToTrade(fill, origin === "ai" ? "ai" : (origin as CycleAction["kind"]));
         const stopPrice =
           fill.side === "BUY"
-            ? toNumber(mul(fill.fillPrice, dec(1 - RISK_LIMITS.stopLossPct)))
+            ? toNumber(mul(fill.fillPrice, dec(1 - strategy.stopLossPct)))
             : toNumber(fill.fillPrice);
-        const persisted = await applyTrade(trade, stopPrice);
-        if (persisted?.positionId) positionIdBySymbol[fill.symbol] = persisted.positionId;
+        if (legacyProjection) {
+          const persisted = await applyTrade(trade, stopPrice);
+          if (persisted?.positionId) positionIdBySymbol[fill.symbol] = persisted.positionId;
+        }
       } catch (e) {
         console.error("[tick] a v1 vetület írása nem sikerült (a v2 ledger már commitolt):", e);
       }
@@ -457,7 +487,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
         close: c.close,
       }));
     }
-    signalsBySymbol = computeAllSignals(candlesBySymbol, DEFAULT_STRATEGY, TIMEFRAME_MS["1h"]);
+    signalsBySymbol = computeAllSignals(candlesBySymbol, strategy, TIMEFRAME_MS["1h"]);
     const atrBySymbol: Record<string, number> = {};
     const trendOkBySymbol: Record<string, boolean> = {};
     const momentumOkBySymbol: Record<string, boolean> = {};
@@ -490,7 +520,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
         trendOkBySymbol,
         momentumOkBySymbol,
       },
-      DEFAULT_STRATEGY,
+      strategy,
     );
 
     // Trailing ratchet: a stop CSAK felfelé kúszik, és a rávásárlás sem viszi lejjebb.
@@ -503,7 +533,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       await persistStopPrice(scope, symbol, dec(u.newStop));
       // v1 vetület a régi olvasóknak.
       const dbId = positionIdBySymbol[symbol];
-      if (dbId) await setStopPrice(dbId, u.newStop);
+      if (legacyProjection && dbId) await setStopPrice(dbId, u.newStop);
     }
 
     // A SELL-ek ELŐBB (a felszabaduló cash a DCA-nak hasznosul).
@@ -559,7 +589,13 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   }
 
   // ── 5) Phase-1 / Phase-2 ──────────────────────────────────────────────────
-  const phase1 = await stage("phase1", () => shouldDecide(llmEvents));
+  // Árnyék/control futásban az AI teljesen ki van kapcsolva: még phase-1 hívás sem
+  // történhet, mert az külön bemenetet és külön költséget hozna minden számlára.
+  const phase1 = await stage("phase1", () =>
+    input.aiEnabled === false
+      ? Promise.resolve({ shouldDecide: false, summary: "AI explicit módon kikapcsolva ehhez a futáshoz." })
+      : shouldDecide(llmEvents),
+  );
 
   let phase2Snapshot: import("@/lib/engine/tick-process").TickProcess["phase2"] = null;
   /** Az LLM-hívás mérhető adatai (modell, prompt-verzió, token, késleltetés). */
@@ -573,7 +609,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     model: "phase1/glm-4-flash",
   };
 
-  if (phase1.shouldDecide) {
+  if (input.aiEnabled !== false && phase1.shouldDecide) {
     const performance = await getPerformanceSummary();
     const equityForAi = equityNow();
 
@@ -593,7 +629,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
           allowedSymbols: [...COIN_UNIVERSE],
           quoteAsset: "USDT",
         },
-        { ...DEFAULT_ORDER_RISK_PARAMS, maxPositionPct: dec(RISK_LIMITS.maxPositionPct) },
+        { ...DEFAULT_ORDER_RISK_PARAMS, maxPositionPct: dec(strategy.maxPositionPct) },
       );
       freeBuyBudgetUsd[sym] = toNumber(headroom);
     }
@@ -664,9 +700,9 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       allowedSymbols: [...COIN_UNIVERSE],
     }),
     {
-      maxPositionPct: RISK_LIMITS.maxPositionPct,
-      maxConcurrentPositions: RISK_LIMITS.maxConcurrentPositions,
-      dailyLossCircuitBreakerPct: RISK_LIMITS.dailyLossCircuitBreakerPct,
+      maxPositionPct: strategy.maxPositionPct,
+      maxConcurrentPositions: strategy.maxConcurrentPositions,
+      dailyLossCircuitBreakerPct: strategy.dailyLossCircuitBreakerPct,
     },
   );
 
@@ -808,5 +844,6 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       signalCount: mlSignals.length,
       skipped: featureResult.skipped,
     },
+    replayInput: { quoteSnapshot, events, collectorOutcomes },
   };
 }
