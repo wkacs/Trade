@@ -222,3 +222,59 @@ describe("executeIntent — minden order a közös kapun át", () => {
     expect(r.intent.expiresAt).toBeGreaterThan(NOW);
   });
 });
+
+describe("executeIntent — tranzakciós perzisztencia (T09)", () => {
+  it("a strukturált perzisztencia-hiba felszínre jön, nem lesz belőle hamis siker", async () => {
+    const h = harness("100");
+    h.deps.persist = vi.fn().mockRejectedValue(
+      Object.assign(new Error("apply_fill_v2 failed"), { code: "write_failed" }),
+    );
+    await expect(
+      executeIntent({ side: "BUY", symbol: "BTC", desiredQuote: "10", origin: "ai", referencePrice: "60000" }, h.deps),
+    ).rejects.toThrow(/apply_fill_v2 failed/);
+  });
+
+  it("a foglalás a BUY összegére szól, és a broker csak utána kap ordert", async () => {
+    const order: string[] = [];
+    const submit = vi.fn(async () => {
+      order.push("submit");
+      return { exchangeOrderId: "x", clientOrderId: "c", state: "rejected" as const, fills: [], error: { code: "e", message: "m" } };
+    });
+    const h = harness("100", {}, {}, { submit, lookup: vi.fn() });
+    h.deps.reserve = vi.fn(async (_intent, quote) => {
+      order.push(`reserve:${quote}`);
+      return true;
+    });
+    await h.run({ side: "BUY", symbol: "BTC", desiredQuote: "50", origin: "ai", referencePrice: "60000" });
+    expect(order).toEqual(["reserve:20", "submit"]);
+  });
+
+  it("SELL-nél nincs quote-foglalás (a készpénz nem játszik)", async () => {
+    const h = harness("0", { BTC: { qty: "0.001", cost: "60" } });
+    const reserve = vi.fn(async () => true);
+    h.deps.reserve = reserve;
+    await h.run({ side: "SELL", symbol: "BTC", baseQty: "0.001", origin: "stop-loss", referencePrice: "60000" });
+    expect(reserve).toHaveBeenCalledWith(expect.anything(), "0");
+  });
+
+  it("az intent-napló a beküldés kimenetelét is megkapja", async () => {
+    const recordIntent = vi.fn(async () => undefined);
+    const h = harness("100");
+    h.deps.recordIntent = recordIntent;
+    await h.run({ side: "BUY", symbol: "BTC", desiredQuote: "10", origin: "ai", referencePrice: "60000" });
+    expect(recordIntent).toHaveBeenCalledTimes(1);
+    const [, receipt] = recordIntent.mock.calls[0] as unknown[];
+    expect((receipt as { state: string }).state).toBe("filled");
+  });
+
+  it("ismeretlen kimenetelnél a napló receipt nélkül fut le (egyeztetés következik)", async () => {
+    const recordIntent = vi.fn(async () => undefined);
+    const broker = { submit: vi.fn().mockRejectedValue(new Error("timeout")), lookup: vi.fn() };
+    const h = harness("100", {}, {}, broker);
+    h.deps.recordIntent = recordIntent;
+    const r = await h.run({ side: "BUY", symbol: "BTC", desiredQuote: "10", origin: "ai", referencePrice: "60000" });
+    expect(r.status).toBe("unknown");
+    const [, receipt] = recordIntent.mock.calls[0] as unknown[];
+    expect(receipt).toBeNull();
+  });
+});

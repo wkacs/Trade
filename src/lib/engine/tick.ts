@@ -27,6 +27,18 @@ import { passesTrendFilter } from "@/lib/strategy/entry-filter";
 import { passesMomentum } from "@/lib/strategy/momentum";
 import { executeIntent, type ExecuteIntentDeps, type IntentRequest } from "@/lib/engine/execute-intent";
 import {
+  loadLedgerState,
+  hasLedgerState,
+  loadReservations,
+  reserveBudget,
+  releaseReservation,
+  recordIntent,
+  persistFill,
+  persistStopPrice,
+  seedLedger,
+  expireStaleReservations,
+} from "@/lib/execution/order-store";
+import {
   emptyLedger,
   cashOf,
   equityAt,
@@ -132,24 +144,39 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   const mode = input.paperMode ? "paper" : "live";
   const dbState = await loadPortfolioState();
 
-  // ── 1) Ledger a DB-állapotból. DB nélkül NINCS kereskedés. ─────────────────
+  // ── 1) Ledger. DB nélkül NINCS kereskedés. ────────────────────────────────
+  //     Az igazságforrás a v2 ledger (ledger_cash + ledger_positions). Ha ez a hatókör
+  //     még üres, EGYSZER feltöltjük a v1 portfólió-állapotból; a teljes, jelentéssel
+  //     kísért migráció a T11.
   const portfolioId = dbState?.portfolioId ?? "no-portfolio";
-  let ledger: LedgerState = emptyLedger(portfolioId, mode, dec(dbState?.cashUsd ?? 0));
-  /** A v1 positions sorok id-ja symbolonként — a stop perzisztálásához kell. */
+  const scope = { portfolioId, mode } as const;
+  let ledger: LedgerState = emptyLedger(portfolioId, mode, ZERO);
+  /** A v1 positions sorok id-ja symbolonként — a régi olvasók vetületéhez kell. */
   const positionIdBySymbol: Record<string, string> = {};
+  const tradingEnabled = dbState !== null;
+
   if (dbState) {
     for (const p of dbState.positions) {
-      if (!(p.qty > 0)) continue;
-      positionIdBySymbol[p.symbol] = p.id;
-      ledger.positions[p.symbol] = {
-        symbol: p.symbol,
-        qty: dec(p.qty),
-        costBasisQuote: mul(dec(p.qty), dec(p.entryPrice)),
-        stopPrice: p.stopPrice > 0 ? dec(p.stopPrice) : null,
-      };
+      if (p.qty > 0) positionIdBySymbol[p.symbol] = p.id;
     }
+    if (!(await hasLedgerState(scope))) {
+      await seedLedger(
+        scope,
+        dec(dbState.cashUsd),
+        dbState.positions
+          .filter((p) => p.qty > 0)
+          .map((p) => ({
+            symbol: p.symbol,
+            qty: dec(p.qty),
+            costBasisQuote: mul(dec(p.qty), dec(p.entryPrice)),
+            stopPrice: p.stopPrice > 0 ? dec(p.stopPrice) : null,
+          })),
+      );
+      console.warn("[tick] a v2 ledger üres volt — feltöltve a v1 portfólió-állapotból (T11 elvégzi a teljes migrációt).");
+    }
+    ledger = await loadLedgerState(scope);
+    await expireStaleReservations(scope);
   }
-  const tradingEnabled = dbState !== null;
 
   // ── 2) Collectors ─────────────────────────────────────────────────────────
   const collectors: DataCollector[] = [
@@ -228,6 +255,9 @@ export async function runTick(input: TickInput): Promise<TickResult> {
         RISK_LIMITS.stopLossPct,
       );
 
+  // Az aktív foglalások: két párhuzamos futó nem költheti el ugyanazt a keretet.
+  const reservations = tradingEnabled ? await loadReservations(scope) : { bySymbol: {}, total: ZERO };
+
   let weeklyRemaining: Dec | undefined;
   let intentSeq = 0;
 
@@ -240,8 +270,8 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     getRiskContext: () => ({
       ledger,
       prices: pricesDec,
-      reservedQuoteBySymbol: {},
-      reservedQuoteTotal: ZERO,
+      reservedQuoteBySymbol: reservations.bySymbol,
+      reservedQuoteTotal: reservations.total,
       originBudgetQuote: originBudgetFor(origin, { weeklyDcaRemaining: weeklyRemaining }),
       dailyLossLatched: dayGate.latched,
       dayBaselineMissing: dayGate.dayPnlPct === null,
@@ -255,14 +285,36 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     },
     now: () => Date.now(),
     newIntentId: () => `${input.tickId}-${origin}-${++intentSeq}`,
-    // Perzisztencia: a v1 trades/positions táblákba. A tranzakciós v2 út a T09-ben jön.
-    persist: async (_intent, fill) => {
+    // Keretfoglalás a beküldés ELŐTT. A fedezet-ellenőrzést a SZERVER végzi, ezért két
+    // egyidejű BUY sem lépheti át ugyanazt a keretet.
+    reserve: async (intent, quote) => {
+      if (!dbState) return false;
+      return reserveBudget(intent, quote, cashOf(ledger, "USDT"));
+    },
+    releaseReservation: async (intent) => {
+      if (dbState) await releaseReservation(intent.intentId);
+    },
+    recordIntent: async (intent, receipt) => {
+      if (dbState) await recordIntent(intent, receipt);
+    },
+    // EGY tranzakciós út: fill + cash + pozíció + foglalás együtt commitol vagy bukik.
+    // Hiba esetén DOB — nincs log-és-továbbmegy hamis siker (audit A. szakasz).
+    persist: async (intent, fill, deltas) => {
       if (!dbState) return;
-      const trade = fillToTrade(fill, origin === "ai" ? "ai" : (origin as CycleAction["kind"]));
-      const stopPrice =
-        fill.side === "BUY" ? toNumber(mul(fill.fillPrice, dec(1 - RISK_LIMITS.stopLossPct))) : toNumber(fill.fillPrice);
-      const persisted = await applyTrade(trade, stopPrice);
-      if (persisted?.positionId) positionIdBySymbol[fill.symbol] = persisted.positionId;
+      await persistFill(intent, fill, deltas);
+      // A v1 táblák innentől CSAK VETÜLET a régi dashboard-olvasóknak (a T23 vezeti ki).
+      // A hibája nem buktatja a ticket, mert nem igazságforrás — de hangosan látszik.
+      try {
+        const trade = fillToTrade(fill, origin === "ai" ? "ai" : (origin as CycleAction["kind"]));
+        const stopPrice =
+          fill.side === "BUY"
+            ? toNumber(mul(fill.fillPrice, dec(1 - RISK_LIMITS.stopLossPct)))
+            : toNumber(fill.fillPrice);
+        const persisted = await applyTrade(trade, stopPrice);
+        if (persisted?.positionId) positionIdBySymbol[fill.symbol] = persisted.positionId;
+      } catch (e) {
+        console.error("[tick] a v1 vetület írása nem sikerült (a v2 ledger már commitolt):", e);
+      }
     },
   });
 
@@ -360,6 +412,8 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       )?.symbol;
       if (!symbol) continue;
       ledger = setStop(ledger, symbol, dec(u.newStop));
+      await persistStopPrice(scope, symbol, dec(u.newStop));
+      // v1 vetület a régi olvasóknak.
       const dbId = positionIdBySymbol[symbol];
       if (dbId) await setStopPrice(dbId, u.newStop);
     }

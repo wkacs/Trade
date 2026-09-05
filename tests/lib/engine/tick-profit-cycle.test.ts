@@ -25,6 +25,20 @@ vi.mock("@/lib/portfolio/evaluate", () => ({
   evaluatePending: vi.fn().mockResolvedValue({ evaluated: 0 }),
 }));
 vi.mock("@/lib/strategy/weekly-budget", () => ({ remainingWeeklyBudget: vi.fn() }));
+// A tartós végrehajtási állapot (T09) mockolása: a tick a v2 ledgert az order-store-ból
+// olvassa és oda ír. DB nélküli unit-tesztben ezt injektáljuk.
+vi.mock("@/lib/execution/order-store", () => ({
+  hasLedgerState: vi.fn(async () => true),
+  loadLedgerState: vi.fn(async () => mockLedgerFixture),
+  loadReservations: vi.fn(async () => ({ bySymbol: {}, total: "0" })),
+  reserveBudget: vi.fn(async () => true),
+  releaseReservation: vi.fn(async () => undefined),
+  recordIntent: vi.fn(async () => undefined),
+  persistFill: vi.fn(async () => ({ applied: true })),
+  persistStopPrice: vi.fn(async () => true),
+  seedLedger: vi.fn(async () => undefined),
+  expireStaleReservations: vi.fn(async () => 0),
+}));
 
 import { collectAll } from "@/lib/collectors/base";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
@@ -34,6 +48,31 @@ import { loadPortfolioState, applyTrade, setStopPrice } from "@/lib/portfolio/ac
 import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { runTick } from "@/lib/engine/tick";
 import type { DataPoint } from "@/lib/types";
+
+/** A v2 ledger pillanatképe, amit a mockolt order-store visszaad. */
+let mockLedgerFixture: any = { portfolioId: "pf-test", mode: "paper", cash: { USDT: "0" }, positions: {}, appliedFillKeys: [], realizedPnlQuote: "0" };
+
+/** A mockolt ledger beállítása a v1-stílusú teszt-állapotból. */
+function setLedgerFixture(cashUsd: number, positions: { symbol: string; qty: number; entryPrice: number; stopPrice: number }[]) {
+  mockLedgerFixture = {
+    portfolioId: "pf-test",
+    mode: "paper",
+    cash: { USDT: String(cashUsd) },
+    positions: Object.fromEntries(
+      positions.map((p) => [
+        p.symbol,
+        {
+          symbol: p.symbol,
+          qty: String(p.qty),
+          costBasisQuote: String(p.qty * p.entryPrice),
+          stopPrice: p.stopPrice > 0 ? String(p.stopPrice) : null,
+        },
+      ]),
+    ),
+    appliedFillKeys: [],
+    realizedPnlQuote: "0",
+  };
+}
 
 const price = (symbol: string, usd: number, change24hPct = 0): DataPoint => ({
   source: "coingecko",
@@ -51,14 +90,18 @@ const fearGreed = (value: number): DataPoint => ({
   sentiment: { value, classification: value <= 25 ? "Extreme Fear" : "Greed" },
 });
 
-const stateWith = (positions: any[], cashUsd = 1000, initialCapitalUsd = 1000) => ({
-  portfolioId: "pf-test",
-  cashUsd,
-  initialCapitalUsd,
-  positions,
-  totalEquity: () => cashUsd + positions.reduce((s, p) => s + p.valueUsd, 0),
-  dayPnlPct: 0,
-});
+const stateWith = (positions: any[], cashUsd = 1000, initialCapitalUsd = 1000) => {
+  // A mockolt order-store ugyanezt az állapotot adja vissza v2 ledgerként.
+  setLedgerFixture(cashUsd, positions);
+  return {
+    portfolioId: "pf-test",
+    cashUsd,
+    initialCapitalUsd,
+    positions,
+    totalEquity: () => cashUsd + positions.reduce((s: number, p: any) => s + p.valueUsd, 0),
+    dayPnlPct: 0,
+  };
+};
 
 describe("runTick — profit-ciklus (stop-loss + take-profit + DCA)", () => {
   beforeEach(() => {

@@ -26,6 +26,20 @@ vi.mock("@/lib/portfolio/evaluate", () => ({
   getPerformanceSummary: vi.fn().mockResolvedValue({ evaluated: 0, actionable: 0, hitRate: null, avgHypotheticalPnlPct: 0 }),
   evaluatePending: vi.fn().mockResolvedValue({ evaluated: 0 }),
 }));
+// A tartós végrehajtási állapot (T09) mockolása: a tick a v2 ledgert az order-store-ból
+// olvassa és oda ír. DB nélküli unit-tesztben ezt injektáljuk.
+vi.mock("@/lib/execution/order-store", () => ({
+  hasLedgerState: vi.fn(async () => true),
+  loadLedgerState: vi.fn(async () => mockLedgerFixture),
+  loadReservations: vi.fn(async () => ({ bySymbol: {}, total: "0" })),
+  reserveBudget: vi.fn(async () => true),
+  releaseReservation: vi.fn(async () => undefined),
+  recordIntent: vi.fn(async () => undefined),
+  persistFill: vi.fn(async () => ({ applied: true })),
+  persistStopPrice: vi.fn(async () => true),
+  seedLedger: vi.fn(async () => undefined),
+  expireStaleReservations: vi.fn(async () => 0),
+}));
 
 import { collectAll } from "@/lib/collectors/base";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
@@ -34,6 +48,31 @@ import { predict } from "@/lib/ml/predictor";
 import { loadPortfolioState } from "@/lib/portfolio/accounting";
 import { runTick } from "@/lib/engine/tick";
 import type { DataPoint } from "@/lib/types";
+
+/** A v2 ledger pillanatképe, amit a mockolt order-store visszaad. */
+let mockLedgerFixture: any = { portfolioId: "pf-test", mode: "paper", cash: { USDT: "0" }, positions: {}, appliedFillKeys: [], realizedPnlQuote: "0" };
+
+/** A mockolt ledger beállítása a v1-stílusú teszt-állapotból. */
+function setLedgerFixture(cashUsd: number, positions: { symbol: string; qty: number; entryPrice: number; stopPrice: number }[]) {
+  mockLedgerFixture = {
+    portfolioId: "pf-test",
+    mode: "paper",
+    cash: { USDT: String(cashUsd) },
+    positions: Object.fromEntries(
+      positions.map((p) => [
+        p.symbol,
+        {
+          symbol: p.symbol,
+          qty: String(p.qty),
+          costBasisQuote: String(p.qty * p.entryPrice),
+          stopPrice: p.stopPrice > 0 ? String(p.stopPrice) : null,
+        },
+      ]),
+    ),
+    appliedFillKeys: [],
+    realizedPnlQuote: "0",
+  };
+}
 
 const priceEvent = (symbol: string, usd: number): DataPoint => ({
   source: "coingecko",
@@ -48,6 +87,7 @@ describe("runTick — teljes döntési ciklus", () => {
     vi.stubEnv("TRADING_MODE", "paper");
     (collectAll as any).mockResolvedValue([priceEvent("BTC", 60000)]);
     (predict as any).mockResolvedValue([]);
+    setLedgerFixture(10000, []);
     (loadPortfolioState as any).mockResolvedValue({
       portfolioId: "pf-test",
       cashUsd: 10000,
