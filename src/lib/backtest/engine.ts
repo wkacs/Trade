@@ -5,6 +5,7 @@ import type {
   EquityPoint,
   ClosedTradePnl,
   RealizationEvent,
+  EntryEvent,
   ExecutionModel,
 } from "./types";
 import { planProfitCycle, computeAllSignals } from "@/lib/engine/profit-cycle";
@@ -36,6 +37,27 @@ interface PendingOrder {
   qty?: number;
   amountUsd?: number;
   triggerPrice?: number;
+}
+
+/**
+ * Lebegőpontos szám → `Dec` a backteszt határán.
+ *
+ * A szimulátor `number`-ekkel dolgozik, és egy osztás eredménye simán lehet 19+
+ * tizedesjegy (pl. 0.0015675382806377555). A `dec()` ilyet — helyesen — elutasít, mert
+ * a könyvelés 18 tizedes fixpontos. A backteszt tehát ITT vág, a könyvelés ELŐTT, hogy
+ * a hiba ne egy futás közepén, kiszámíthatatlan helyen dobjon.
+ *
+ * A vágás CSONKOLÁS (nem kerekítés): a 18. tizedes utáni maradékot eldobjuk, tehát
+ * soha nem könyvelünk többet, mint amennyi ténylegesen van.
+ */
+function decFloat(n: number): Dec {
+  if (!Number.isFinite(n)) throw new Error(`decFloat: nem véges szám (${n})`);
+  const sign = n < 0 ? "-" : "";
+  const abs = Math.abs(n);
+  // 20 tizedesre írjuk ki, majd 18-ra CSONKOLUNK — a toFixed(18) kerekítene.
+  const [intPart, frac = ""] = abs.toFixed(20).split(".");
+  const truncated = frac.slice(0, 18).replace(/0+$/, "");
+  return dec(truncated ? `${sign}${intPart}.${truncated}` : `${sign}${intPart}`);
 }
 
 /**
@@ -71,6 +93,7 @@ export function runBacktest(
   let ledger: LedgerState = emptyLedger(PORTFOLIO_ID, "paper", dec(config.initialCapitalUsd), QUOTE);
   const equity: EquityPoint[] = [];
   const realizations: RealizationEvent[] = [];
+  const entries: EntryEvent[] = [];
   const closedTrades: ClosedTradePnl[] = [];
   const rejections: Record<string, number> = {};
   const buyLog: { ts: number; amountUsd: number }[] = []; // gördülő heti keret
@@ -84,7 +107,7 @@ export function runBacktest(
     const out: Record<string, Dec> = {};
     for (const sym of config.symbols) {
       const k = frame.candles[sym];
-      if (k) out[sym] = dec(k.close);
+      if (k) out[sym] = decFloat(k.close);
     }
     return out;
   };
@@ -120,10 +143,10 @@ export function runBacktest(
       side,
       exchangeOrderId: orderId,
       exchangeTradeId: "1",
-      filledBaseQty: dec(sim.qty),
-      grossQuoteAmount: dec(sim.amountUsd),
-      fillPrice: dec(sim.fillPrice),
-      feeAmount: dec(sim.feeUsd),
+      filledBaseQty: decFloat(sim.qty),
+      grossQuoteAmount: decFloat(sim.amountUsd),
+      fillPrice: decFloat(sim.fillPrice),
+      feeAmount: decFloat(sim.feeUsd),
       feeAsset: QUOTE,
       executedAt: frame.ts,
     };
@@ -141,7 +164,7 @@ export function runBacktest(
     if (side === "SELL") {
       const closes = !ledger.positions[symbol];
       const costBasisUsed = isPositive(qtyBefore)
-        ? toNumber(mul(costBasisBefore, div(dec(sim.qty), qtyBefore)))
+        ? toNumber(mul(costBasisBefore, div(decFloat(sim.qty), qtyBefore)))
         : 0;
       realizations.push({
         ts: frame.ts,
@@ -167,6 +190,15 @@ export function runBacktest(
       }
     } else {
       buyLog.push({ ts: frame.ts, amountUsd: sim.amountUsd + sim.feeUsd });
+      entries.push({
+        ts: frame.ts,
+        symbol,
+        qty: sim.qty,
+        fillPrice: sim.fillPrice,
+        amountUsd: sim.amountUsd,
+        feeUsd: sim.feeUsd,
+        kind: kind === "dca" || kind === "momentum" ? kind : "ai",
+      });
     }
     return true;
   };
@@ -214,7 +246,7 @@ export function runBacktest(
       }
       if (order.side === "SELL") {
         const verdict = evaluateOrder(
-          { side: "SELL", symbol: order.symbol, baseQty: dec(order.qty ?? 0) },
+          { side: "SELL", symbol: order.symbol, baseQty: decFloat(order.qty ?? 0) },
           riskContext(frame),
           riskParams,
         );
@@ -244,9 +276,9 @@ export function runBacktest(
           0,
           strategy.dcaWeeklyBudgetPct * toNumber(equityAt(ledger, priceMap(frame), QUOTE)) - spent7d,
         );
-        const originBudget = order.kind === "dca" ? dec(weeklyRemaining) : undefined;
+        const originBudget = order.kind === "dca" ? decFloat(weeklyRemaining) : undefined;
         const verdict = evaluateOrder(
-          { side: "BUY", symbol: order.symbol, desiredQuote: dec(order.amountUsd ?? 0) },
+          { side: "BUY", symbol: order.symbol, desiredQuote: decFloat(order.amountUsd ?? 0) },
           riskContext(frame, originBudget),
           riskParams,
         );
@@ -269,8 +301,8 @@ export function runBacktest(
           : 0;
         const stopPrice =
           strategy.stopMode === "atr" && atr > 0
-            ? dec(sim.fillPrice - strategy.atrMult * atr)
-            : dec(sim.fillPrice * (1 - strategy.stopLossPct));
+            ? decFloat(sim.fillPrice - strategy.atrMult * atr)
+            : decFloat(sim.fillPrice * (1 - strategy.stopLossPct));
         book(frame, order.symbol, "BUY", sim, order.kind, stopPrice);
       }
     }
@@ -343,7 +375,7 @@ export function runBacktest(
 
     // Trailing ratchet: a stop a KÖVETKEZŐ gyertyára érvényes.
     for (const u of plan.stopUpdates) {
-      if (ledger.positions[u.positionId]) ledger = setStop(ledger, u.positionId, dec(u.newStop));
+      if (ledger.positions[u.positionId]) ledger = setStop(ledger, u.positionId, decFloat(u.newStop));
     }
 
     // Az `exchange-stop` modellben a védőordert már az 1) lépés kezeli, ezért innen
@@ -375,6 +407,7 @@ export function runBacktest(
     equityCurve: equity,
     closedTrades,
     realizations,
+    entries,
     config,
     from: frames[0]?.ts ?? 0,
     to: frames[frames.length - 1]?.ts ?? 0,

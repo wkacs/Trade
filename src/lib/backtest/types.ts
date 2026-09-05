@@ -63,6 +63,20 @@ export interface RealizationEvent {
   kind: "stop-loss" | "take-profit" | "market";
 }
 
+/**
+ * Egy BELÉPÉS (BUY teljesülés). A kilépési ütem izolált vizsgálatához (T30) kell:
+ * csak akkor hasonlítható össze két kilépési sűrűség, ha a belépések AZONOSAK.
+ */
+export interface EntryEvent {
+  ts: number;
+  symbol: string;
+  qty: number;
+  fillPrice: number;
+  amountUsd: number;
+  feeUsd: number;
+  kind: "dca" | "momentum" | "ai";
+}
+
 export interface BacktestMetrics {
   totalReturnPct: number;
   /** Annualizált Sharpe a TÉNYLEGES mintavételi közhöz igazítva. */
@@ -91,6 +105,8 @@ export interface BacktestResult {
   closedTrades: ClosedTradePnl[];
   /** MINDEN realizálás, a részlegesek is (T18). */
   realizations: RealizationEvent[];
+  /** MINDEN belépés — a kilépési ütem izolált vizsgálatához (T30). */
+  entries: EntryEvent[];
   config: BacktestConfig;
   from: number;
   to: number;

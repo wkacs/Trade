@@ -21,6 +21,7 @@ const res = (sharpe: number, trades: number, ret = 0): BacktestResult => ({
   equityCurve: [],
   closedTrades: [],
   realizations: [],
+  entries: [],
   rejections: {},
   config: { symbols: [], initialCapitalUsd: 0, feePct: 0, slippageBps: 0 },
   from: 0,
