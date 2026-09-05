@@ -111,7 +111,7 @@ export async function executeScheduledTick(options: ScheduledTickOptions = {}): 
   if (unsettled > 0) {
     // Nem küldünk új azonosítójú ordert egy ismeretlen kimenetelű megbízás mellé.
     await releaseLease(key, owner);
-    await pingHeartbeat(false);
+    await pingHeartbeat(false, { errorCode: "unsettled_intents" });
     return {
       ok: false,
       tickId,
@@ -174,7 +174,9 @@ export async function executeScheduledTick(options: ScheduledTickOptions = {}): 
       }
     }
 
-    await pingHeartbeat(persisted);
+    // T23: sikeres heartbeat CSAK sikeres könyvelés mellett. Azonos hiba nem ismétlődik
+    // minden tickben — a heartbeat modul deduplikál.
+    await pingHeartbeat(persisted, { errorCode: persisted ? null : "persist_failed" });
     return {
       ok: persisted,
       tickId,
@@ -190,7 +192,7 @@ export async function executeScheduledTick(options: ScheduledTickOptions = {}): 
     console.error("[scheduled-tick] ciklus hiba:", e);
     // Hibánál elengedjük a lease-t, hogy egy újrapróbálás még dolgozhasson ebben a sávban.
     await releaseLease(key, owner);
-    await pingHeartbeat(false);
+    await pingHeartbeat(false, { errorCode: "cycle_error" });
     return { ok: false, tickId, error: String(e), lease: { key, owner, fencingToken: lease.fencingToken } };
   }
 }

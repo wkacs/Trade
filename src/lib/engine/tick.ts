@@ -173,6 +173,16 @@ function fillToTrade(fill: Fill, origin: CycleAction["kind"] | "ai"): Trade {
  */
 export async function runTick(input: TickInput): Promise<TickResult> {
   const mode = input.paperMode ? "paper" : "live";
+  /** Szakasz-időmérés (stage latency) — melyik lépés mennyi ideig tartott. */
+  const stageMs: Record<string, number> = {};
+  const stage = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+    const t0 = Date.now();
+    try {
+      return await fn();
+    } finally {
+      stageMs[name] = Date.now() - t0;
+    }
+  };
   const dbState = await loadPortfolioState();
 
   // ── 1) Ledger. DB nélkül NINCS kereskedés. ────────────────────────────────
@@ -227,7 +237,9 @@ export async function runTick(input: TickInput): Promise<TickResult> {
 
   // ── 2/a) VÉGREHAJTÁSI ÁR — külön, rövid időkorlátos úton, a hírgyűjtők ELŐTT.
   //     A kilépésnek friss ÁRRA kell várnia, nem RSS-re, sentimentre vagy LLM-re.
-  const quoteSnapshot: QuoteSnapshot = await fetchQuotes([...COIN_UNIVERSE], { now: () => Date.now() });
+  const quoteSnapshot: QuoteSnapshot = await stage("quotes", () =>
+    fetchQuotes([...COIN_UNIVERSE], { now: () => Date.now() }),
+  );
   if (quoteSnapshot.degraded) {
     console.warn(
       `[tick] quote-adat HIÁNYOS vagy elavult (max kor ${quoteSnapshot.maxAgeMs} ms): ` +
@@ -235,7 +247,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     );
   }
 
-  const collectResult = await collectAllWithOutcomes(collectors);
+  const collectResult = await stage("collectors", () => collectAllWithOutcomes(collectors));
   const events = collectResult.points;
   const collectorOutcomes: CollectorOutcome[] = collectResult.outcomes;
   const llmEvents = events.filter((e) => e.source !== "binance");
@@ -547,7 +559,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   }
 
   // ── 5) Phase-1 / Phase-2 ──────────────────────────────────────────────────
-  const phase1 = await shouldDecide(llmEvents);
+  const phase1 = await stage("phase1", () => shouldDecide(llmEvents));
 
   let phase2Snapshot: import("@/lib/engine/tick-process").TickProcess["phase2"] = null;
   /** Az LLM-hívás mérhető adatai (modell, prompt-verzió, token, késleltetés). */
@@ -688,6 +700,47 @@ export async function runTick(input: TickInput): Promise<TickResult> {
 
   const fgForProcess = events.find((e) => e.kind === "sentiment" && e.sentiment)?.sentiment ?? null;
   const tickProcess = buildTickProcess({
+    // T23: a health blokk mondja meg, MIÉRT nem történt semmi. A hiányzó adat null, nem 0.
+    health: {
+      tradingEnabled,
+      blockedReason: tradingEnabled ? (dayGate.blockNewBuys ? dayGate.reason : null) : "Nincs hiteles portfólió-állapot.",
+      quoteAgeMs: Object.keys(quoteSnapshot.quotes).length > 0 ? quoteSnapshot.maxAgeMs : null,
+      quotesDegraded: quoteSnapshot.degraded,
+      staleSkips,
+      collectors: collectorOutcomes.map((o) => ({
+        name: o.name,
+        ok: o.ok,
+        points: o.points,
+        durationMs: o.durationMs,
+      })),
+      signals: Object.fromEntries(
+        Object.entries(signalsBySymbol).map(([sym, sig]) => [
+          sym,
+          { bars: sig.bars, requiredBars: sig.requiredBars, sufficient: sig.sufficient },
+        ]),
+      ),
+      ml: {
+        usable: prediction.status.usable,
+        detail: prediction.status.usable ? null : prediction.status.detail,
+        signalCount: mlSignals.length,
+      },
+      dayGate: {
+        source: dayGate.row.source,
+        dayPnlPct: dayGate.dayPnlPct,
+        latched: dayGate.latched,
+        blockNewBuys: dayGate.blockNewBuys,
+      },
+      llm: llmUsage
+        ? {
+            model: llmUsage.model,
+            promptVersion: llmUsage.promptVersion,
+            latencyMs: llmUsage.latencyMs,
+            totalTokens: llmUsage.totalTokens,
+            failed: llmUsage.failed,
+          }
+        : null,
+      stageMs,
+    },
     tickId: input.tickId,
     prices,
     fearGreed: fgForProcess ? { value: fgForProcess.value, classification: fgForProcess.classification } : null,

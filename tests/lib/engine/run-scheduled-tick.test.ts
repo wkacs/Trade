@@ -103,7 +103,7 @@ describe("executeScheduledTick — lease és kizárás", () => {
     expect(r.unsettledIntents).toBe(1);
     expect(runTick).not.toHaveBeenCalled();
     expect(releaseLease).toHaveBeenCalled();
-    expect(pingHeartbeat).toHaveBeenCalledWith(false);
+    expect(pingHeartbeat).toHaveBeenCalledWith(false, expect.objectContaining({ errorCode: expect.any(String) }));
   });
 
   it("ha MÁS tartja a lease-t, kihagyjuk a futást", async () => {
@@ -128,7 +128,7 @@ describe("executeScheduledTick — lease és kizárás", () => {
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/boom/);
     expect(releaseLease).toHaveBeenCalled();
-    expect(pingHeartbeat).toHaveBeenCalledWith(false);
+    expect(pingHeartbeat).toHaveBeenCalledWith(false, expect.objectContaining({ errorCode: expect.any(String) }));
   });
 
   it("sikeres futás után a lease BENT MARAD (tartós claim az idősávra)", async () => {
