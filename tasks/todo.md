@@ -281,7 +281,7 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 
 ### T28 — Futtatási és átállási dokumentáció
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T11, T22, T23. Méret: M.
 - Fájlok: `docs/worker-runbook.md`, `.env.example`, `.github/workflows/tick.yml`, `vercel.json`, `README.md`.
 - Elfogadás: helyi worker és választott környezet pontos parancsai, restart/health/rollback; egy aktív scheduler, cron+worker együtt sem dupláz; README a tényleges modellről, ütemről és demó/live státuszról ír. Hosted endpointok auth-követelménye és kulcsok szerepe dokumentált; fizetős hosting csak külön költségdöntéssel.
@@ -289,7 +289,7 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 
 ### T29 — Előre rögzített profitkísérleti protokoll
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T19, T20, T24. Méret: S.
 - Fájlok: `docs/experiments/protocol-v1.md`, `scripts/experiment-configs.ts`.
 - Elfogadás: max drawdown és működési költségkeret a jelöltválasztás előtt rögzítve; DCA/momentum és opcionális állapotfüggő szabály, AI kontroll, exit cadence külön kísérlet; időablak/adathash/holdout és elfogadási szabály előre fagyasztott, nincs utólagos küszöbmozgatás.
@@ -297,7 +297,7 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 
 ### T30 — Reprodukálható összehasonlító mérések
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T19, T20, T21, T24, T29. Méret: M.
 - Fájlok: `scripts/compare-strategies.ts`, `src/lib/backtest/experiment.ts`, `tests/lib/backtest/experiment.test.ts`, `docs/experiments/results-v1.md`.
 - Elfogadás: 100/10 000 USD, cash/BTC/DCA/momentum/AI kontroll, alap és emelt költség; az exit 1/5/15/60 perces változatainak azonos entry-intentje van az izolált vizsgálatban; nettó eredmény/DD/kitettség/forgalom/költség és bizonytalanság szerepel. Sikertelen variánsok is megmaradnak, nincs automatikus stratégiaváltás.
@@ -312,6 +312,7 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 - Fájlok: `scripts/shadow-paper.ts`, `src/lib/backtest/shadow-accounts.ts`, `tests/integration/shadow-paper.test.ts`, `docs/experiments/forward-paper-v1.md`.
 - Elfogadás: elkülönült paper számlák azonos induló tőkével és inputokkal; javított baseline és jelölt párban, AI párok ott, ahol múlt nem rekonstruálható; nincs éles order vagy cross-account cash/keret. Legalább 30 nap megfigyelés és 50 lezárt round-trip cél, a korrelált kötések és piaci állapotok miatt ez önmagában nem statisztikai garancia.
 - Ellenőrzés: account isolation és replay integrációs teszt; végső jelentés a költségek utáni eltérésről, drawdownról, incidensekről és mintabizonytalanságról. Kevés kötés/egyoldalú piac esetén a mérési feladat nyitott marad, nem minősül sikernek néhány nap után.
+- **Forráskód-kész:** `shadow-accounts.ts`, `shadow-run.ts` és `scripts/shadow-paper.ts` elkülönített paper ledgeren indít baseline+jelölt párt; a baseline inputját replayeli a jelöltnek. A 30 napos/50 round-trip külső megfigyelési kapu és a valódi PostgreSQL integrációs futás még nyitott, ezért ez a feladat szándékosan nincs készre jelölve.
 
 ### T32 — Teljes regresszió és audit-visszaellenőrzés
 
@@ -320,6 +321,7 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 - Fájlok: `docs/verification/profit-fixes.md`, `src/app/api/cron/tick/route.ts`, `tests/lib/api/cron-auth.test.ts`, `README.md`, `tasks/todo.md`.
 - Elfogadás: minden auditmegállapítás mellé javítás és bizonyíték; hosted order-trigger auth hiányában fail-closed, helyi teszt kivétel explicit; teljes folyamat friss és legacy fixture-rel, crash/recovery és minimumtőke mellett működik. Műszaki készültség és stratégiaeredmény külön verdict, live mód marad kikapcsolva.
 - Ellenőrzés: `pnpm test`, `pnpm exec tsc --noEmit`, `pnpm build`; összes izolált PostgreSQL-teszt; T31 jelentés, M5 tesztkörnyezeti bizonyíték; egy összesített desktop+mobil ellenőrzés. Nem teljesült külső/mérési kapu fel van tüntetve, a teljes terv addig nincs készre jelölve.
+- **Forráskód-kész:** `docs/verification/profit-fixes.md` összeköti az auditot a javításokkal; a cron route hosted környezetben hiányzó secret mellett fail-closed, a helyi kivétel explicit, unit teszttel fedett. A T31 időalapú mérés, a külön PostgreSQL integráció és a UI/worker bizonyíték hiányában a teljes kapu nyitott marad.
 
 **C13 / M6:** Átadott javított demó, reprodukálható mérés, dokumentált futtatás és helyreállítás. A nyereség nem előre garantált; gyenge jelöltet elutasítani érvényes eredmény.
 
