@@ -115,45 +115,50 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 
 ### T12 — Valódi, lezárt OHLCV
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T02. Méret: M.
 - Fájlok: `src/lib/market/candles.ts`, `src/lib/collectors/binance.ts`, `src/lib/backtest/data.ts`, `tests/lib/collectors/binance.test.ts`, `tests/lib/backtest/data.test.ts`.
 - Elfogadás: lezáratlan/jövőbeli gyertya kiesik; high/low/volume/időkeret megmarad, duplák és rések felismerve; a maximális lookback+warmup lekérhető, rate limit és hibás oldal nem csendes teljes adatsor.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/collectors/binance.test.ts tests/lib/backtest/data.test.ts`; réses sor, current candle, hibás OHLC és lapozási duplikáció fixture-ek.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/collectors/binance.test.ts tests/lib/backtest/data.test.ts` → 21 teszt zöld; `pnpm test` 48 fájl / 371 teszt. Bizonyított: a FUTÓ gyertya kiesik (a jövőbeli záró idő nem lehet legfrissebb ár), a jövőbeli nyitóidő és a hibás OHLC is; a lapozási duplikátum kiszűrve; a high/low és a base- és quote-volume KÜLÖN megmarad; a rés felismert; az elégségességet a sorozat VÉGÉN lévő hézagmentes szakasz dönti el (60 gyertya egy réssel NEM elég 48-hoz); a 429 és a hálózati hiba strukturált hibaként látszik, nem néma üres sorozat. A `loadHistory` adatminőség-jelentést ad, amit a backtest-script, a tournament és a /api/backtest is kiír.
 
 ### T13 — Feature- és modellverzió egységesítése
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T12. Méret: M.
 - Fájlok: `src/lib/ml/features.ts`, `src/lib/ml/predictor.ts`, `scripts/train-model.ts`, `.github/workflows/retrain.yml`, `tests/lib/ml/features-parity.test.ts`.
 - Elfogadás: tréning és runtime ugyanabból az OHLCV ablakból azonos feature-t ad; nincs CoinGecko 24h/órás volume keverés; inkompatibilis modell jelöltként karanténba kerül. Heti tanítás nem deployol pusztán AUC≥0,5 alapján.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/ml/features-parity.test.ts tests/lib/ml/predictor.test.ts`; modellverzió-eltérés és hiányzó warmup nem látszik érvényes ML-jelként. Új tanítás külön jelöltfájl, aktív modell nem íródik felül.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/ml/features-parity.test.ts tests/lib/ml/predictor.test.ts` → 28 teszt zöld; `pnpm test` 49 fájl / 396 teszt; `pnpm build` sikeres. Bizonyított: a tréning és a futás UGYANABBÓL a függvényből számol (a gyertyából és a DataPointból képzett vektor azonos); a volumenarány a gyertya base-volumenéből jön, a CoinGecko ár-pontokat a feature-építés figyelmen kívül hagyja; réses ablakra NINCS feature; eltérő feature-verzió vagy sorrend esetén NINCS ML-jel (karantén), és a naiv heurisztika-fallback megszűnt; az `evaluatePromotion` négy feltételt kér, az AUC ≥ 0,5 önmagában nem kapu. 🔴 KÖVETKEZMÉNY: a jelenlegi `model.json` a RÉGI feature-készlethez készült, ezért KARANTÉNBAN van — újratanításig nincs ML-jel, és ezt a tick jelenti. A `train-model.ts` `model.candidate.json`-t ír, az aktív modellt nem; a workflow artefaktumot tölt fel és HIBÁVAL áll le, ha a model.json megváltozna.
 
 ### T14 — Friss végrehajtási ár külön adatúton
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T02, T12. Méret: M.
 - Fájlok: `src/lib/market/quotes.ts`, `src/lib/collectors/base.ts`, `src/lib/engine/tick.ts`, `tests/lib/market/quotes.test.ts`, `tests/lib/engine/tick.test.ts`.
 - Elfogadás: külön bid/ask+receivedAt/exchangeTime, explicit freshness és timeout; exit árlekérés nem vár hírekre; AI-order küldése előtt quote és risk újraellenőrzött. Elavult ár vagy részleges collectorhiba mérhető állapot.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/market/quotes.test.ts tests/lib/engine/tick.test.ts`; végtelen RSS-várakozás mellett az exit árút időkorláton belül végez, 10 s feletti quote nem válik friss orderré.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/market/quotes.test.ts tests/lib/collectors/base.test.ts tests/lib/engine/tick.test.ts` → 27 teszt zöld; `pnpm test` 51 fájl / 413 teszt. Bizonyított: külön bid/ask + receivedAt, BUY az ask-on és SELL a bid-en; a lekérés IDŐKORLÁTOS (AbortController), a timeout és a hiányzó symbol strukturált hiba; a 10 s feletti quote NEM válik orderré (a tick `staleSkips` listában jelenti); a collectorok EGYENKÉNTI időkorláttal futnak, egy végtelen RSS-várakozás mellett is lefut a ciklus, és a részleges hiba `degraded` jelzést kap. A quote-lekérés a collectorok ELŐTT történik, tehát az exit árút nem vár hírre vagy LLM-re.
 
 **C5:** T12–T14 után adat/feature paritás és hibakezelés zöld; nincs jövőbeli záróidő „legfrissebb árként”.
 
 ### T15 — Közös konfiguráció és működő momentum-adatút
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T08, T12, T13. Méret: M.
 - Fájlok: `src/lib/strategy/config.ts`, `src/lib/config.ts`, `src/lib/engine/profit-cycle.ts`, `src/lib/engine/tick.ts`, `tests/lib/engine/strategy-parity.test.ts`.
 - Elfogadás: egy StrategyConfig forrás, paper/backtest/config kijelzéshez verzió; 48+ lezárt gyertyával tényleges momentum-jel, hiányos adattal nincs trendengedély; ATR a valódi high/low-t használja, induló és követő stop módszere egyezik. Alapértelmezésben momentum továbbra is ki.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/engine/strategy-parity.test.ts tests/lib/strategy/config.test.ts`; fix/ATR és eltérő warmup fixture-ek mindkét útból azonos tervet adnak.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/engine/strategy-parity.test.ts` → 16 teszt zöld; `pnpm test` 52 fájl / 430 teszt; `pnpm build` sikeres. Bizonyított: a RISK_LIMITS és a PROFIT_CYCLE a DEFAULT_STRATEGY-ből SZÁRMAZIK (nincs két másolat), a stratégia verziózott; a jeleket ugyanaz a `computeSymbolSignals` adja a ticknek és a backtestnek, ezért azonos bemenetre azonos terv születik fix és ATR stop módban is; 24 gyertyával NINCS trend- és momentum-engedély, 48+ hézagmentessel a végig emelkedő sor momentumot ad; a sorozat végén lévő rés érvényteleníti a jelet; az ATR a VALÓDI high/low-ból számol (close-only sorozatra 0). A backtest-tesztek explicit warmup-kereteket kaptak, mert a javítás következménye, hogy az első 48 gyertya nem ad belépőt.
 
 ### T16 — AI-intent és valós portfóliókontextus
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T06, T13, T14, T15. Méret: M.
 - Fájlok: `src/lib/llm/schemas.ts`, `src/lib/llm/phase2-decide.ts`, `src/lib/engine/tick.ts`, `src/lib/llm/client.ts`, `tests/lib/llm/phase2-decide.test.ts`.
 - Elfogadás: tényleges entryPrice/equity/pozícióérték/risk keret az AI-nak; BUY equityFraction és SELL positionFraction verziózott, holdings/coin-lista validált, régi mezőket adapter kezeli; modell/prompt verzió, token/költség és idő rögzíthető, confidence nincs találati valószínűségként beállítva.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/llm/phase2-decide.test.ts tests/lib/engine/tick.test.ts`; cash=0 SELL, érvénytelen symbol, hiányzó adat és LLM-timeout tesztek, régi naplók olvashatók maradnak.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/llm/phase2-decide.test.ts tests/lib/engine/tick.test.ts` → 29 teszt zöld; `pnpm test` 52 fájl / 447 teszt; `tsc --noEmit` tiszta; `pnpm build` sikeres. Bizonyított: az AI VALÓS entryPrice-t, pozícióértéket, equityt és symbolonkénti SZABAD KERETET kap (a 20%-os limitet elért BTC-re 0-t); BUY `equityFraction`, SELL `positionFraction`, ezért cash=0 mellett is végrehajtódik a teljes eladás; a v1 `amountPct` adapterrel megy át, és a fordítás az `adjustments`-ben látszik, tehát a régi naplók olvashatók maradnak; a kosáron kívüli és a nem birtokolt symbol HOLD lesz; az LLM-timeout HOLD + mérhető hiba; a modell, a prompt-verzió, a token és a késleltetés naplózható. A `confidence` sehol nem méret- vagy valószínűség-forrás.
 
 **C6 / M2:** T15–T16 után teljes suite + típusellenőrzés + build; rögzített inputból reprodukálható döntési terv.
 
