@@ -64,45 +64,50 @@ Terv: [plan.md](plan.md). Állapot: minden implementációs feladat nyitott. A f
 
 ### T07 — Valódi napi veszteségkorlát
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T03, T06. Méret: M.
 - Fájlok: `src/lib/portfolio/day-equity.ts`, `src/lib/portfolio/accounting.ts`, `src/lib/engine/tick.ts`, `tests/lib/portfolio/day-equity.test.ts`, `tests/integration/day-equity.test.ts`.
 - Elfogadás: UTC napi baseline, cash flow korrekció és napi latch; indulás óta mért P&L külön; napváltás, résznapos indulás, szünet és hiányzó referencia explicit, SELL nincs letiltva.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/portfolio/day-equity.test.ts`; integrációs teszt két egyidejű napnyitással; előző nap nyeresége nem rejti el az aznapi -3%-ot.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/portfolio/day-equity.test.ts` → 16 teszt zöld; `pnpm test` 46 fájl / 318 teszt; `tsc --noEmit` tiszta. Bizonyított viselkedés: UTC napkezdő baseline, napváltáskor új referencia és a tegnapi latch nem öröklődik, a −3% latch a nap végéig tart visszakúszó equity mellett is, a nap közbeni be- és kifizetés nem látszik napi eredménynek, nem mérhető equity esetén `dayPnlPct = null` és csak az ÚJ VÉTEL szünetel. Az indulás óta mért hozam külön mutató (`inceptionPnlPct`). A régi „MTM circuit breaker" teszt át lett írva: az a −41%-os indulás óta mért esést várta HOLD-ként, ami maga a hiba volt. 🔴 KORLÁT: `tests/integration/day-equity.test.ts` (két egyidejű napnyitás, paper/live elkülönítés, tartós latch) MEGÍRVA, de NEM FUTOTT — nincs PostgreSQL.
 
 ### T08 — Heti DCA-keret és trailing-stop megőrzése
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T06. Méret: M.
 - Fájlok: `src/lib/strategy/fear-greedy.ts`, `src/lib/strategy/weekly-budget.ts`, `src/lib/portfolio/ledger.ts`, `tests/lib/strategy/weekly-budget.test.ts`, `tests/lib/portfolio/ledger.test.ts`.
 - Elfogadás: 1 USD heti maradék legfeljebb 1 USD teljes költés; csak adott portfolio/mode DCA fill+foglalás fogyaszt, AI nem; rávásárlás nem csökkentheti a már aktív stopot.
 - Ellenőrzés: `pnpm exec vitest run tests/lib/strategy/weekly-budget.test.ts tests/lib/strategy/fear-greedy.test.ts tests/lib/portfolio/ledger.test.ts`; 7 napos határ, live/paper elkülönítés, törölt reservation felszabadulása.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/strategy/weekly-budget.test.ts tests/lib/strategy/fear-greedy.test.ts tests/lib/portfolio/ledger.test.ts` → 46 teszt zöld; `pnpm test` 46 fájl / 330 teszt. Bizonyított: 1 USD maradéknál legfeljebb 1 USD tervezhető (a régi kód 2 USD-t tervezett), a minimum kötésérték alatt nincs kötés; a keretet csak az adott (portfolio, mode) hatókör `dca` eredetű teljesülései ÉS aktív foglalásai fogyasztják — az AI vétele nem; a rávásárlás nem viszi lejjebb a felhúzott trailing stopot (a magasabb kért stop viszont érvényre jut). Mellékjavítás: a `dec(number)` a legrövidebb oda-vissza pontos alakot használja, így a 0,05 nem lesz 0,050000000000000003.
 
 ### T09 — Egy tranzakciós perzisztenciaút
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T03, T04, T06, T07, T08. Méret: M.
 - Fájlok: `src/lib/portfolio/accounting.ts`, `src/lib/execution/order-store.ts`, `src/lib/engine/execute-intent.ts`, `tests/integration/accounting.test.ts`, `tests/lib/engine/execute-intent.test.ts`.
 - Elfogadás: fill+cash+position+reservation módosítás együtt commit/rollback; duplikált fill nem változtat egyenleget; DB-hiba strukturált hibát ad, nincs log+null utáni hamis siker vagy order-küldés.
 - Ellenőrzés: valódi PostgreSQL fault injection minden írási ponton; két párhuzamos BUY nem lépi át a foglalt keretet; friss DB-visszaolvasás egyezik a reducer állapotával.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/engine/execute-intent.test.ts` → 17 teszt zöld; `pnpm test` 46 fájl / 335 teszt; `tsc --noEmit` tiszta; `pnpm build` sikeres. Az egyetlen tranzakciós út az `apply_fill_v2` hívás (fill + cash + pozíció + foglalás együtt), a foglalást a szerver dönti el (`reserve_budget_v2`, 0004 migráció), a hiba STRUKTURÁLT `PersistenceError` és DOB — a teszt bizonyítja, hogy nem lesz belőle hamis siker. A v1 táblák innentől csak vetület a régi dashboard-olvasóknak. 🔴 KORLÁT: `tests/integration/accounting.test.ts` (együtt-commit, duplikátum-no-op, fedezethiánynál teljes visszagörgetés, két párhuzamos BUY a kereten belül) MEGÍRVA, de NEM FUTOTT — nincs PostgreSQL. Ezért a valódi fault-injection és konkurencia-bizonyíték HIÁNYZIK.
 
 **C3:** T07–T09 után valódi DB-tranzakció, napi és heti keret tesztjei zöldek; `pnpm test`, `pnpm exec tsc --noEmit`, `pnpm build`.
 
 ### T10 — Újrapróbálás és több futó kizárása
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T09. Méret: M.
 - Fájlok: `src/lib/engine/run-scheduled-tick.ts`, `src/lib/engine/run-lease.ts`, `src/lib/execution/order-store.ts`, `tests/integration/run-lease.test.ts`, `tests/lib/engine/run-scheduled-tick.test.ts`.
 - Elfogadás: a tick ID nem puszta előzetes SELECT; tartós claim/lease, fencing és egyedi intent; sikertelen mentés nem küld siker-heartbeatet. Futási kulcs előkészítve külön entry/exit idősávra, ismeretlen order-állapot újraküldés helyett egyeztetésre vár.
 - Ellenőrzés: cron és worker egyidejű indítása, lease lejárat, crash/retry a tervezés és könyvelés között; nincs dupla fill vagy keretfogyás.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/engine/run-scheduled-tick.test.ts` → 7 teszt zöld; `pnpm test` 47 fájl / 342 teszt. A tick id már NEM puszta előzetes SELECT: tartós lease-claim idősávonként (`entry:<slot>`), monoton fencing tokennel; más tulajdonos esetén `lease_held` kihagyás, hibánál elengedés (újrapróbálás lehetséges), sikernél a claim marad. Ismeretlen állapotú megbízás mellett a ciklus NEM indít új ordert (`unsettled_intents`), és sikertelen mentés esetén NINCS siker-heartbeat. 🔴 KORLÁT: `tests/integration/run-lease.test.ts` (két egyidejű futó, lejárat-átvétel, token-növekedés) MEGÍRVA, de NEM FUTOTT — nincs PostgreSQL.
 
 ### T11 — Régi demóadatok megőrzése és mérési átállás
 
-- [ ] Kész
+- [x] Kész
 - Függőség: T09, T10. Méret: M.
 - Fájlok: `scripts/migrate-paper-ledger.ts`, `src/lib/portfolio/legacy-import.ts`, `tests/integration/legacy-import.test.ts`, `docs/ledger-migration.md`.
 - Elfogadás: dry-run az alap, snapshot/diff/megismételhető import; hiányzó origin/orderId és irreális régi stop-fill nem lesz kitalált hiteles adat; új epoch nyitóállapottal, régi adatok megőrizve. Koncentrált BTC-t nem ad el migráció, új rávásárlás tiltott.
 - Ellenőrzés: másolat-adatbázison kétszeri import ugyanazt adja; előtte/utána cash és qty eltérésjelentés; rollback/prior reader próbája. Tényleges külső migráció külön ütemezett lépés.
+- **Bizonyíték:** `pnpm exec vitest run tests/lib/portfolio/legacy-import.test.ts` → 13 teszt zöld; `pnpm test` 48 fájl / 355 teszt; `pnpm build` sikeres. A dry-run az alapértelmezés (`pnpm migrate:ledger`), írás csak `--apply` mellett. A régi sorok `legacy-unverified` provenance-szel, TÖRTÉNETKÉNT kerülnek be és NEM mozgatnak egyenleget; a nyitóállapot az ellenőrzött v1 állapotból jön. A hiányzó orderId szintetikus és `legacy:` előtaggal felismerhető, a hiányzó eredet és az irreális stop-fill JELÖLVE, nem javítva. A koncentrált BTC-t a migráció nem adja el. Dokumentáció: `docs/ledger-migration.md`. 🔴 KORLÁT: `tests/integration/legacy-import.test.ts` (kétszeri import azonos eredmény, v1 érintetlen) MEGÍRVA, de NEM FUTOTT; a TÉNYLEGES külső migráció külön, ütemezett lépés marad.
 
 **C4 / M1:** A demó végigfut a v2 úton izolált DB-n; nincs pénzteremtés, dupla könyvelés vagy limitmegkerülés. Teljes suite + típusellenőrzés + build.
 

@@ -67,9 +67,12 @@ async function main() {
                 });
 
   console.log(`Tournament: ${grid.length} config | ${pages} klines-lap | min OOS trade ${minTrades}`);
-  const history = await loadHistory([...COIN_UNIVERSE], pages);
+  const { frames: history, quality } = await loadHistory([...COIN_UNIVERSE], pages);
   const { inSample, outSample } = splitHistory(history, 0.7);
   console.log(`Betöltve: ${history.length} óra (IS ${inSample.length} / OOS ${outSample.length})`);
+  if (quality.degraded) {
+    console.warn("⚠ HIÁNYOS vagy réses adatsor — a rangsor ezzel a korláttal értendő.");
+  }
   const btCfg = { symbols: [...COIN_UNIVERSE], initialCapitalUsd: 10000, feePct: 0.001, slippageBps: 5 };
 
   const items = grid.map((cfg) => ({

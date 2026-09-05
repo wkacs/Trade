@@ -26,7 +26,7 @@ async function main() {
   const rows: { sym: string; oosRet: number; oosSharpe: number; pass: boolean }[] = [];
   for (const sym of candidates) {
     try {
-      const history = await loadHistory([sym], pages);
+      const { frames: history } = await loadHistory([sym], pages);
       if (history.length < 100) {
         console.log(`  ${sym}: nincs elég adat`);
         continue;

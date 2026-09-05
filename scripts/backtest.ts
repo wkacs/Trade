@@ -19,8 +19,14 @@ async function main() {
   const slippageBps = arg("slippage", 5);
 
   console.log(`Backtest: ${COIN_UNIVERSE.join(",")} | ${pages} klines-lap | slippage ${slippageBps}bps`);
-  const history = await loadHistory([...COIN_UNIVERSE], pages);
+  const { frames: history, quality } = await loadHistory([...COIN_UNIVERSE], pages);
   console.log(`Betöltve: ${history.length} órás keret`);
+  if (quality.degraded) {
+    console.warn("⚠ Az adatsor HIÁNYOS vagy réses — a metrikák ezzel a korláttal értendők:");
+    for (const [sym, q] of Object.entries(quality.bySymbol)) {
+      console.warn(`   ${sym}: ${q.bars} gyertya, ${q.gaps} rés, kiesett lezáratlan ${q.droppedUnclosed}, duplikátum ${q.droppedDuplicate}${q.error ? `, hiba: ${q.error}` : ""}`);
+    }
+  }
 
   const result = runBacktest(history, {
     symbols: [...COIN_UNIVERSE],

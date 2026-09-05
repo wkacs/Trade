@@ -21,7 +21,7 @@ export async function GET(req: Request) {
   const slippageBps = Number(url.searchParams.get("slippage") ?? 5);
 
   try {
-    const history = await loadHistory([...COIN_UNIVERSE], pages);
+    const { frames: history, quality } = await loadHistory([...COIN_UNIVERSE], pages);
     const result = runBacktest(history, {
       symbols: [...COIN_UNIVERSE],
       initialCapitalUsd: 10000,
@@ -33,6 +33,8 @@ export async function GET(req: Request) {
       framesCount: history.length,
       from: result.from,
       to: result.to,
+      // Az adatminőség a válasz része: réses vagy hiányos sorozat nem tűnhet el csendben.
+      dataQuality: quality,
     });
   } catch (e) {
     console.error("[api/backtest]", e);

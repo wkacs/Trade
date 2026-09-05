@@ -6,6 +6,23 @@ export interface DataPoint {
   kind: "price" | "news" | "whale" | "rss" | "sentiment" | "social";
   // Tartalom a kind-től függően:
   price?: { usd: number; volume24h: number; change24hPct: number };
+  /**
+   * Teljes, LEZÁRT tőzsdei gyertya (T12). Csak a `binance` forrás tölti ki. A modellezés
+   * (ATR, momentum, ML feature) ezt használja — a `price.usd`-only út elveszítette a
+   * high/low-t, és összekeverte a Binance órás mennyiségét a CoinGecko 24 órás volumenével.
+   */
+  ohlcv?: {
+    timeframe: string;
+    openTime: number;
+    closeTime: number;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    baseVolume: number;
+    quoteVolume: number;
+    trades: number;
+  };
   news?: { title: string; url: string; sentiment: "bullish" | "bearish" | "neutral" };
   whale?: { amountUsd: number; direction: "exchange-in" | "exchange-out"; from: string; to: string };
   rss?: { title: string; url: string; source: string };

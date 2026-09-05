@@ -36,3 +36,64 @@ describe("alignFrames", () => {
     expect(byTs[5 * H].fearGreedValue).toBe(30);
   });
 });
+
+// ── T12: lezárt gyertyák, rések és hibák a történelmi betöltésben ──────────────
+import { loadHistory } from "@/lib/backtest/data";
+
+const HOUR2 = 3600_000;
+const NOW2 = Date.UTC(2026, 8, 5, 12, 0, 0);
+const kline2 = (openTime: number, close: number) => [
+  openTime,
+  String(close),
+  String(close + 1),
+  String(close - 1),
+  String(close),
+  "10",
+  openTime + HOUR2 - 1,
+  "1000",
+  5,
+];
+
+describe("loadHistory — adatminőség (T12)", () => {
+  it("a FUTÓ gyertya nem kerül be a történelmi sorozatba", async () => {
+    const fetchImpl = (async (url: string) => {
+      if (String(url).includes("fng")) return { ok: true, json: async () => ({ data: [] }) } as any;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [kline2(NOW2 - 2 * HOUR2, 100), kline2(NOW2 - 1, 101)],
+      } as any;
+    }) as unknown as typeof fetch;
+
+    const { frames, quality } = await loadHistory(["BTC"], 1, { now: () => NOW2, fetchImpl });
+    expect(frames).toHaveLength(1);
+    expect(quality.bySymbol.BTC.droppedUnclosed).toBe(1);
+  });
+
+  it("a rés jelentésbe kerül és degraded állapotot jelez", async () => {
+    const fetchImpl = (async (url: string) => {
+      if (String(url).includes("fng")) return { ok: true, json: async () => ({ data: [] }) } as any;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [kline2(NOW2 - 5 * HOUR2, 100), kline2(NOW2 - 2 * HOUR2, 102)],
+      } as any;
+    }) as unknown as typeof fetch;
+
+    const { quality } = await loadHistory(["BTC"], 1, { now: () => NOW2, fetchImpl });
+    expect(quality.bySymbol.BTC.gaps).toBe(1);
+    expect(quality.degraded).toBe(true);
+  });
+
+  it("a rate limit STRUKTURÁLT hibaként látszik, nem néma üres sorozat", async () => {
+    const fetchImpl = (async (url: string) => {
+      if (String(url).includes("fng")) return { ok: true, json: async () => ({ data: [] }) } as any;
+      return { ok: false, status: 429 } as any;
+    }) as unknown as typeof fetch;
+
+    const { frames, quality } = await loadHistory(["BTC"], 1, { now: () => NOW2, fetchImpl });
+    expect(frames).toHaveLength(0);
+    expect(quality.bySymbol.BTC.error).toMatch(/rate_limited/);
+    expect(quality.degraded).toBe(true);
+  });
+});
