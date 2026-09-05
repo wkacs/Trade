@@ -614,10 +614,11 @@ export async function runTick(input: TickInput): Promise<TickResult> {
           .filter(([, sig]) => !sig.sufficient)
           .map(([sym]) => sym),
       },
+      // IRÁNYTALÁLAT-diagnosztika, nem profit — a mezőnevek is ezt mondják (T20).
       performance: {
         actionable: performance.actionable,
-        hitRate: performance.hitRate,
-        avgHypotheticalPnlPct: performance.avgHypotheticalPnlPct,
+        directionHitRate: performance.hitRate,
+        avgDirectionalScorePct: performance.avgDirectionalScorePct,
       },
     });
     llmUsage = phase2.usage;

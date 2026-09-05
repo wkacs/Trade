@@ -64,11 +64,14 @@ export interface DecideInput {
     staleOrMissingQuotes: string[];
     insufficientHistory: string[];
   };
-  /** A korábbi döntések utólagos eredménye („bejött volna?") — visszacsatolás. */
+  /**
+   * A korábbi döntések utólagos IRÁNY-diagnosztikája — visszacsatolás.
+   * FIGYELEM (T20): ez iránytalálat, NEM realizált profit, és nem is annak becslése.
+   */
   performance?: {
     actionable: number;
-    hitRate: number | null;
-    avgHypotheticalPnlPct: number;
+    directionHitRate: number | null;
+    avgDirectionalScorePct: number;
   };
   timeoutMs?: number;
 }
