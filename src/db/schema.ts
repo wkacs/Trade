@@ -14,6 +14,41 @@ export const rawEvents = pgTable("raw_events", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+/**
+ * Piaci KONTEXTUS-pillanatkép óránként, coinonként (2026-09-06).
+ *
+ * Miért kell külön tábla: a derivatíva-adat (funding, nyitott pozíció, taker-flow,
+ * long/short) és a tőzsdék közötti prémium ORTOGONÁLIS az árra, de a Binance csak
+ * ~21-30 napot ad vissza belőle. Az f3 ML-kísérlet ezen bukott el: a reaktív mutatók
+ * nem kerülhettek a tanításba, mert nincs elég történet. Ez a tábla ATTÓL A NAPTÓL
+ * gyűjti a saját történetünket, amikor bekapcsoljuk — a késlekedés minden napja egy
+ * nappal kevesebb tanítóadat.
+ *
+ * A hiányzó mező NULL, sosem 0: a nulla funding valós érték.
+ */
+export const marketContext = pgTable(
+  "market_context",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ts: timestamp("ts", { withTimezone: true }).notNull(),
+    symbol: varchar("symbol", { length: 16 }).notNull(),
+    /** Finanszírozási ráta %-ban (0.01 = 0.01%). */
+    fundingRatePct: real("funding_rate_pct"),
+    openInterestBase: real("open_interest_base"),
+    openInterestUsd: real("open_interest_usd"),
+    openInterestChange1hPct: real("open_interest_change_1h_pct"),
+    takerBuySellRatio: real("taker_buy_sell_ratio"),
+    longShortAccountRatio: real("long_short_account_ratio"),
+    /** Coinbase (USD) vs Binance (USDT) prémium %-ban. */
+    premiumPct: real("premium_pct"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    // Óránként EGY sor coinonként: a duplikált tick nem hígíthatja a tanítóadatot.
+    tsSymbol: uniqueIndex("market_context_ts_symbol_idx").on(t.ts, t.symbol),
+  }),
+);
+
 /** ML jelek időpontonként, coinonként. */
 export const mlSignals = pgTable("ml_signals", {
   id: uuid("id").primaryKey().defaultRandom(),

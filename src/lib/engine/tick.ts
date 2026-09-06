@@ -33,6 +33,7 @@ import { remainingWeeklyBudget } from "@/lib/strategy/weekly-budget";
 import { planProfitCycle, computeAllSignals, type SymbolSignals } from "@/lib/engine/profit-cycle";
 import { DEFAULT_STRATEGY, STRATEGY_VERSION, type StrategyConfig } from "@/lib/strategy/config";
 import { candlesFromDataPoints } from "@/lib/collectors/binance";
+import { persistMarketContext } from "@/lib/market/context-store";
 import { TIMEFRAME_MS } from "@/lib/market/candles";
 import { executeIntent, type ExecuteIntentDeps, type IntentRequest } from "@/lib/engine/execute-intent";
 import { stopCandidate } from "@/lib/engine/plan-exits";
@@ -303,6 +304,15 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   );
   const events = collectResult.points;
   const collectorOutcomes: CollectorOutcome[] = collectResult.outcomes;
+
+  // A piaci kontextus SAJÁT történetének építése. A Binance a derivatíva-adatból csak
+  // ~21-30 napot ad vissza, ezért az f3 ML-kísérlet nem taníthatott rá. Ami ma nincs
+  // elmentve, az hónapok múlva sem lesz meg. A mentés sosem dob, és replayben kimarad
+  // (ott a rögzített bemenet a mérés tárgya, nem új megfigyelés).
+  if (!input.replay) {
+    const saved = await persistMarketContext(events, now());
+    if (saved > 0) console.log(`[tick] piaci kontextus mentve: ${saved} sor`);
+  }
   const llmEvents = events.filter((e) => e.source !== "binance");
 
   // Az árak ELSŐDLEGES forrása a friss quote; a collector-ár csak tartalék, és a
