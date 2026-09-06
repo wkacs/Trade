@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { waitUntil } from "@vercel/functions";
 import { executeScheduledTick } from "@/lib/engine/run-scheduled-tick";
+import { runActiveShadowLanes } from "@/lib/backtest/shadow-lanes";
 import { authorizeCronRequest } from "@/lib/ops/cron-auth";
 
 // A tick több külső hívást tesz (collectorok párhuzamosan + 1-2 LLM hívás + DB),
@@ -29,11 +30,22 @@ export async function POST(req: Request) {
   // A teljes ciklus LLM- és piaci API-hívások miatt 30 másodpercnél tovább is tarthat.
   // A külső ütemező ezért azonnal visszaigazolást kap, a Vercel pedig a Function
   // maxDuration határáig életben tartja és befejezi a regisztrált Promise-t.
-  const tick = executeScheduledTick().then((result) => {
-    if (!result.ok) {
-      console.error("[cron/tick] háttérben futó ciklus sikertelen:", result);
-    }
-  });
+  const tick = executeScheduledTick()
+    .then((result) => {
+      if (!result.ok) {
+        console.error("[cron/tick] háttérben futó ciklus sikertelen:", result);
+      }
+    })
+    // Az élő ciklus UTÁN futnak az előre menő árnyék-mérések. A runner sosem dob, de a
+    // catch itt is marad: az árnyék-mérés SOHA nem ronthatja el az éles tick eredményét.
+    .then(async () => {
+      const lanes = await runActiveShadowLanes();
+      for (const lane of lanes) {
+        if (lane.ran) console.log(`[cron/tick] árnyék-sáv ${lane.namespace}:`, lane.actions);
+        else console.warn(`[cron/tick] árnyék-sáv ${lane.namespace} kimaradt: ${lane.reason}`);
+      }
+    })
+    .catch((e) => console.error("[cron/tick] árnyék-sáv hiba (az éles ciklus ettől független):", e));
   waitUntil(tick);
 
   return NextResponse.json({ ok: true, accepted: true }, { status: 202 });

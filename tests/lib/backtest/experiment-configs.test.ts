@@ -15,6 +15,8 @@ import {
   protocolHash,
   describeProtocol,
   type AcceptanceInput,
+  RISK_APPROVALS,
+  unapprovedRiskyVariants,
 } from "../../../scripts/experiment-configs";
 
 /**
@@ -81,9 +83,20 @@ describe("kísérleti változatok — egy kísérlet EGY kérdés", () => {
     expect(issues.some((i) => i.message.includes("raisesRisk"))).toBe(true);
   });
 
-  it("a jelenlegi kísérletek EGYIKE SEM emel kockázatot", () => {
-    const risky = EXPERIMENTS.flatMap((e) => e.variants.filter((v) => v.raisesRisk).map((v) => `${e.id}/${v.id}`));
-    expect(risky).toEqual([]);
+  it("kockázatemelő változat CSAK kifejezett jóváhagyással létezhet", () => {
+    // A korábbi szabály az volt, hogy egyik változat sem emelhet kockázatot. Ez a
+    // felhasználó 2026-09-06-i döntése után úgy módosult, hogy a lazítás megengedett,
+    // de KIZÁRÓLAG névre szóló, indoklással rögzített jóváhagyással. A védelem így
+    // megmarad: észrevétlenül továbbra sem csúszhat be kockázatemelés.
+    expect(unapprovedRiskyVariants()).toEqual([]);
+  });
+
+  it("a jóváhagyás indoklást és dátumot is hordoz", () => {
+    for (const [key, approval] of Object.entries(RISK_APPROVALS)) {
+      expect(approval.approvedOn, key).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(approval.rationale.length, key).toBeGreaterThan(40);
+      expect(approval.by.length, key).toBeGreaterThan(3);
+    }
   });
 
   it("az isRiskier a lazítást ismeri fel, a szigorítást nem", () => {

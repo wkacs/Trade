@@ -225,6 +225,41 @@ export const EXPERIMENTS: Experiment[] = [
     ],
   },
   {
+    id: "E6-risk-ladder-L2",
+    question:
+      "A kockázat-létra L2 lépcsője (lazább félelem-kapu + nagyobb pozíció + futni hagyott nyertes) " +
+      "jobb nettó eredményt ad-e ELŐRE MENŐ paper-mérésben, mint a jelenlegi élő beállítás?",
+    // TÖBB tengely EGYSZERRE: ez szándékos, mert a felhasználó a CSOMAGOT akarja mérni.
+    // Ára: ha nyer, nem tudjuk megmondani, MELYIK elem nyert. Ezt a riportban ki kell mondani.
+    axis: [
+      "dcaFgThreshold",
+      "dcaBuyPct",
+      "dcaWeeklyBudgetPct",
+      "maxPositionPct",
+      "takeProfitPct",
+      "takeProfitFraction",
+    ],
+    variants: [
+      variant("baseline", "a jelenlegi éles beállítás", {}, "viszonyítási pont"),
+      variant(
+        "L2",
+        "L2: FG35 · DCA 4%/heti 20% · max pozíció 35% · TP 25% teljes",
+        {
+          dcaFgThreshold: 35,
+          dcaBuyPct: 0.04,
+          dcaWeeklyBudgetPct: 0.2,
+          maxPositionPct: 0.35,
+          takeProfitPct: 0.25,
+          takeProfitFraction: 1,
+        },
+        "KOCKÁZATEMELÉS, a felhasználó kifejezett döntése alapján (2026-09-06). " +
+          "A történeti mérésen ez volt az egyetlen lépcső, amely MINDKÉT rezsimben javított " +
+          "az alapvonalhoz képest: medvében -9.0% (alapvonal -0.1%), bikában +17.0% (alapvonal +4.7%), " +
+          "a teljes cikluson kamatosan +6.5% (alapvonal +4.6%).",
+      ),
+    ],
+  },
+  {
     id: "E5-stop-mode",
     question: "Az ATR-alapú stop jobb-e a fix −5%-nál, kockázatnövelés nélkül?",
     axis: ["stopMode", "atrMult"],
@@ -390,6 +425,32 @@ export function validateProtocol(experiments: Experiment[] = EXPERIMENTS): Valid
  * valaki UTÓLAG hozzányúl egy küszöbhöz vagy egy változathoz, a hash elmozdul, és a
  * régi jelentés nem állítható be az új protokoll eredményének.
  */
+/**
+ * KOCKÁZATEMELŐ VÁLTOZATOK KIFEJEZETT JÓVÁHAGYÁSA.
+ *
+ * A protokoll alapszabálya, hogy kockázatemelés nem csúszhat be „mellékesen". Ez a lista
+ * NEM gyengíti a szabályt: attól, hogy egy változat itt szerepel, még jelölt marad —
+ * csak azt rögzíti, hogy a lazítás TUDATOS felhasználói döntés volt, mikor és mi alapján.
+ * Ami nincs a listán és emel kockázatot, az hiba.
+ */
+export const RISK_APPROVALS: Record<string, { approvedOn: string; by: string; rationale: string }> = {
+  "E6-risk-ladder-L2/L2": {
+    approvedOn: "2026-09-06",
+    by: "felhasználó (kifejezett kérés: próbáljuk meg több kockázattal; majd: igen indítsd az L2-t)",
+    rationale:
+      "A kockázat-létra mérésén L2 volt az EGYETLEN lépcső, amely mindkét rezsimben javított: " +
+      "medvepiacon -9.0% (alapvonal -0.1%, buy & hold BTC -44.5%), bikapiacon +17.0% (alapvonal +4.7%), " +
+      "a teljes ~14 hónapon kamatosan +6.5% (alapvonal +4.6%). A mérés PAPÍRON fut, valós pénz nélkül.",
+  },
+};
+
+/** Kockázatemelő változat jóváhagyás nélkül — ez a lista mindig üres kell legyen. */
+export function unapprovedRiskyVariants(): string[] {
+  return EXPERIMENTS.flatMap((e) =>
+    e.variants.filter((v) => v.raisesRisk).map((v) => `${e.id}/${v.id}`),
+  ).filter((key) => !RISK_APPROVALS[key]);
+}
+
 export function protocolHash(): string {
   const payload = JSON.stringify({
     PROTOCOL_VERSION,
