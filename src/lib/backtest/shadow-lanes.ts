@@ -3,7 +3,7 @@ import { defineShadowSet, type ShadowAccount } from "@/lib/backtest/shadow-accou
 import { runShadowCycle } from "@/lib/backtest/shadow-run";
 import { runTick as defaultRunTick } from "@/lib/engine/tick";
 import { hasLedgerState, loadLedgerState } from "@/lib/execution/order-store";
-import { recordShadowCycle } from "@/lib/backtest/shadow-store";
+import { recordShadowCycle, shadowReport } from "@/lib/backtest/shadow-store";
 import { equityAt } from "@/lib/portfolio/ledger";
 import { dec } from "@/lib/portfolio/money";
 
@@ -52,12 +52,31 @@ export const ACTIVE_SHADOW_LANES: ShadowLane[] = [
     },
     note: "FG35 · DCA 4%/heti 20% · max pozíció 35% · TP 25% teljes",
   },
+  {
+    namespace: "shadow-e7-risk-ladder-l3",
+    experimentId: "E7-risk-ladder-L3",
+    candidateId: "L3",
+    capitalUsd: 320,
+    aiEnabled: false,
+    candidateStrategy: {
+      ...DEFAULT_STRATEGY,
+      dcaFgThreshold: 35,
+      dcaBuyPct: 0.04,
+      dcaWeeklyBudgetPct: 0.2,
+      maxPositionPct: 0.35,
+      takeProfitPct: 0.25,
+      takeProfitFraction: 1,
+      momentumEnabled: true,
+      stopLossPct: 0.07,
+    },
+    note: "L2 + momentum-belépő · stop 7% — ez lép be mohóság-rezsimben is",
+  },
 ];
 
 export interface ShadowLaneOutcome {
   namespace: string;
   ran: boolean;
-  reason?: "not_provisioned" | "error";
+  reason?: "not_provisioned" | "identity_mismatch" | "error";
   error?: string;
   cycleId?: string;
   actions?: Record<string, number>;
@@ -68,6 +87,7 @@ export interface ShadowLaneDeps {
   hasLedgerState: typeof hasLedgerState;
   loadLedgerState: typeof loadLedgerState;
   recordShadowCycle: typeof recordShadowCycle;
+  shadowReport: typeof shadowReport;
   now: () => Date;
 }
 
@@ -76,6 +96,7 @@ const defaultDeps: ShadowLaneDeps = {
   hasLedgerState,
   loadLedgerState,
   recordShadowCycle,
+  shadowReport,
   now: () => new Date(),
 };
 
@@ -107,6 +128,20 @@ export async function runActiveShadowLanes(
           out.push({ namespace: lane.namespace, ran: false, reason: "not_provisioned" });
           throw new SkipLane();
         }
+      }
+      // SÁV-SZINTŰ azonosság, nem globális protokoll-hash. A hash minden kísérletet
+      // lefed, ezért egy ÚJ, független kísérlet felvétele érvénytelenítené a már futó
+      // méréseket is. Ami itt számít: ez a namespace tényleg ehhez a kísérlethez és
+      // ehhez a jelölthöz lett provisionálva.
+      const provisioned = await deps.shadowReport(lane.namespace);
+      if (provisioned.experimentId !== lane.experimentId || provisioned.candidateId !== lane.candidateId) {
+        out.push({
+          namespace: lane.namespace,
+          ran: false,
+          reason: "identity_mismatch",
+          error: `provisionált ${provisioned.experimentId}/${provisioned.candidateId}, a sáv ${lane.experimentId}/${lane.candidateId}`,
+        });
+        throw new SkipLane();
       }
       const cycleId = deps.now().toISOString().replace(/[:.]/g, "-");
       const result = await runShadowCycle(accounts, cycleId, { runTick: deps.runTick });

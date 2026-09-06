@@ -260,6 +260,43 @@ export const EXPERIMENTS: Experiment[] = [
     ],
   },
   {
+    id: "E7-risk-ladder-L3",
+    question:
+      "Az L3 lépcső (L2 + trendkövető belépő + tágabb stop) többet hoz-e előre menő " +
+      "paper-mérésben, mint az alapvonal — és mennyivel nagyobb visszaeséssel?",
+    axis: [
+      "dcaFgThreshold",
+      "dcaBuyPct",
+      "dcaWeeklyBudgetPct",
+      "maxPositionPct",
+      "takeProfitPct",
+      "takeProfitFraction",
+      "momentumEnabled",
+      "stopLossPct",
+    ],
+    variants: [
+      variant("baseline", "a jelenlegi éles beállítás", {}, "viszonyítási pont"),
+      variant(
+        "L3",
+        "L3: L2 + momentum-belépő · stop 7%",
+        {
+          dcaFgThreshold: 35,
+          dcaBuyPct: 0.04,
+          dcaWeeklyBudgetPct: 0.2,
+          maxPositionPct: 0.35,
+          takeProfitPct: 0.25,
+          takeProfitFraction: 1,
+          momentumEnabled: true,
+          stopLossPct: 0.07,
+        },
+        "KOCKÁZATEMELÉS, a felhasználó kifejezett döntése alapján (2026-09-06). " +
+          "Ez az egyetlen lépcső, amely a mai mohóság-rezsimben egyáltalán belép, mert nem " +
+          "csak félelemre vár. A történeti mérés kétarcú: bikapiacon +28.6% (alapvonal +4.7%, " +
+          "buy & hold BTC +21.0%), medvepiacon viszont -22.9% (alapvonal -0.1%).",
+      ),
+    ],
+  },
+  {
     id: "E5-stop-mode",
     question: "Az ATR-alapú stop jobb-e a fix −5%-nál, kockázatnövelés nélkül?",
     axis: ["stopMode", "atrMult"],
@@ -434,6 +471,15 @@ export function validateProtocol(experiments: Experiment[] = EXPERIMENTS): Valid
  * Ami nincs a listán és emel kockázatot, az hiba.
  */
 export const RISK_APPROVALS: Record<string, { approvedOn: string; by: string; rationale: string }> = {
+  "E7-risk-ladder-L3/L3": {
+    approvedOn: "2026-09-06",
+    by: "felhasználó (kifejezett kérés: L3 is induljon második sávként)",
+    rationale:
+      "L3 az egyetlen lépcső, amely a mai mohóság-rezsimben egyáltalán belép. A történeti " +
+      "mérés KÉTARCÚ, és ezt a jóváhagyás is rögzíti: bikapiacon +28.6% (alapvonal +4.7%, " +
+      "buy & hold BTC +21.0% — tehát a piacot is verte, feleakkora visszaeséssel), medvepiacon " +
+      "viszont -22.9% (alapvonal -0.1%), a teljes cikluson kamatosan -0.9%. PAPÍRON fut, valós pénz nélkül.",
+  },
   "E6-risk-ladder-L2/L2": {
     approvedOn: "2026-09-06",
     by: "felhasználó (kifejezett kérés: próbáljuk meg több kockázattal; majd: igen indítsd az L2-t)",

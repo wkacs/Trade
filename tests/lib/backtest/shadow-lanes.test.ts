@@ -50,6 +50,8 @@ describe("runActiveShadowLanes — a fő tick nem sérülhet", () => {
     const out = await runActiveShadowLanes(
       {
         hasLedgerState: vi.fn(async () => true) as never,
+        // A DB-olvasás mockolva: a teszt a TICK hibájára fókuszál, nem a kapcsolatra.
+        shadowReport: vi.fn(async () => ({ experimentId: "X", candidateId: "cand" })) as never,
         runTick: vi.fn(async () => {
           throw new Error("tick robbant");
         }) as never,
@@ -59,5 +61,20 @@ describe("runActiveShadowLanes — a fő tick nem sérülhet", () => {
     expect(out[0].ran).toBe(false);
     expect(out[0].reason).toBe("error");
     expect(out[0].error).toContain("tick robbant");
+  });
+});
+
+describe("sáv-azonosság", () => {
+  it("nem futtat olyan namespace-t, amit MÁS kísérlethez provisionáltak", async () => {
+    const out = await runActiveShadowLanes(
+      {
+        hasLedgerState: vi.fn(async () => true) as never,
+        shadowReport: vi.fn(async () => ({ experimentId: "MÁS", candidateId: "X" })) as never,
+        runTick: vi.fn() as never,
+      },
+      [lane],
+    );
+    expect(out[0].ran).toBe(false);
+    expect(out[0].reason).toBe("identity_mismatch");
   });
 });
