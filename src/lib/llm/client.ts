@@ -26,19 +26,47 @@ export interface LlmUsage {
   totalTokens: number | null;
   /** Igaz, ha időtúllépés vagy hálózati hiba miatt esett vissza a fallbackre. */
   failed: boolean;
-  errorCode?: "timeout" | "network" | "bad_response";
+  errorCode?: "timeout" | "rate_limited" | "network" | "bad_response";
   errorMessage?: string;
 }
 
 export interface ChatJsonOptions {
   /** Időkorlát ms-ban. A döntési út nem várhat korlátlanul egy LLM-re. */
   timeoutMs?: number;
+  /**
+   * Hány újrapróbálkozást engedünk az SDK-nak. A tick teljes kerete 300 s, ezért ez
+   * NEM lehet korlátlan: a hívó szabja meg, mennyi fér bele a saját szakaszába.
+   */
+  maxRetries?: number;
   promptVersion?: string;
   temperature?: number;
 }
 
-/** Alapértelmezett LLM-időkorlát: a tick nem akadhat meg egy lassú válaszon. */
-export const DEFAULT_LLM_TIMEOUT_MS = 30_000;
+/**
+ * Alapértelmezett LLM-időkorlát.
+ *
+ * 2026-09-06 mérés a prod kulccsal, éles méretű (~12k token) prompttal:
+ * 53.2 s · 429 (forgalomkorlát) · 29.9 s. A korábbi 30 s-os korlát ezért a hívások
+ * többségét levágta: minden tick „LLM hiba, HOLD" lett, és a bot érdemben nem döntött.
+ * A tick teljes kerete 300 s (route maxDuration), ebbe két fázis fér bele.
+ */
+export const DEFAULT_LLM_TIMEOUT_MS = 75_000;
+
+/** Alapértelmezett újrapróbálkozás: egy ismétlés belefér, a végtelen nem. */
+export const DEFAULT_LLM_MAX_RETRIES = 1;
+
+/**
+ * Hibaüzenet → hibakód. Tiszta függvény, mert a döntés-naplóban ez magyarázza a HOLD-ot.
+ *
+ * FONTOS: az OpenAI SDK időtúllépése „Request timed out.” — szóközzel. A régi
+ * /timeout|abort/ minta ezt nem fogta meg, ezért minden időtúllépés „network"-ként
+ * jelent meg, és rossz irányba vitte a hibakeresést.
+ */
+export function classifyLlmError(message: string): "timeout" | "rate_limited" | "network" {
+  if (/429|rate.?limit|访问量过大/i.test(message)) return "rate_limited";
+  if (/timed\s*out|timeout|abort/i.test(message)) return "timeout";
+  return "network";
+}
 
 /**
  * Strukturált JSON kimenet kérése a modelltől. Ha a modell nem ad érvényes JSON-t, vagy
@@ -53,6 +81,7 @@ export async function chatJson<T>(
   options: ChatJsonOptions = {},
 ): Promise<{ data: T; raw: string; usage: LlmUsage }> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
+  const maxRetries = options.maxRetries ?? DEFAULT_LLM_MAX_RETRIES;
   const promptVersion = options.promptVersion ?? "unversioned";
   const { client } = createLlm(model);
   const started = Date.now();
@@ -79,7 +108,7 @@ export async function chatJson<T>(
         response_format: { type: "json_object" } as never,
         temperature: options.temperature ?? 0.3,
       },
-      { timeout: timeoutMs },
+      { timeout: timeoutMs, maxRetries },
     );
     usage.latencyMs = Date.now() - started;
     usage.promptTokens = completion.usage?.prompt_tokens ?? null;
@@ -99,7 +128,7 @@ export async function chatJson<T>(
     usage.latencyMs = Date.now() - started;
     usage.failed = true;
     const message = e instanceof Error ? e.message : String(e);
-    usage.errorCode = /timeout|abort/i.test(message) ? "timeout" : "network";
+    usage.errorCode = classifyLlmError(message);
     usage.errorMessage = message;
     console.error("[LLM] hiba, fallback:", message);
     return { data: fallback, raw: "", usage };

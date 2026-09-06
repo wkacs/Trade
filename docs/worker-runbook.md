@@ -214,6 +214,34 @@ látszik.
 | `persist_failed` | a mentés nem sikerült | a ciklus eredménye nem tartós; a hiba nem tűnik el magától |
 | ML: `KARANTÉN: nincs ML-jel` | a `model.json` feature-verziója régi | újratréning kell (`pnpm tsx scripts/train-model.ts`) |
 | `binance` forrás: `HTTP 451`, `bars 0/48` | a függvény-régió IP-jét a Binance jogi okból blokkolja | a `vercel.json` `regions` értéke maradjon EU-ban (`fra1`) |
+| minden döntés `LLM hiba, HOLD` | a GLM válaszideje meghaladja a kliens időkorlátját | `DEFAULT_LLM_TIMEOUT_MS` (mérés alapján 75 s), lásd lent |
+
+### Az LLM időkorlátja
+
+2026-09-06 mérés a prod kulccsal, éles méretű (~12k token) phase-1 prompttal:
+
+```
+#1 OK 53 159 ms · 11 555 token
+#2 429 该模型当前访问量过大 (forgalomkorlát)
+#3 OK 29 863 ms · 12 240 token
+```
+
+A `glm-4-flash` tipikusan 30-53 másodperc alatt válaszol, a korábbi 30 s-os kliens-korlát
+tehát a hívások többségét levágta: a tickek `LLM hiba, HOLD` szöveggel futottak, és a
+naplóban ez megkülönböztethetetlen volt egy valóban nyugodt órától.
+
+Amit a mérés után rögzítettünk:
+
+- `DEFAULT_LLM_TIMEOUT_MS = 75_000`, `DEFAULT_LLM_MAX_RETRIES = 1`;
+- a phase-2 `maxRetries: 0`, hogy a két fázis biztosan beleférjen a route 300 s-os
+  `maxDuration` keretébe (legrosszabb eset: 2 × 75 s + 75 s);
+- a hibaosztályozás külön kezeli a `rate_limited` esetet, és az SDK „Request timed out."
+  üzenetét végre időtúllépésnek ismeri fel (korábban `network`-nek látszott);
+- a phase-1 hívás mérhető adatai bekerülnek a tick health-be (`llmPhase1`), és a
+  TickInspector külön sorban mutatja a phase-1 és a phase-2 hívást.
+
+Ha a `429` gyakori lesz, az a modell ingyenes szintjének forgalomkorlátja: vagy fizetős
+szint kell, vagy ritkább tick.
 
 ### Régió: miért `fra1`
 

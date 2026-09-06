@@ -43,8 +43,17 @@ export interface TickHealth {
   ml: { usable: boolean; detail: string | null; signalCount: number };
   /** Napi kapu: forrás, napi hozam (null = nem mérhető), latch. */
   dayGate: { source: string; dayPnlPct: number | null; latched: boolean; blockNewBuys: boolean };
-  /** Az LLM mérhető költsége. null = nem volt hívás; a hiányzó tokenszám NEM nulla. */
+  /** Az LLM mérhető költsége (phase-2). null = nem volt hívás; a hiányzó tokenszám NEM nulla. */
   llm: { model: string; promptVersion: string; latencyMs: number; totalTokens: number | null; failed: boolean } | null;
+  /** A phase-1 szűrő hívása. Enélkül a bukott szűrő „nyugodt órának" látszana. */
+  llmPhase1?: {
+    model: string;
+    promptVersion: string;
+    latencyMs: number;
+    totalTokens: number | null;
+    failed: boolean;
+    errorCode?: string;
+  } | null;
   /** Az egyes szakaszok időtartama ms-ban (stage latency). */
   stageMs: Record<string, number>;
 }
@@ -110,7 +119,14 @@ export function explainNoTrade(process: TickProcess): string[] {
       if (!c.ok) reasons.push(`Adatforrás hiba: ${c.name}${c.error ? ` — ${c.error}` : ""}.`);
     }
   }
-  if (!process.phase1.shouldDecide) reasons.push("A phase-1 szűrő szerint nem volt döntésre érdemes esemény.");
+  // A bukott phase-1 NEM ugyanaz, mint egy nyugodt óra: a HOLD ilyenkor hiba, nem ítélet.
+  if (h?.llmPhase1?.failed) {
+    reasons.push(
+      `A phase-1 LLM-hívás hibázott (${h.llmPhase1.errorCode ?? "ismeretlen"}, ${h.llmPhase1.latencyMs} ms) — a ciklus HOLD-ra esett vissza.`,
+    );
+  } else if (!process.phase1.shouldDecide) {
+    reasons.push("A phase-1 szűrő szerint nem volt döntésre érdemes esemény.");
+  }
   if (process.decision.overridden && process.decision.overrideReason) {
     reasons.push(`Kockázati kapu: ${process.decision.overrideReason}`);
   }

@@ -157,3 +157,28 @@ describe("explainNoTrade — a forrás-hiba OKA is látszik", () => {
     expect(explainNoTrade(p).join(" ")).toMatch(/Adatforrás hiba: rss/);
   });
 });
+
+describe("explainNoTrade — a bukott phase-1 nem álcázható „nyugodt órának”", () => {
+  it("az LLM hibáját nevezi meg, nem azt, hogy nem volt érdemi esemény", () => {
+    const p = emptyProcess({
+      phase1: { shouldDecide: false, summary: "LLM hiba, HOLD." },
+      health: health({
+        llmPhase1: { model: "glm-4-flash", promptVersion: "p1", latencyMs: 75210, totalTokens: null, failed: true, errorCode: "timeout" },
+      }),
+    });
+    const joined = explainNoTrade(p).join(" ");
+    expect(joined).toMatch(/phase-1 LLM/);
+    expect(joined).toMatch(/timeout/);
+    expect(joined).not.toMatch(/nem volt döntésre érdemes esemény/);
+  });
+
+  it("sikeres phase-1 után marad a valódi ok", () => {
+    const p = emptyProcess({
+      phase1: { shouldDecide: false, summary: "Nyugodt óra." },
+      health: health({
+        llmPhase1: { model: "glm-4-flash", promptVersion: "p1", latencyMs: 20000, totalTokens: 900, failed: false },
+      }),
+    });
+    expect(explainNoTrade(p).join(" ")).toMatch(/nem volt döntésre érdemes esemény/);
+  });
+});

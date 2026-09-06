@@ -152,6 +152,8 @@ export interface TickResult {
   signals: Record<string, { bars: number; requiredBars: number; sufficient: boolean; trendOk: boolean; momentumOk: boolean }>;
   /** Az LLM-hívás mérhető adatai (T16). null, ha nem volt phase-2 hívás. */
   llm: import("@/lib/llm/client").LlmUsage | null;
+  /** A phase-1 szűrő hívása — a bukott szűrő különbözik a nyugodt órától. */
+  llmPhase1: import("@/lib/llm/client").LlmUsage | null;
   /** Az ML-modell állapota és a kihagyott feature-ök (adathiány láthatósága). */
   ml: {
     modelUsable: boolean;
@@ -621,9 +623,19 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   // történhet, mert az külön bemenetet és külön költséget hozna minden számlára.
   const phase1 = await stage("phase1", () =>
     input.decisionReplay
-      ? Promise.resolve({ shouldDecide: true, summary: "Megosztott baseline-döntés újrajátszása." })
+      ? Promise.resolve({
+          shouldDecide: true,
+          summary: "Megosztott baseline-döntés újrajátszása.",
+          notableEvents: [],
+          usage: null,
+        })
       : input.aiEnabled === false
-      ? Promise.resolve({ shouldDecide: false, summary: "AI explicit módon kikapcsolva ehhez a futáshoz." })
+      ? Promise.resolve({
+          shouldDecide: false,
+          summary: "AI explicit módon kikapcsolva ehhez a futáshoz.",
+          notableEvents: [],
+          usage: null,
+        })
       : shouldDecide(llmEvents),
   );
 
@@ -809,6 +821,16 @@ export async function runTick(input: TickInput): Promise<TickResult> {
             failed: llmUsage.failed,
           }
         : null,
+      llmPhase1: phase1.usage
+        ? {
+            model: phase1.usage.model,
+            promptVersion: phase1.usage.promptVersion,
+            latencyMs: phase1.usage.latencyMs,
+            totalTokens: phase1.usage.totalTokens,
+            failed: phase1.usage.failed,
+            errorCode: phase1.usage.errorCode,
+          }
+        : null,
       stageMs,
     },
     tickId: input.tickId,
@@ -861,6 +883,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       error: o.error ?? null,
     })),
     llm: llmUsage,
+    llmPhase1: phase1.usage ?? null,
     signals: Object.fromEntries(
       Object.entries(signalsBySymbol).map(([sym, sig]) => [
         sym,

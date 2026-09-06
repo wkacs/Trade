@@ -116,6 +116,9 @@ export async function decide(input: DecideInput): Promise<DecideResult> {
   const model = process.env.LLM_MODEL_PHASE2 ?? "glm-5.2";
   const { data, raw, usage } = await chatJson<unknown>(model, SYSTEM, user, null, {
     timeoutMs: input.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS,
+    // A phase-1 már elvitte a keret egy részét: itt nincs újrapróbálkozás, hogy a tick
+    // biztosan beleférjen a route 300 s-os maxDuration-jébe.
+    maxRetries: 0,
     promptVersion: PHASE2_PROMPT_VERSION,
   });
 

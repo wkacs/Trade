@@ -38,6 +38,7 @@ function result(input: TickInput): TickResult {
     collectors: [],
     signals: {},
     llm: null,
+    llmPhase1: null,
     ml: { modelUsable: true, modelDetail: null, signalCount: 0, skipped: [] },
     replayInput: {
       ...(input.replay ?? { quoteSnapshot: { quotes: {}, errors: [], maxAgeMs: 0, degraded: false }, events: [], collectorOutcomes: [] }),

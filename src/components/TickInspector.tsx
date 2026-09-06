@@ -127,7 +127,18 @@ function HealthBlock({ health, process: p }: { health: NonNullable<TickProcess["
         />
         <Health label="Adatforrás" value={failedSources.length === 0 ? "rendben" : failedSources.join(", ")} warn={failedSources.length > 0} />
         <Health
-          label="LLM"
+          label="LLM phase-1"
+          value={
+            health.llmPhase1
+              ? health.llmPhase1.failed
+                ? `hiba: ${health.llmPhase1.errorCode ?? "ismeretlen"} · ${health.llmPhase1.latencyMs} ms`
+                : `${health.llmPhase1.totalTokens ?? "n/a"} token · ${health.llmPhase1.latencyMs} ms`
+              : "nem hívva"
+          }
+          warn={health.llmPhase1?.failed === true}
+        />
+        <Health
+          label="LLM phase-2"
           value={health.llm ? `${health.llm.totalTokens ?? "n/a"} token · ${health.llm.latencyMs} ms` : "nem hívva"}
           warn={health.llm?.failed === true}
         />

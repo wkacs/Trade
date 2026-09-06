@@ -1,5 +1,5 @@
 import type { DataPoint } from "@/lib/types";
-import { chatJson } from "./client";
+import { chatJson, type LlmUsage } from "./client";
 import { Phase1ResultSchema, type Phase1Result } from "./schemas";
 
 const SYSTEM = `Te egy kripto-trading asszisztens első szűrő fázisa vagy.
@@ -19,13 +19,22 @@ semmilyen extra szöveg vagy mező nélkül:
 }
 Ha nincs semmi érdemi: {"shouldDecide": false, "summary": "...", "notableEvents": []}.`;
 
+/** A phase-1 eredménye a hívás mérhető adataival együtt. */
+export interface Phase1Outcome extends Phase1Result {
+  /** Az LLM-hívás mérhető adatai. `null`, ha nem is volt hívás. */
+  usage: LlmUsage | null;
+}
+
 /**
  * Phase-1: GLM-4-Flash (ingyenes) minden órában. Ez a ciklus 90%-a.
  * Lásd spec §3.2.
+ *
+ * A `usage` KÖTELEZŐEN kijön: enélkül egy bukott phase-1 a naplóban ugyanúgy nézne ki,
+ * mint egy nyugodt óra — 2026-09-06-án órákig ez rejtette el a 30 s-os időtúllépéseket.
  */
-export async function shouldDecide(events: DataPoint[]): Promise<Phase1Result> {
+export async function shouldDecide(events: DataPoint[]): Promise<Phase1Outcome> {
   if (events.length === 0) {
-    return { shouldDecide: false, summary: "Nincsenek események.", notableEvents: [] };
+    return { shouldDecide: false, summary: "Nincsenek események.", notableEvents: [], usage: null };
   }
   const compact = events.map((e) => ({
     s: e.symbol,
@@ -42,7 +51,7 @@ export async function shouldDecide(events: DataPoint[]): Promise<Phase1Result> {
     summary: "LLM hiba, HOLD.",
     notableEvents: [],
   };
-  const { data, raw } = await chatJson<Phase1Result>(
+  const { data, raw, usage } = await chatJson<Phase1Result>(
     process.env.LLM_MODEL_PHASE1 ?? "glm-4-flash",
     SYSTEM,
     JSON.stringify(compact),
@@ -53,7 +62,7 @@ export async function shouldDecide(events: DataPoint[]): Promise<Phase1Result> {
   const parsed = Phase1ResultSchema.safeParse(data);
   if (!parsed.success) {
     console.warn("[phase1] séma-eltérés → HOLD. Nyers kimenet:", raw.slice(0, 200));
-    return fallback;
+    return { ...fallback, usage: usage ?? null };
   }
-  return parsed.data;
+  return { ...parsed.data, usage: usage ?? null };
 }

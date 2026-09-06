@@ -40,3 +40,23 @@ describe("shouldDecide (phase-1)", () => {
     expect(result.shouldDecide).toBe(false);
   });
 });
+
+describe("shouldDecide — a hívás mérhető adatai nem vesznek el", () => {
+  it("továbbadja az LLM usage-t, hogy a tick health láthassa a hibát", async () => {
+    (chatJson as any).mockResolvedValue({
+      data: { shouldDecide: false, summary: "LLM hiba, HOLD.", notableEvents: [] },
+      raw: "",
+      usage: { model: "glm-4-flash", promptVersion: "p1", latencyMs: 75123, failed: true, errorCode: "timeout" },
+    });
+    const r = await shouldDecide([
+      { source: "coingecko", symbol: "BTC", timestamp: 1, kind: "price", price: { usd: 1, volume24h: 1, change24hPct: 0 } },
+    ]);
+    expect(r.usage?.failed).toBe(true);
+    expect(r.usage?.errorCode).toBe("timeout");
+  });
+
+  it("hívás nélküli ágon a usage null, nem kitalált érték", async () => {
+    const r = await shouldDecide([]);
+    expect(r.usage).toBeNull();
+  });
+});
