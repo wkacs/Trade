@@ -215,6 +215,29 @@ látszik.
 | ML: `KARANTÉN: nincs ML-jel` | a `model.json` feature-verziója régi | újratréning kell (`pnpm tsx scripts/train-model.ts`) |
 | `binance` forrás: `HTTP 451`, `bars 0/48` | a függvény-régió IP-jét a Binance jogi okból blokkolja | a `vercel.json` `regions` értéke maradjon EU-ban (`fra1`) |
 | minden döntés `LLM hiba, HOLD` | a GLM válaszideje meghaladja a kliens időkorlátját | `DEFAULT_LLM_TIMEOUT_MS` (mérés alapján 75 s), lásd lent |
+| `BUY` döntés, mégis `staleSkips` és nincs kötés | az indulási ár elöregedett az LLM-szakasz alatt | beküldés előtti ár-frissítés (lásd lent); ha a frissítés is elavult, az a helyes fail-closed |
+
+### Miért frissítünk árat közvetlenül a beküldés előtt
+
+2026-09-06, 17:08 UTC: az első sikeres AI-döntés `BUY BTC` lett, a Risk Manager átengedte,
+kötés mégsem történt. A tick-rekord:
+
+```
+staleSkips: [{"symbol":"BTC","side":"BUY","reason":"stale","ageMs":62699}]
+```
+
+A tick az árat a ciklus ELEJÉN kéri le, szándékosan: a kilépésnek nem szabad hírre vagy
+LLM-re várnia. Csakhogy a döntési út ezután még lefuttatja a phase-1-et (33.6 s) és a
+phase-2-t (28.3 s), így a beküldéskor az ár **62 másodperces** volt, a frissességi küszöb
+pedig 10 másodperc. Vagyis minden AI-vezérelt vétel némán elhalt, bármilyen jó volt a jel.
+
+A javítás: ha a beküldés előtti ellenőrzés `stale`-t talál, a tick EGYSZER frissíti az árat,
+és azzal ellenőriz újra. A `pricesDec` is frissül, hogy a fill a friss áron számoljon.
+Replayben NINCS frissítés: ott a rögzített pillanatkép a bemenet, különben a páros mérés
+összehasonlíthatatlanná válna. Ha a frissített ár is elavult, a rendszer továbbra sem köt —
+ez a helyes fail-closed viselkedés, nem hiba.
+
+A TickInspector „Ár-frissítés" sora mutatja, hányszor kellett és hányszor sikerült.
 
 ### Az LLM időkorlátja
 

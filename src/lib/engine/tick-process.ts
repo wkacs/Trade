@@ -35,6 +35,8 @@ export interface TickHealth {
   quotesDegraded: boolean;
   /** Elavult vagy hiányzó ár miatt kihagyott orderek. */
   staleSkips: { symbol: string; side: string; reason: string; ageMs: number | null }[];
+  /** Beküldés előtti ár-frissítések (az LLM-szakasz alatt elöregedett quote pótlása). */
+  quoteRefreshes?: { symbol: string; beforeAgeMs: number | null; afterAgeMs: number | null; ok: boolean }[];
   /** Forrásonkénti kimenetel (melyik adott adatot, mennyi idő alatt, milyen hibával). */
   collectors: { name: string; ok: boolean; points: number; durationMs: number; error?: string | null }[];
   /** Adat-elégségesség symbolonként (a stratégia visszatekintéséhez). */

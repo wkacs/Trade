@@ -34,7 +34,7 @@ function result(input: TickInput): TickResult {
     tradingEnabled: true,
     dayGate: { dayUtc: "", source: "test", dayPnlPct: 0, latched: false, blockNewBuys: false, reason: "" },
     inceptionPnlPct: 0,
-    quotes: { maxAgeMs: 0, degraded: false, errors: [], staleSkips: [] },
+    quotes: { maxAgeMs: 0, degraded: false, errors: [], staleSkips: [], refreshes: [] },
     collectors: [],
     signals: {},
     llm: null,

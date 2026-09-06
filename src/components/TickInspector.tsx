@@ -125,6 +125,13 @@ function HealthBlock({ health, process: p }: { health: NonNullable<TickProcess["
           value={health.ml.usable ? `${health.ml.signalCount} jel` : "karantén"}
           warn={!health.ml.usable}
         />
+        {health.quoteRefreshes && health.quoteRefreshes.length > 0 && (
+          <Health
+            label="Ár-frissítés"
+            value={`${health.quoteRefreshes.filter((r) => r.ok).length}/${health.quoteRefreshes.length} sikeres`}
+            warn={health.quoteRefreshes.some((r) => !r.ok)}
+          />
+        )}
         <Health label="Adatforrás" value={failedSources.length === 0 ? "rendben" : failedSources.join(", ")} warn={failedSources.length > 0} />
         <Health
           label="LLM phase-1"

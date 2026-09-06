@@ -145,6 +145,8 @@ export interface TickResult {
     degraded: boolean;
     errors: { symbol: string; code: string }[];
     staleSkips: { symbol: string; side: string; reason: string; ageMs: number | null }[];
+    /** Beküldés előtti ár-frissítések: az LLM-szakasz alatt elöregedett quote pótlása. */
+    refreshes: { symbol: string; beforeAgeMs: number | null; afterAgeMs: number | null; ok: boolean }[];
   };
   /** A collectorok kimenetele (melyik forrás mit adott, mennyi idő alatt, milyen hibával). */
   collectors: { name: string; ok: boolean; points: number; durationMs: number; error?: string | null }[];
@@ -380,6 +382,14 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   let intentSeq = 0;
   /** Elavult vagy hiányzó ár miatt kihagyott orderek — mérhető állapot, nem néma. */
   const staleSkips: { symbol: string; side: string; reason: string; ageMs: number | null }[] = [];
+  /**
+   * Beküldés előtti ár-frissítések. A tick elején lekért ár a phase-1 + phase-2 alatt
+   * (mérve 30-60 s) TÚLLÉPI a 10 másodperces frissességi küszöböt, ezért minden
+   * AI-döntés „stale" jelzéssel elhalt, mielőtt kötésre került volna.
+   */
+  const quoteRefreshes: { symbol: string; beforeAgeMs: number | null; afterAgeMs: number | null; ok: boolean }[] = [];
+  /** A végrehajtáskor érvényes pillanatkép — a frissítés ezt cseréli le. */
+  let liveQuotes: QuoteSnapshot = quoteSnapshot;
   /** A stratégiai jelek és az adat-elégségesség symbolonként. */
   let signalsBySymbol: Record<string, SymbolSignals> = {};
 
@@ -450,7 +460,25 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       return null;
     }
     // UTOLSÓ ellenőrzés a beküldés előtt: elavult árra NEM megy ki market order.
-    const check = checkExecutionQuote(quoteSnapshot, req.symbol, now(), DEFAULT_QUOTE_MAX_AGE_MS);
+    let check = checkExecutionQuote(liveQuotes, req.symbol, now(), DEFAULT_QUOTE_MAX_AGE_MS);
+    // Elavult ár esetén EGYSZER frissítünk. Replayben nem: ott a rögzített pillanatkép
+    // a bemenet, és egy friss hálózati hívás elrontaná a páros mérés összehasonlíthatóságát.
+    if (!check.ok && check.reason === "stale" && !input.replay) {
+      const beforeAgeMs = check.ageMs;
+      try {
+        liveQuotes = await fetchQuotes([...COIN_UNIVERSE], { now });
+        for (const [symbol, q] of Object.entries(liveQuotes.quotes)) pricesDec[symbol] = q.mid;
+        check = checkExecutionQuote(liveQuotes, req.symbol, now(), DEFAULT_QUOTE_MAX_AGE_MS);
+      } catch (e) {
+        console.error(`[tick] ${req.symbol} ár-frissítés sikertelen:`, e);
+      }
+      quoteRefreshes.push({
+        symbol: req.symbol,
+        beforeAgeMs,
+        afterAgeMs: check.ok ? 0 : check.ageMs,
+        ok: check.ok,
+      });
+    }
     if (!check.ok) {
       console.warn(
         `[tick] ${req.symbol} ${req.side} KIHAGYVA: a végrehajtási ár ${check.reason}` +
@@ -788,6 +816,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       quoteAgeMs: Object.keys(quoteSnapshot.quotes).length > 0 ? quoteSnapshot.maxAgeMs : null,
       quotesDegraded: quoteSnapshot.degraded,
       staleSkips,
+      quoteRefreshes,
       collectors: collectorOutcomes.map((o) => ({
         name: o.name,
         ok: o.ok,
@@ -874,6 +903,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       degraded: quoteSnapshot.degraded,
       errors: quoteSnapshot.errors.map((e) => ({ symbol: e.symbol, code: e.code })),
       staleSkips,
+      refreshes: quoteRefreshes,
     },
     collectors: collectorOutcomes.map((o) => ({
       name: o.name,

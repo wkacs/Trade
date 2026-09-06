@@ -57,6 +57,7 @@ vi.mock("@/lib/execution/order-store", () => ({
 }));
 
 import { collectAllWithOutcomes } from "@/lib/collectors/base";
+import { fetchQuotes } from "@/lib/market/quotes";
 import { shouldDecide } from "@/lib/llm/phase1-filter";
 import { decide } from "@/lib/llm/phase2-decide";
 import { predict } from "@/lib/ml/predictor";
@@ -421,5 +422,77 @@ describe("runTick — AI-intent és valós portfóliókontextus (T16)", () => {
     expect(decide).not.toHaveBeenCalled();
     expect(result.llm).toBeNull();
     expect(result.process.phase1.shouldDecide).toBe(false);
+  });
+});
+
+describe("runTick — az LLM alatt elöregedett végrehajtási ár", () => {
+  beforeEach(() => {
+    vi.stubEnv("TRADING_MODE", "paper");
+    mockMarket([priceEvent("BTC", 60000)]);
+    (predict as any).mockResolvedValue([]);
+    setLedgerFixture(10000, []);
+    (loadPortfolioState as any).mockResolvedValue({
+      portfolioId: "pf-test",
+      cashUsd: 10000,
+      initialCapitalUsd: 10000,
+      positions: [],
+      totalEquity: () => 10000,
+      dayPnlPct: 0,
+    });
+    (shouldDecide as any).mockResolvedValue({
+      shouldDecide: true,
+      summary: "ETF hír",
+      notableEvents: [{ symbol: "BTC", reason: "inflow" }],
+      usage: null,
+    });
+    mockDecision({
+      action: "BUY",
+      symbol: "BTC",
+      amountPct: 0.15,
+      confidence: 0.7,
+      reasoning: "ETF inflow → bullish.",
+    });
+    // A hívásszámlálót minden esetben nullázzuk: a korábbi tesztek hívásai nem
+    // keveredhetnek bele, és az alapértelmezett (friss) implementáció áll vissza.
+    (fetchQuotes as any).mockClear();
+    (fetchQuotes as any).mockImplementation(async () => mockQuoteSnapshot);
+  });
+
+  /** Az indulási quote 62 másodperces, mert közben lefutott phase-1 + phase-2. */
+  const stale = (ageMs: number) => ({
+    quotes: {
+      BTC: {
+        symbol: "BTC",
+        bid: "60000",
+        ask: "60000",
+        mid: "60000",
+        exchangeTime: null,
+        receivedAt: Date.now() - ageMs,
+        source: "binance-book",
+      },
+    },
+    errors: [],
+    maxAgeMs: ageMs,
+    degraded: false,
+  });
+
+  it("beküldés előtt frissíti az árat, így az AI-döntés nem hal el némán", async () => {
+    // 1. hívás (tick eleje): 62 s régi ár. 2. hívás (frissítés): a friss mockQuoteSnapshot.
+    (fetchQuotes as any).mockImplementationOnce(async () => stale(62_000));
+    const result = await runTick({ tickId: "2026-06-25-stale-1", paperMode: true });
+    expect(fetchQuotes).toHaveBeenCalledTimes(2);
+    expect(result.trade).toBeTruthy();
+    expect(result.quotes.staleSkips).toHaveLength(0);
+    expect(result.quotes.refreshes).toHaveLength(1);
+    expect(result.quotes.refreshes[0]).toMatchObject({ symbol: "BTC", ok: true });
+  });
+
+  it("ha a frissítés is elavult árat ad, FAIL-CLOSED marad: nincs kötés", async () => {
+    (fetchQuotes as any).mockImplementation(async () => stale(62_000));
+    const result = await runTick({ tickId: "2026-06-25-stale-2", paperMode: true });
+    expect(fetchQuotes).toHaveBeenCalledTimes(2);
+    expect(result.trade).toBeNull();
+    expect(result.quotes.staleSkips[0]).toMatchObject({ symbol: "BTC", side: "BUY", reason: "stale" });
+    expect(result.quotes.refreshes[0]).toMatchObject({ symbol: "BTC", ok: false });
   });
 });
