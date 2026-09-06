@@ -82,7 +82,7 @@ export const decisions = pgTable("decisions", {
   overrideReason: text("override_reason"),
   /** Döntéskori pillanatkép a kiértékeléshez: { prices, intent (rawAction), intentSymbol, intentAmountPct }. */
   ref: jsonb("ref"),
-  /** ~1h múlva kitöltött kiértékelés: { horizonHours, changePct, hypotheticalPnlPct, wouldProfit, ... }. */
+  /** ~1h múlva kitöltött IRÁNY-kiértékelés: { horizonHours, changePct, directionalScorePct, directionHit, unscored? }. */
   outcome: jsonb("outcome"),
 });
 

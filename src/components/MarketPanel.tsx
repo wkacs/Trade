@@ -6,11 +6,18 @@ export interface MlSignalView {
   confidence: number;
 }
 
+/**
+ * A `/api/portfolio` `performance` mezőjének UI-tükre. A mezőnevek SZÁNDÉKOSAN
+ * egyeznek a backend `PerformanceSummary`-jával (src/lib/portfolio/evaluate.ts):
+ * ez irány-diagnosztika, NEM realizált profit.
+ */
 export interface PerfView {
   evaluated: number;
   actionable: number;
   hitRate: number | null;
-  avgHypotheticalPnlPct: number;
+  /** Átlagos IRÁNY-pontszám %-ban. NEM hozam. */
+  avgDirectionalScorePct: number;
+  unscored?: Record<string, number>;
 }
 
 /** ML-jel (per-coin irány/bizonyosság + modell AUC) + a döntés-kiértékelés összesítője. */
@@ -23,6 +30,13 @@ export function MarketPanel({
   mlAuc: number | null;
   performance?: PerfView;
 }) {
+  // Csak akkor mutatunk számot, ha van mit átlagolni ÉS a mező tényleg szám
+  // (régi, T20 előtti sorokon hiányozhat).
+  const score =
+    performance && performance.actionable > 0 && Number.isFinite(performance.avgDirectionalScorePct)
+      ? performance.avgDirectionalScorePct
+      : null;
+
   return (
     <section className="rounded-xl border border-line bg-panel p-5">
       <h2 className="font-display text-[11px] font-medium uppercase tracking-[0.2em] text-dim">
@@ -57,11 +71,15 @@ export function MarketPanel({
           <span className="text-dim">
             {performance.hitRate == null ? "—" : `${Math.round(performance.hitRate * 100)}%`}
           </span>{" "}
-          · átlag hipo{" "}
-          <span className={performance.avgHypotheticalPnlPct >= 0 ? "text-up" : "text-down"}>
-            {performance.avgHypotheticalPnlPct >= 0 ? "+" : ""}
-            {performance.avgHypotheticalPnlPct.toFixed(2)}%
-          </span>
+          · átlag irány-pontszám{" "}
+          {score == null ? (
+            <span className="text-dim">—</span>
+          ) : (
+            <span className={score >= 0 ? "text-up" : "text-down"}>
+              {score >= 0 ? "+" : ""}
+              {score.toFixed(2)}%
+            </span>
+          )}
         </div>
       )}
     </section>

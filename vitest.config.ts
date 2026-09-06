@@ -8,6 +8,9 @@ import path from "path";
  * éles adatbázist.
  */
 export default defineConfig({
+  // A komponens-szerződés tesztek .tsx forrást importálnak: automatikus JSX-runtime kell,
+  // különben az esbuild klasszikus React.createElement hívást fordít, és `React is not defined`.
+  esbuild: { jsx: "automatic" },
   resolve: {
     alias: {
       "@": path.join(process.cwd(), "src"),

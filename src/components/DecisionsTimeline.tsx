@@ -71,8 +71,9 @@ export function DecisionsTimeline() {
             ))}
             {decisions.length === 0 && (
               <li className="font-mono text-xs text-faint">
-                Még üres a napló. Az első óránkénti tick után itt jelenik meg az AI döntése —
-                vagy indítsd kézzel a GitHub Actions „hourly-tick" workflow-t.
+                Még üres a napló. Az első tick után itt jelenik meg az AI döntése — a ciklust
+                az aktív ütemező indítja (worker, GitHub Actions vagy külső HTTP-cron), kézzel
+                pedig a hitelesített POST /api/cron/tick hívás.
               </li>
             )}
           </ol>

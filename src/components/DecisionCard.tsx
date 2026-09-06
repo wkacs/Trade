@@ -14,12 +14,17 @@ export interface DecisionRow {
   model?: string;
   overridden: boolean;
   overrideReason: string | null;
+  /**
+   * A `decisions.outcome` oszlop tükre. A mezőnevek a backend `DecisionOutcome`-jából
+   * jönnek (src/lib/portfolio/evaluate.ts): irány-pontszám, NEM realizált profit.
+   */
   outcome?: {
     horizonHours: number;
     refSymbol: string | null;
     changePct: number;
-    hypotheticalPnlPct: number;
-    wouldProfit: boolean | null;
+    directionalScorePct: number;
+    directionHit: boolean | null;
+    unscored?: "stale_horizon" | "missing_price" | "no_intent";
   } | null;
   ref?: { prices?: Record<string, number> } | null;
 }
@@ -98,30 +103,55 @@ function Confidence({ v }: { v: number }) {
   );
 }
 
+const UNSCORED_LABEL: Record<string, string> = {
+  stale_horizon: "elavult horizont",
+  missing_price: "hiányzó ár",
+  no_intent: "nincs szándék",
+};
+
+const pct = (v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+
+/**
+ * A döntés utólagos IRÁNY-verdiktje. Defenzív: a T20 előtti sorokon a mai mezők
+ * hiányoznak, és egy `undefined.toFixed()` az egész dashboardot ledöntené.
+ */
 function Outcome({ outcome }: { outcome: DecisionRow["outcome"] }) {
   if (!outcome) {
     return (
       <span className="font-mono text-[11px] text-faint">kiértékelés ~1h múlva…</span>
     );
   }
-  const { wouldProfit, hypotheticalPnlPct, changePct, refSymbol, horizonHours } = outcome;
-  if (wouldProfit === null) {
+  const { directionHit, directionalScorePct, changePct, refSymbol, horizonHours, unscored } =
+    outcome;
+
+  if (unscored) {
     return (
-      <span className="font-mono text-[11px] text-dim">
-        {horizonHours}h: piac {changePct >= 0 ? "+" : ""}
-        {changePct.toFixed(2)}% — HOLD, semleges
+      <span className="font-mono text-[11px] text-faint">
+        nem pontozható — {UNSCORED_LABEL[unscored] ?? unscored}
       </span>
     );
   }
+
+  const score = Number.isFinite(directionalScorePct) ? directionalScorePct : null;
+  const change = Number.isFinite(changePct) ? changePct : null;
+
+  // HOLD (directionHit === null) vagy hiányzó pontszám → semleges sor, számok nélkül.
+  if (directionHit == null || score == null) {
+    return (
+      <span className="font-mono text-[11px] text-dim">
+        {horizonHours}h: piac {change == null ? "—" : pct(change)} — semleges
+      </span>
+    );
+  }
+
   return (
     <span
-      className={`flex items-center gap-1.5 font-mono text-[11px] ${wouldProfit ? "text-up" : "text-down"}`}
+      className={`flex items-center gap-1.5 font-mono text-[11px] ${directionHit ? "text-up" : "text-down"}`}
     >
-      <span>{wouldProfit ? "✓ bejött volna" : "✗ nem jött be"}</span>
+      <span>{directionHit ? "✓ eltalálta az irányt" : "✗ nem találta el"}</span>
       <span className="text-faint">·</span>
       <span className="tabular-nums">
-        {refSymbol} {hypotheticalPnlPct >= 0 ? "+" : ""}
-        {hypotheticalPnlPct.toFixed(2)}% ({horizonHours}h)
+        {refSymbol} {pct(score)} ({horizonHours}h)
       </span>
     </span>
   );

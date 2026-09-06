@@ -72,6 +72,11 @@ export function Dashboard() {
   const equity = cashUsd + positionsValue;
   const pnlPct = initial > 0 ? (equity / initial - 1) * 100 : 0;
   const perf = data?.performance;
+  // Irány-pontszám (NEM profit): csak pontozható döntésekre és csak ha tényleg szám.
+  const dirScore =
+    perf && perf.actionable > 0 && Number.isFinite(perf.avgDirectionalScorePct)
+      ? perf.avgDirectionalScorePct
+      : null;
   const hasDb = !!data?.portfolio;
   const fg = market?.fearGreed;
 
@@ -133,14 +138,10 @@ export function Dashboard() {
             sub={perf ? `${perf.actionable} szándék` : undefined}
           />
           <Gauge
-            label="Átlag hipo. P&L"
-            value={
-              perf && perf.actionable > 0
-                ? `${perf.avgHypotheticalPnlPct >= 0 ? "+" : ""}${perf.avgHypotheticalPnlPct.toFixed(2)}%`
-                : "—"
-            }
-            tone={perf && perf.avgHypotheticalPnlPct >= 0 ? "up" : "down"}
-            muted={!perf || perf.actionable === 0}
+            label="Átlag irány-pontszám"
+            value={dirScore == null ? "—" : `${dirScore >= 0 ? "+" : ""}${dirScore.toFixed(2)}%`}
+            tone={dirScore != null && dirScore < 0 ? "down" : "up"}
+            muted={dirScore == null}
           />
         </section>
 
