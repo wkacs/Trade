@@ -8,6 +8,8 @@ const feat = (over: Partial<MlFeatures> = {}): MlFeatures => ({
   return4h: 0.02,
   volatility4h: 0.015,
   volumeRatio: 1.2,
+  fundingRatePct: 0.003,
+  premiumPct: 0.1,
   featureVersion: FEATURE_VERSION,
   asOf: 1_700_000_000_000,
   timeframe: "1h",
@@ -20,10 +22,10 @@ const goodModel = {
   features: [...FEATURE_NAMES],
   featureVersion: FEATURE_VERSION,
   // Negatív súlyok: a tanult mean-reversion (erős emelkedés után inkább lefelé).
-  weights: [-0.5, -0.6, -0.05, -0.01],
+  weights: [-0.5, -0.6, -0.05, -0.01, 0, 0],
   bias: 0,
-  mean: [0, 0, 0, 1],
-  std: [0.01, 0.02, 0.003, 0.8],
+  mean: [0, 0, 0, 1, 0, 0],
+  std: [0.01, 0.02, 0.003, 0.8, 0.01, 0.2],
   trainedAtMs: 1_700_000_000_000,
   metrics: { testAuc: 0.55, testAcc: 0.54, testBaseUp: 0.5 },
 };

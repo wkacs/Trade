@@ -22,6 +22,13 @@ export interface MlFeatures {
   volatility4h: number;
   /** A záró gyertya base-volumene az ablak átlagához képest (>1 = felfutó forgalom). */
   volumeRatio: number;
+  /**
+   * Finanszírozási ráta százalékban a döntés pillanatában. NEM az árból származik:
+   * azt méri, mennyibe kerül a tömegnek longban ülni.
+   */
+  fundingRatePct: number;
+  /** Coinbase (USD) vs Binance (USDT) prémium százalékban — US-oldali kereslet jele. */
+  premiumPct: number;
   /** A feature-készlet verziója — a modellartefaktumnak EZZEL kell egyeznie. */
   featureVersion: string;
   /** A legutolsó felhasznált gyertya záró ideje (a jel kora ebből mérhető). */
@@ -33,10 +40,17 @@ export interface MlFeatures {
  * A feature-készlet verziója. VÁLTOZTASD, ha bármelyik feature JELENTÉSE módosul.
  * A régi modellt tilos új jelentésű feature-ökkel tovább használni.
  */
-export const FEATURE_VERSION = "f2-2026-09-05";
+export const FEATURE_VERSION = "f3-2026-09-06";
 
 /** A feature-ök sorrendje — a modell súlyai ehhez a sorrendhez tartoznak. */
-export const FEATURE_NAMES = ["return1h", "return4h", "volatility4h", "volumeRatio"] as const;
+export const FEATURE_NAMES = [
+  "return1h",
+  "return4h",
+  "volatility4h",
+  "volumeRatio",
+  "fundingRatePct",
+  "premiumPct",
+] as const;
 
 export interface FeatureConfig {
   timeframe: Timeframe;
@@ -57,7 +71,7 @@ export function featureWarmupBars(config: FeatureConfig = DEFAULT_FEATURE_CONFIG
   return config.windowBars + 1;
 }
 
-export type FeatureSkipReason = "insufficient_history" | "gap_in_window" | "invalid_values";
+export type FeatureSkipReason = "insufficient_history" | "gap_in_window" | "invalid_values" | "missing_context";
 
 export interface FeatureResult {
   features: MlFeatures | null;
@@ -68,10 +82,29 @@ export interface FeatureResult {
  * Egy symbol feature-ei LEZÁRT gyertyákból. Hiányos vagy réses ablak esetén `null` —
  * a hiányzó bemenet nem kaphat kitalált jelet.
  */
+/**
+ * Az áron KÍVÜLI bemenet a döntés pillanatában. Hiánya nem pótolható nullával: a
+ * nulla funding és a nulla prémium VALÓS érték, tehát a kitalált nulla hamis jelet adna.
+ */
+export interface FeatureContext {
+  fundingRatePct: number | null;
+  premiumPct: number | null;
+}
+
 export function buildFeaturesFromCandles(
   candles: OhlcvCandle[],
   config: FeatureConfig = DEFAULT_FEATURE_CONFIG,
+  context?: FeatureContext,
 ): FeatureResult {
+  if (
+    !context ||
+    context.fundingRatePct === null ||
+    context.fundingRatePct === undefined ||
+    context.premiumPct === null ||
+    context.premiumPct === undefined
+  ) {
+    return { features: null, reason: "missing_context" };
+  }
   const needed = featureWarmupBars(config);
   const quality = assessHistory(candles, config.timeframe, needed);
   if (!quality.sufficient) {
@@ -110,19 +143,21 @@ export function buildFeaturesFromCandles(
     return4h: (last.close - prevWindow.close) / prevWindow.close,
     volatility4h: Math.sqrt(variance),
     volumeRatio: meanVol > 0 ? last.baseVolume / meanVol : 1,
+    fundingRatePct: context.fundingRatePct,
+    premiumPct: context.premiumPct,
     featureVersion: FEATURE_VERSION,
     asOf: last.closeTime,
     timeframe: config.timeframe,
   };
 
-  const values = [features.return1h, features.return4h, features.volatility4h, features.volumeRatio];
+  const values = featureVector(features);
   if (values.some((v) => !Number.isFinite(v))) return { features: null, reason: "invalid_values" };
   return { features };
 }
 
 /** A feature-vektor a modell súly-sorrendjében. */
 export function featureVector(f: MlFeatures): number[] {
-  return [f.return1h, f.return4h, f.volatility4h, f.volumeRatio];
+  return [f.return1h, f.return4h, f.volatility4h, f.volumeRatio, f.fundingRatePct, f.premiumPct];
 }
 
 export interface BuildFeaturesResult {
@@ -146,11 +181,32 @@ export function buildFeaturesWithDiagnostics(
   const skipped: BuildFeaturesResult["skipped"] = [];
   for (const symbol of symbols) {
     const candles = candlesFromDataPoints(events, symbol);
-    const r = buildFeaturesFromCandles(candles, config);
+    const r = buildFeaturesFromCandles(candles, config, contextFromEvents(events, symbol));
     if (r.features) features.push(r.features);
     else skipped.push({ symbol, reason: r.reason ?? "insufficient_history" });
   }
   return { features, skipped };
+}
+
+/**
+ * A LEGFRISSEBB áron kívüli kontextus egy symbolra az eseményekből.
+ * Hiányzó forrás → `null` mező → nincs feature, és ez a `skipped` listában látszik.
+ */
+export function contextFromEvents(events: DataPoint[], symbol: string): FeatureContext {
+  const latest = <T>(kind: DataPoint["kind"], pick: (e: DataPoint) => T | null | undefined): T | null => {
+    let best: { ts: number; value: T } | null = null;
+    for (const e of events) {
+      if (e.symbol !== symbol || e.kind !== kind) continue;
+      const value = pick(e);
+      if (value === null || value === undefined) continue;
+      if (!best || e.timestamp > best.ts) best = { ts: e.timestamp, value };
+    }
+    return best ? best.value : null;
+  };
+  return {
+    fundingRatePct: latest("derivatives", (e) => e.derivatives?.fundingRatePct),
+    premiumPct: latest("premium", (e) => e.premium?.premiumPct),
+  };
 }
 
 /** Visszafelé kompatibilis alak (csak a feature-lista). */

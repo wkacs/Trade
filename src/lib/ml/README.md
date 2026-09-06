@@ -37,3 +37,36 @@ inkább lefelé). A fő döntéshozó továbbra is a GLM; az ML-jel egy input a 
 - Gradiens-boosted modell (LightGBM Pythonban + JSON tree-walk inferencia), ha a
   logisztikus plafont elérte — de csak ha a backteszt indokolja.
 - Mark-to-market napi P&L (a circuit breakerhez) aktuális árral.
+
+## f3 (2026-09-06): áron kívüli kontextus — és a mérés eredménye
+
+A f2 készlet mind a négy jellemzője ugyanabból az árfolyamsorból származott
+(`return1h`, `return4h`, `volatility4h`, `volumeRatio`), out-of-sample AUC 0.524.
+A hipotézis az volt, hogy ortogonális bemenet segít. Ezért a f3 két új jellemzőt kapott:
+
+- `fundingRatePct` — finanszírozási ráta (Binance USDT-M futures, 8 óránként publikálva,
+  óránkénti sorozattá az utolsó érvényes érték tartásával)
+- `premiumPct` — Coinbase (USD) vs Binance (USDT) árkülönbség
+
+Tanítás 3 coinon, 4987-4987 mintán (a kontextus hiánya miatt mindössze 7 óra maradt ki):
+
+```
+TRAIN: acc 52.3%  auc 0.535
+TEST : acc 51.8%  auc 0.526   (a legfrissebb 20%)
+```
+
+**A jelölt NEM léptethető**: a teszt AUC 0.526 a 0.53-as kapu alatt maradt. A f2-höz
+képest a javulás 0.524 → 0.526, azaz gyakorlatilag semmi.
+
+Amit ez jelent — és amit NEM jelent:
+
+- A „kevés az adat" hipotézis erre a két jellemzőre **megdőlt**. Nem az hiányzott.
+- A funding 8 órás felbontású, tehát órás skálán szinte állandó; a prémium pedig
+  órás bontásban apró és zajos. Mindkettő inkább lassú rezsim-változó.
+- A REAKTÍV mutatók (nyitott pozíció változása, taker-flow) nem kerülhettek a tanításba,
+  mert a Binance ezekből csak ~21-30 napot ad vissza. Ezek élő döntési kontextusként
+  mennek a phase-1/phase-2 promptba.
+
+Következő lépés, ha ezt tovább akarjuk vinni: a tick MENTSE az élő derivatíva-adatot,
+és néhány hónap múlva saját történetből tanítható a reaktív készlet. Vásárolni nem kell
+hozzá semmit, csak időt.

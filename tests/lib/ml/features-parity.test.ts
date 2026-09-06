@@ -11,6 +11,36 @@ import {
 } from "@/lib/ml/features";
 import { candleToDataPoint } from "@/lib/collectors/binance";
 import type { OhlcvCandle } from "@/lib/market/candles";
+
+/** Az áron kívüli kontextus fix teszt-értékei (f3). */
+const CTX = { fundingRatePct: 0.0028, premiumPct: 0.5 };
+
+/** Ugyanaz a kontextus adatpont-alakban, az ÉLŐ úthoz. */
+function contextEvents(symbol = "BTC"): DataPoint[] {
+  return [
+    {
+      source: "binance-futures",
+      symbol,
+      timestamp: 1,
+      kind: "derivatives",
+      derivatives: {
+        fundingRatePct: CTX.fundingRatePct,
+        openInterestBase: null,
+        openInterestUsd: null,
+        openInterestChange1hPct: null,
+        takerBuySellRatio: null,
+        longShortAccountRatio: null,
+      },
+    },
+    {
+      source: "coinbase",
+      symbol,
+      timestamp: 1,
+      kind: "premium",
+      premium: { venue: "coinbase", venuePrice: 1, referencePrice: 1, premiumPct: CTX.premiumPct },
+    },
+  ];
+}
 import type { DataPoint } from "@/lib/types";
 
 const HOUR = 3600_000;
@@ -42,26 +72,40 @@ function series(closes: number[], volumes?: number[]): OhlcvCandle[] {
 describe("feature-paritás — a tréning és a futás ugyanabból az ablakból számol", () => {
   it("ugyanaz a gyertyasor UGYANAZT a feature-vektort adja gyertyából és DataPointból", () => {
     const candles = series([100, 101, 102, 103, 104, 105]);
-    const fromCandles = buildFeaturesFromCandles(candles).features!;
-    const events: DataPoint[] = candles.map(candleToDataPoint);
+    const fromCandles = buildFeaturesFromCandles(candles, DEFAULT_FEATURE_CONFIG, CTX).features!;
+    const events: DataPoint[] = [...candles.map(candleToDataPoint), ...contextEvents()];
     const fromEvents = buildFeatures(events)[0];
     expect(featureVector(fromEvents)).toEqual(featureVector(fromCandles));
     expect(fromEvents.asOf).toBe(fromCandles.asOf);
   });
 
   it("a feature-vektor sorrendje a modell súly-sorrendje", () => {
-    const f = buildFeaturesFromCandles(series([100, 101, 102, 103, 104, 105])).features!;
-    expect(FEATURE_NAMES).toEqual(["return1h", "return4h", "volatility4h", "volumeRatio"]);
-    expect(featureVector(f)).toEqual([f.return1h, f.return4h, f.volatility4h, f.volumeRatio]);
+    const f = buildFeaturesFromCandles(series([100, 101, 102, 103, 104, 105]), DEFAULT_FEATURE_CONFIG, CTX).features!;
+    expect(FEATURE_NAMES).toEqual([
+      "return1h",
+      "return4h",
+      "volatility4h",
+      "volumeRatio",
+      "fundingRatePct",
+      "premiumPct",
+    ]);
+    expect(featureVector(f)).toEqual([
+      f.return1h,
+      f.return4h,
+      f.volatility4h,
+      f.volumeRatio,
+      f.fundingRatePct,
+      f.premiumPct,
+    ]);
   });
 
   it("minden feature hordozza a feature-verziót", () => {
-    const f = buildFeaturesFromCandles(series([100, 101, 102, 103, 104, 105])).features!;
+    const f = buildFeaturesFromCandles(series([100, 101, 102, 103, 104, 105]), DEFAULT_FEATURE_CONFIG, CTX).features!;
     expect(f.featureVersion).toBe(FEATURE_VERSION);
   });
 
   it("a hozamok a MEGADOTT időtávra vonatkoznak", () => {
-    const f = buildFeaturesFromCandles(series([100, 100, 100, 100, 100, 110])).features!;
+    const f = buildFeaturesFromCandles(series([100, 100, 100, 100, 100, 110]), DEFAULT_FEATURE_CONFIG, CTX).features!;
     // 1h: 100 → 110
     expect(f.return1h).toBeCloseTo(0.1, 12);
     // 4h: az utolsó előtti 4. gyertya zárása is 100 volt
@@ -72,7 +116,7 @@ describe("feature-paritás — a tréning és a futás ugyanabból az ablakból 
 describe("feature-ök — nincs volumen-keveredés, nincs jel hiányos adatból", () => {
   it("AUDIT §5: a volumenarány a GYERTYA base-volumenéből számol", () => {
     const candles = series([100, 100, 100, 100, 100, 100], [10, 10, 10, 10, 10, 30]);
-    const f = buildFeaturesFromCandles(candles).features!;
+    const f = buildFeaturesFromCandles(candles, DEFAULT_FEATURE_CONFIG, CTX).features!;
     // Az ablak (5 gyertya) átlaga (10+10+10+10+30)/5 = 14; az utolsó 30 → 30/14.
     expect(f.volumeRatio).toBeCloseTo(30 / 14, 9);
   });
@@ -86,7 +130,7 @@ describe("feature-ök — nincs volumen-keveredés, nincs jel hiányos adatból"
   });
 
   it("kevés gyertya → NINCS feature (nem gyenge jel)", () => {
-    const r = buildFeaturesFromCandles(series([100, 101]));
+    const r = buildFeaturesFromCandles(series([100, 101]), DEFAULT_FEATURE_CONFIG, CTX);
     expect(r.features).toBeNull();
     expect(r.reason).toBe("insufficient_history");
   });
@@ -95,13 +139,13 @@ describe("feature-ök — nincs volumen-keveredés, nincs jel hiányos adatból"
     const c = series([100, 101, 102, 103, 104, 105]);
     // Kiveszünk egy középső gyertyát → rés keletkezik a végén lévő ablakban.
     const gapped = [...c.slice(0, 2), ...c.slice(3)];
-    const r = buildFeaturesFromCandles(gapped);
+    const r = buildFeaturesFromCandles(gapped, DEFAULT_FEATURE_CONFIG, CTX);
     expect(r.features).toBeNull();
     expect(r.reason).toBe("gap_in_window");
   });
 
   it("a kihagyás DIAGNOSZTIKÁVAL látszik, nem némán", () => {
-    const events = series([100, 101]).map(candleToDataPoint);
+    const events = [...series([100, 101]).map(candleToDataPoint), ...contextEvents()];
     const r = buildFeaturesWithDiagnostics(events);
     expect(r.features).toEqual([]);
     expect(r.skipped).toEqual([{ symbol: "BTC", reason: "insufficient_history" }]);
@@ -112,7 +156,52 @@ describe("feature-ök — nincs volumen-keveredés, nincs jel hiányos adatból"
   });
 
   it("nem lezárt gyertya nem kerülhet be (a collector szűri), így a feature is múltbeli", () => {
-    const f = buildFeaturesFromCandles(series([100, 101, 102, 103, 104, 105])).features!;
+    const f = buildFeaturesFromCandles(series([100, 101, 102, 103, 104, 105]), DEFAULT_FEATURE_CONFIG, CTX).features!;
     expect(f.asOf).toBeLessThanOrEqual(NOW);
+  });
+});
+
+describe("f3 feature-készlet — ortogonális kontextus", () => {
+  const HOUR = 3600_000;
+  const T0 = Date.UTC(2026, 8, 5, 0, 0, 0);
+  const candle = (i: number, close: number): OhlcvCandle => ({
+    symbol: "BTC",
+    timeframe: "1h",
+    openTime: T0 + i * HOUR,
+    closeTime: T0 + (i + 1) * HOUR - 1,
+    open: close,
+    high: close * 1.01,
+    low: close * 0.99,
+    close,
+    baseVolume: 10,
+    quoteVolume: 10 * close,
+    trades: 5,
+    receivedAt: T0 + (i + 1) * HOUR,
+  });
+  const series = [100, 101, 102, 103, 104, 105].map((c, i) => candle(i, c));
+
+  it("kontextus nélkül NINCS feature — a hiányzó bemenet nem kap kitalált nullát", () => {
+    const r = buildFeaturesFromCandles(series);
+    expect(r.features).toBeNull();
+    expect(r.reason).toBe("missing_context");
+  });
+
+  it("kontextussal a funding és a prémium is bekerül a vektorba", () => {
+    const r = buildFeaturesFromCandles(series, DEFAULT_FEATURE_CONFIG, {
+      fundingRatePct: 0.0028,
+      premiumPct: 0.5,
+    });
+    expect(r.features).not.toBeNull();
+    expect(r.features!.fundingRatePct).toBeCloseTo(0.0028, 6);
+    expect(r.features!.premiumPct).toBeCloseTo(0.5, 6);
+    const v = featureVector(r.features!);
+    expect(v).toHaveLength(FEATURE_NAMES.length);
+    // A vektor sorrendje a FEATURE_NAMES sorrendje — a súlyok ehhez tartoznak.
+    expect(v[FEATURE_NAMES.indexOf("fundingRatePct")]).toBeCloseTo(0.0028, 6);
+    expect(v[FEATURE_NAMES.indexOf("premiumPct")]).toBeCloseTo(0.5, 6);
+  });
+
+  it("a verzió lépett, hogy a régi modell automatikusan karanténba kerüljön", () => {
+    expect(FEATURE_VERSION).not.toBe("f2-2026-09-05");
   });
 });

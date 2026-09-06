@@ -27,6 +27,7 @@ import { normalizeBinanceKlines, mergeCandles, type OhlcvCandle } from "@/lib/ma
 import { COIN_UNIVERSE } from "@/lib/config";
 
 const INTERVAL = "1h" as const;
+const HOUR_MS = 3_600_000;
 const PAGES = 5; // 5 × 1000 ≈ 5000 óra ≈ 208 nap / coin
 const CANDIDATE_PATH = "src/lib/ml/model.candidate.json";
 const ACTIVE_PATH = "src/lib/ml/model.json";
@@ -52,25 +53,107 @@ async function fetchHistory(sym: string, nowMs: number): Promise<OhlcvCandle[]> 
   return mergeCandles(pages);
 }
 
+/**
+ * Finanszírozási ráta TÖRTÉNET (8 óránként publikálva). Óránkénti sorozattá az UTOLSÓ
+ * érvényes érték tartásával válik: a funding 8 órán át valóban az az érték marad.
+ */
+async function fetchFundingHistory(sym: string, fromMs: number): Promise<{ t: number; pct: number }[]> {
+  const out: { t: number; pct: number }[] = [];
+  let startTime = fromMs;
+  for (let page = 0; page < 20; page++) {
+    const u = `https://fapi.binance.com/fapi/v1/fundingRate?symbol=${sym}USDT&startTime=${startTime}&limit=1000`;
+    const res = await fetch(u);
+    if (!res.ok) {
+      console.error(`[${sym}] funding HTTP ${res.status} — a kontextus HIÁNYOS.`);
+      break;
+    }
+    const rows = (await res.json()) as { fundingTime: number; fundingRate: string }[];
+    if (!rows.length) break;
+    for (const r of rows) out.push({ t: Number(r.fundingTime), pct: Number(r.fundingRate) * 100 });
+    const lastT = Number(rows[rows.length - 1].fundingTime);
+    if (rows.length < 1000 || lastT <= startTime) break;
+    startTime = lastT + 1;
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+
+/** Coinbase (USD) órás záróárak — a prémium referenciája. Lapoz, 300-as kötegekben. */
+async function fetchCoinbaseCloses(sym: string, fromMs: number, toMs: number): Promise<Map<number, number>> {
+  const map = new Map<number, number>();
+  let end = toMs;
+  for (let page = 0; page < 40 && end > fromMs; page++) {
+    const start = Math.max(fromMs, end - 300 * HOUR_MS);
+    const u =
+      `https://api.exchange.coinbase.com/products/${sym}-USD/candles` +
+      `?granularity=3600&start=${new Date(start).toISOString()}&end=${new Date(end).toISOString()}`;
+    const res = await fetch(u, { headers: { "User-Agent": "ai-crypto-trader/train" } });
+    if (!res.ok) {
+      console.error(`[${sym}] coinbase HTTP ${res.status} — a prémium-kontextus HIÁNYOS.`);
+      break;
+    }
+    // [ time(s), low, high, open, close, volume ]
+    const rows = (await res.json()) as number[][];
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    for (const r of rows) map.set(Math.floor((r[0] * 1000) / HOUR_MS) * HOUR_MS, r[4]);
+    end = start;
+    await new Promise((r) => setTimeout(r, 120)); // publikus rate limit
+  }
+  return map;
+}
+
+/** Az utolsó érvényes funding-érték egy időpontban (nincs jövőbe nézés). */
+function fundingAt(history: { t: number; pct: number }[], atMs: number): number | null {
+  let lo = 0;
+  let hi = history.length - 1;
+  let best: number | null = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (history[mid].t <= atMs) {
+      best = history[mid].pct;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  return best;
+}
+
 interface Sample {
   x: number[];
   y: number;
   t: number;
 }
 
-/** A minta a PRODUKCIÓS feature-építésből jön — nincs tréning/futás eltérés. */
-function buildSamples(candles: OhlcvCandle[]): Sample[] {
+/**
+ * A minta a PRODUKCIÓS feature-építésből jön — nincs tréning/futás eltérés.
+ *
+ * Az f3 készlet áron kívüli kontextust is kér (funding, prémium). Ha egy órára nincs
+ * kontextus, a minta KIMARAD — kitalált nullával nem tanítunk.
+ */
+function buildSamples(
+  candles: OhlcvCandle[],
+  funding: { t: number; pct: number }[],
+  coinbaseCloses: Map<number, number>,
+): { samples: Sample[]; skippedNoContext: number } {
   const warmup = featureWarmupBars(DEFAULT_FEATURE_CONFIG);
   const out: Sample[] = [];
+  let skippedNoContext = 0;
   for (let i = warmup - 1; i < candles.length - 1; i++) {
     const window = candles.slice(Math.max(0, i - 100), i + 1);
-    const r = buildFeaturesFromCandles(window, DEFAULT_FEATURE_CONFIG);
+    const bar = candles[i];
+    const hourKey = Math.floor(bar.openTime / HOUR_MS) * HOUR_MS;
+    const cb = coinbaseCloses.get(hourKey);
+    const fundingPct = fundingAt(funding, bar.closeTime);
+    const premiumPct = cb !== undefined && bar.close > 0 ? ((cb - bar.close) / bar.close) * 100 : null;
+    if (fundingPct === null || premiumPct === null) {
+      skippedNoContext++;
+      continue;
+    }
+    const r = buildFeaturesFromCandles(window, DEFAULT_FEATURE_CONFIG, { fundingRatePct: fundingPct, premiumPct });
     if (!r.features) continue;
     const x = featureVector(r.features);
     if (x.some((v) => !Number.isFinite(v))) continue;
     out.push({ x, y: candles[i + 1].close > candles[i].close ? 1 : 0, t: candles[i].closeTime });
   }
-  return out;
+  return { samples: out, skippedNoContext };
 }
 
 const sigmoid = (z: number) => 1 / (1 + Math.exp(-z));
@@ -127,11 +210,23 @@ async function main() {
   const testS: Sample[] = [];
   for (const sym of COIN_UNIVERSE) {
     const candles = await fetchHistory(sym, now);
-    const s = buildSamples(candles);
+    if (candles.length === 0) {
+      console.error(`[${sym}] nincs gyertya — kihagyva.`);
+      continue;
+    }
+    const fromMs = candles[0].openTime;
+    const [funding, coinbase] = await Promise.all([
+      fetchFundingHistory(sym, fromMs),
+      fetchCoinbaseCloses(sym, fromMs, now),
+    ]);
+    const { samples: s, skippedNoContext } = buildSamples(candles, funding, coinbase);
     const cut = Math.floor(s.length * 0.8); // idő-alapú: első 80% tréning, utolsó 20% teszt
     trainS.push(...s.slice(0, cut));
     testS.push(...s.slice(cut));
-    console.log(`${sym}: ${candles.length} lezárt gyertya → ${s.length} minta (train ${cut}, test ${s.length - cut})`);
+    console.log(
+      `${sym}: ${candles.length} gyertya · funding ${funding.length} · coinbase ${coinbase.size} óra ` +
+        `→ ${s.length} minta (train ${cut}, test ${s.length - cut}); kontextus hiánya miatt kimaradt: ${skippedNoContext}`,
+    );
   }
 
   if (trainS.length === 0 || testS.length === 0) {
