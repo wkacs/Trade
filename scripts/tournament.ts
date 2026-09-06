@@ -46,12 +46,23 @@ async function main() {
   const validationBars = arg("validation", 240); // 10 nap
 
   // Grid (spec §7).
+  //
+  // 2026-09-06 BŐVÍTÉS: az eddigi rács CSAK a kilépést és a DCA-méretet variálta, a
+  // BELÉPÉSI UTAT nem. Az első futás zárolt holdoutján ezért minden konfiguráció nulla
+  // kötést produkált: a félelem-kapu (FG ≤ 20-35) mohóság-rezsimben sosem nyílik ki.
+  // Két új tengely, ELŐRE rögzítve, az eredmények megtekintése ELŐTT:
+  //   - momentumEnabled: van-e egyáltalán trendkövető belépő
+  //   - riskPerTradePct: flat méret vagy kockázat-alapú méretezés
+  // A redundáns take-profit és heti-keret értékek kiestek (az első futásban azonos
+  // eredményt adtak), hogy a rács mérete kezelhető maradjon.
   const grid: StrategyConfig[] = [];
-  const tps = [0.1, 0.15, 0.25, 0.4];
+  const tps = [0.1, 0.25];
   const tpFracs = [0.5, 1.0];
   const fgs = [20, 25, 35];
   const dcaBuys = [0.02, 0.04];
-  const weeklies = [0.05, 0.1, 0.2];
+  const weeklies = [0.05, 0.2];
+  const momentums = [false, true];
+  const risks = [0, 0.01];
   const filters: { entryFilter: "off" | "trend"; entryFilterSmaPeriod: number }[] = [
     { entryFilter: "off", entryFilterSmaPeriod: 24 },
     { entryFilter: "trend", entryFilterSmaPeriod: 24 },
@@ -73,16 +84,20 @@ async function main() {
           for (const db of dcaBuys)
             for (const wk of weeklies)
               for (const f of filters)
-                grid.push({
-                  ...DEFAULT_STRATEGY,
-                  ...s,
-                  takeProfitPct: tp,
-                  takeProfitFraction: tf,
-                  dcaFgThreshold: fg,
-                  dcaBuyPct: db,
-                  dcaWeeklyBudgetPct: wk,
-                  ...f,
-                });
+                for (const mom of momentums)
+                  for (const risk of risks)
+                    grid.push({
+                      ...DEFAULT_STRATEGY,
+                      ...s,
+                      takeProfitPct: tp,
+                      takeProfitFraction: tf,
+                      dcaFgThreshold: fg,
+                      dcaBuyPct: db,
+                      dcaWeeklyBudgetPct: wk,
+                      ...f,
+                      momentumEnabled: mom,
+                      riskPerTradePct: risk,
+                    });
 
   console.log(`Tournament: ${grid.length} config | ${pages} klines-lap | min trade/szelet ${minTrades}`);
   const { frames: history, quality } = await loadHistory([...COIN_UNIVERSE], pages);
@@ -123,7 +138,10 @@ async function main() {
       c.takeProfitPct * 100
     ).toFixed(0)}%/${c.takeProfitFraction} · FG${c.dcaFgThreshold} · dca ${(c.dcaBuyPct * 100).toFixed(0)}%/${(
       c.dcaWeeklyBudgetPct * 100
-    ).toFixed(0)}% · ${c.entryFilter}${c.entryFilter === "trend" ? c.entryFilterSmaPeriod : ""}`;
+    ).toFixed(0)}% · ${c.entryFilter}${c.entryFilter === "trend" ? c.entryFilterSmaPeriod : ""}` +
+    // A belépési út és a méretezés is a címkébe tartozik: e nélkül két, egymástól
+    // ÉRDEMBEN különböző konfiguráció azonos néven jelent meg a riportban.
+    ` · momentum ${c.momentumEnabled ? "BE" : "KI"} · méretezés ${c.riskPerTradePct > 0 ? "kockázat" : "flat"}`;
 
   // ── 1) Jelöltválasztás — CSAK a fejlesztési részből. ───────────────────────
   const selection = selectCandidate(
