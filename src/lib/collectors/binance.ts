@@ -48,6 +48,17 @@ export class BinanceOHLCCollector implements DataCollector {
     }
     return out;
   }
+
+  /**
+   * A lekérés strukturált hibái egy sorban, symbolonként. `null`, ha minden forrás rendben.
+   * A `collect()` szándékosan nem dob: egy coin hibája nem veheti el a többi gyertyáit.
+   */
+  lastError(): string | null {
+    const failed = Object.entries(this.lastResults)
+      .filter(([, r]) => r.error)
+      .map(([sym, r]) => `${sym}: ${r.error!.code} — ${r.error!.message}`);
+    return failed.length > 0 ? failed.join(" · ") : null;
+  }
 }
 
 /** Egy lezárt gyertya DataPoint alakban. A timestamp a MÚLTBELI zárási idő. */

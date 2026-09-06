@@ -146,8 +146,8 @@ export interface TickResult {
     errors: { symbol: string; code: string }[];
     staleSkips: { symbol: string; side: string; reason: string; ageMs: number | null }[];
   };
-  /** A collectorok kimenetele (melyik forrás mit adott, mennyi idő alatt). */
-  collectors: { name: string; ok: boolean; points: number; durationMs: number }[];
+  /** A collectorok kimenetele (melyik forrás mit adott, mennyi idő alatt, milyen hibával). */
+  collectors: { name: string; ok: boolean; points: number; durationMs: number; error?: string | null }[];
   /** Stratégiai jelek és adat-elégségesség symbolonként (T15). */
   signals: Record<string, { bars: number; requiredBars: number; sufficient: boolean; trendOk: boolean; momentumOk: boolean }>;
   /** Az LLM-hívás mérhető adatai (T16). null, ha nem volt phase-2 hívás. */
@@ -781,6 +781,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
         ok: o.ok,
         points: o.points,
         durationMs: o.durationMs,
+        error: o.error ?? null,
       })),
       signals: Object.fromEntries(
         Object.entries(signalsBySymbol).map(([sym, sig]) => [
@@ -857,6 +858,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       ok: o.ok,
       points: o.points,
       durationMs: o.durationMs,
+      error: o.error ?? null,
     })),
     llm: llmUsage,
     signals: Object.fromEntries(

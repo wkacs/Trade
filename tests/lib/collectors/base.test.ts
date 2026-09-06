@@ -86,3 +86,43 @@ describe("collectAllWithOutcomes — egy lassú forrás nem foghatja meg a ciklu
     expect(r.outcomes.find((o) => o.name === "rossz")!.error).toMatch(/boom/);
   });
 });
+
+describe("collectAllWithOutcomes — a néma forrás-hiba láthatóvá tétele", () => {
+  it("ok:false, ha a collector strukturált hibát jelent, akkor is, ha nem dobott", async () => {
+    const silent: DataCollector = {
+      name: "binance",
+      collect: async () => [],
+      lastError: () => "http_error — HTTP 451",
+    };
+    const r = await collectAllWithOutcomes([silent]);
+    expect(r.outcomes[0].ok).toBe(false);
+    expect(r.outcomes[0].error).toContain("451");
+    expect(r.degraded).toBe(true);
+  });
+
+  it("a részleges hiba is látszik: a pontok megmaradnak, de a forrás nem ok", async () => {
+    const partial: DataCollector = {
+      name: "binance",
+      collect: async () => [
+        { source: "binance", symbol: "BTC", timestamp: 1, kind: "price", price: { usd: 1, volume24h: 1, change24hPct: 0 } },
+      ],
+      lastError: () => "ETH: network — fetch failed",
+    };
+    const r = await collectAllWithOutcomes([partial]);
+    expect(r.points).toHaveLength(1);
+    expect(r.outcomes[0].ok).toBe(false);
+    expect(r.outcomes[0].error).toContain("ETH");
+  });
+
+  it("hibátlan collectornál nincs error és nem degraded", async () => {
+    const fine: DataCollector = {
+      name: "rss",
+      collect: async () => [],
+      lastError: () => null,
+    };
+    const r = await collectAllWithOutcomes([fine]);
+    expect(r.outcomes[0].ok).toBe(true);
+    expect(r.outcomes[0].error).toBeUndefined();
+    expect(r.degraded).toBe(false);
+  });
+});

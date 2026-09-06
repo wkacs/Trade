@@ -135,3 +135,25 @@ describe("explainNoTrade — MIÉRT nem történt kötés (T23)", () => {
     expect(p.health!.quoteAgeMs).not.toBe(0);
   });
 });
+
+describe("explainNoTrade — a forrás-hiba OKA is látszik", () => {
+  it("a collector hibaüzenetét is kiírja, nem csak a nevét", () => {
+    const p = emptyProcess({
+      health: health({
+        collectors: [
+          { name: "binance", ok: false, points: 0, durationMs: 19, error: "BTC: http_error — HTTP 451" },
+        ],
+      }),
+    });
+    const joined = explainNoTrade(p).join(" ");
+    expect(joined).toMatch(/Adatforrás hiba: binance/);
+    expect(joined).toMatch(/451/);
+  });
+
+  it("hibaüzenet nélkül is használható marad az ok", () => {
+    const p = emptyProcess({
+      health: health({ collectors: [{ name: "rss", ok: false, points: 0, durationMs: 5 }] }),
+    });
+    expect(explainNoTrade(p).join(" ")).toMatch(/Adatforrás hiba: rss/);
+  });
+});

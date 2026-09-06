@@ -181,3 +181,23 @@ describe("BinanceOHLCCollector", () => {
     expect(candles[0].low).toBe(95);
   });
 });
+
+describe("BinanceOHLCCollector — a lekérés hibája nem tűnhet el", () => {
+  it("lastError()-ben jelenti a HTTP hibát, nem csak a konzolra írja", async () => {
+    const fetchImpl = (async () =>
+      new Response("blocked", { status: 451, statusText: "Unavailable For Legal Reasons" })) as unknown as typeof fetch;
+    const c = new BinanceOHLCCollector(["BTC"], "1h", 72, { now: () => NOW, fetchImpl });
+    const points = await c.collect();
+    expect(points).toHaveLength(0);
+    expect(c.lastError()).toContain("451");
+    expect(c.lastError()).toContain("BTC");
+  });
+
+  it("sikeres lekérés után nincs hiba", async () => {
+    const rows = [kline(NOW - 2 * HOUR, 100, 110, 95, 108)];
+    const fetchImpl = (async () => new Response(JSON.stringify(rows), { status: 200 })) as unknown as typeof fetch;
+    const c = new BinanceOHLCCollector(["BTC"], "1h", 1, { now: () => NOW, fetchImpl });
+    await c.collect();
+    expect(c.lastError()).toBeNull();
+  });
+});

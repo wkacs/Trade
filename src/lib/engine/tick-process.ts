@@ -35,8 +35,8 @@ export interface TickHealth {
   quotesDegraded: boolean;
   /** Elavult vagy hiányzó ár miatt kihagyott orderek. */
   staleSkips: { symbol: string; side: string; reason: string; ageMs: number | null }[];
-  /** Forrásonkénti kimenetel (melyik adott adatot, mennyi idő alatt). */
-  collectors: { name: string; ok: boolean; points: number; durationMs: number }[];
+  /** Forrásonkénti kimenetel (melyik adott adatot, mennyi idő alatt, milyen hibával). */
+  collectors: { name: string; ok: boolean; points: number; durationMs: number; error?: string | null }[];
   /** Adat-elégségesség symbolonként (a stratégia visszatekintéséhez). */
   signals: Record<string, { bars: number; requiredBars: number; sufficient: boolean }>;
   /** Az ML-modell állapota. `usable: false` → NINCS ML-jel, nem „semleges" jel. */
@@ -106,7 +106,9 @@ export function explainNoTrade(process: TickProcess): string[] {
       if (!sig.sufficient) reasons.push(`${sym}: kevés hézagmentes gyertya (${sig.bars}/${sig.requiredBars}).`);
     }
     if (!h.ml.usable && h.ml.detail) reasons.push(`ML-jel kihagyva: ${h.ml.detail}`);
-    for (const c of h.collectors) if (!c.ok) reasons.push(`Adatforrás hiba: ${c.name}.`);
+    for (const c of h.collectors) {
+      if (!c.ok) reasons.push(`Adatforrás hiba: ${c.name}${c.error ? ` — ${c.error}` : ""}.`);
+    }
   }
   if (!process.phase1.shouldDecide) reasons.push("A phase-1 szűrő szerint nem volt döntésre érdemes esemény.");
   if (process.decision.overridden && process.decision.overrideReason) {

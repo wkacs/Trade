@@ -3,6 +3,12 @@ import type { DataPoint } from "@/lib/types";
 export interface DataCollector {
   name: string;
   collect(): Promise<DataPoint[]>;
+  /**
+   * Strukturált hiba az utolsó lekérésből, ha volt — akkor is, ha a collector NEM dobott.
+   * Enélkül egy elutasított forrás `ok: true, points: 0` alakban jelenik meg, és a
+   * dashboard „rendben"-t ír, miközben a jel-lánc adat nélkül maradt.
+   */
+  lastError?(): string | null;
 }
 
 export interface CollectorOutcome {
@@ -62,7 +68,15 @@ export async function collectAllWithOutcomes(
       const started = now();
       try {
         const points = await withTimeout(c.collect(), timeoutMs, c.name);
-        return { name: c.name, ok: true, points, durationMs: now() - started };
+        // A néma (nem dobott) forrás-hiba is hiba: a részleges adat sem „rendben".
+        const reported = c.lastError?.() ?? null;
+        return {
+          name: c.name,
+          ok: reported === null,
+          points,
+          durationMs: now() - started,
+          error: reported ?? undefined,
+        };
       } catch (e) {
         return { name: c.name, ok: false, points: [] as DataPoint[], durationMs: now() - started, error: String(e) };
       }
