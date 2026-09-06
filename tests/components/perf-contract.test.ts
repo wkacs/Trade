@@ -3,6 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MarketPanel } from "@/components/MarketPanel";
 import { DecisionCard, type DecisionRow } from "@/components/DecisionCard";
+import { ShadowPanel, ShadowLaneRow, type ShadowLaneView } from "@/components/ShadowPanel";
 import type { PerformanceSummary, DecisionOutcome } from "@/lib/portfolio/evaluate";
 
 /**
@@ -114,5 +115,45 @@ describe("DecisionCard — DecisionOutcome szerződés", () => {
     expect(() =>
       renderToStaticMarkup(createElement(DecisionCard, { d: { ...base, outcome: legacy } })),
     ).not.toThrow();
+  });
+});
+
+describe("ShadowPanel — az árnyék-mérés szerződése", () => {
+  const lane = (over: Partial<ShadowLaneView> = {}): ShadowLaneView => ({
+    namespace: "shadow-teszt",
+    candidateId: "L2",
+    note: "teszt-jelölt",
+    capitalUsd: 320,
+    startedAt: "2026-09-06",
+    targetDays: 30,
+    targetRoundTrips: 50,
+    rows: [
+      { accountId: "baseline", cycles: 5, days: 1, equity: 320, netReturnPct: 0, maxDrawdownPct: 0, roundTrips: 0, feesQuote: 0, degradedCycles: 0 },
+      { accountId: "L2", cycles: 5, days: 1, equity: 336, netReturnPct: 0.05, maxDrawdownPct: 0.01, roundTrips: 3, feesQuote: 0.4, degradedCycles: 0 },
+    ],
+    error: null,
+    ...over,
+  });
+
+  it("a jelölt és az alapvonal különbségét is kiírja", () => {
+    const html = renderToStaticMarkup(createElement(ShadowPanel));
+    expect(html).toContain("Árnyék-mérés");
+    // A panel a szerverre kérdez; a sor-renderelést külön, tiszta bemenettel nézzük.
+    const laneHtml = renderToStaticMarkup(createElement(ShadowLaneRow, { lane: lane() }));
+    expect(laneHtml).toContain("+5.00%");
+    expect(laneHtml).toContain("$336.00");
+    expect(laneHtml).toContain("3 kör");
+  });
+
+  it("ciklus nélkül nem hazudik nullát, hanem kimondja", () => {
+    const html = renderToStaticMarkup(createElement(ShadowLaneRow, { lane: lane({ rows: [] }) }));
+    expect(html).toContain("még nincs ciklus");
+  });
+
+  it("olvasási hibát láthatóan jelez", () => {
+    const html = renderToStaticMarkup(
+      createElement(ShadowLaneRow, { lane: lane({ rows: [], error: "nincs provisionált mérés" }) }),
+    );
+    expect(html).toContain("nem olvasható");
   });
 });

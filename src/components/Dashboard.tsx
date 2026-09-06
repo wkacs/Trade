@@ -12,6 +12,7 @@ import { TradeBlotter, type BlotterTrade } from "./TradeBlotter";
 import { MarketPanel, type MlSignalView, type PerfView } from "./MarketPanel";
 import { TickInspector } from "./TickInspector";
 import { AnalyticsPanel } from "./AnalyticsPanel";
+import { ShadowPanel } from "./ShadowPanel";
 
 interface PortfolioApi {
   portfolio: { cashUsd: number; initialCapitalUsd: number } | null;
@@ -165,8 +166,11 @@ export function Dashboard() {
 
         <TickInspector />
 
-        {/* ── Realized teljesítmény-analitika ── */}
-        <AnalyticsPanel />
+        {/* ── Realized teljesítmény-analitika + előre menő árnyék-mérés ── */}
+        <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
+          <AnalyticsPanel />
+          <ShadowPanel />
+        </div>
 
         {/* ── Backtest + admin ── */}
         <div className="grid gap-4 lg:grid-cols-2">
