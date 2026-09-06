@@ -213,6 +213,30 @@ látszik.
 | `reason: "stale_quote"` | a bid/ask öregebb 10 s-nál | adatforrás-hiba; kilépés szándékosan nem történik |
 | `persist_failed` | a mentés nem sikerült | a ciklus eredménye nem tartós; a hiba nem tűnik el magától |
 | ML: `KARANTÉN: nincs ML-jel` | a `model.json` feature-verziója régi | újratréning kell (`pnpm tsx scripts/train-model.ts`) |
+| `binance` forrás: `HTTP 451`, `bars 0/48` | a függvény-régió IP-jét a Binance jogi okból blokkolja | a `vercel.json` `regions` értéke maradjon EU-ban (`fra1`) |
+
+### Régió: miért `fra1`
+
+2026-09-06: az éles tick minden coinra `0/48` hézagmentes gyertyát mutatott, a Binance
+collector pedig `ok: true, points: 0, durationMs: 19` értéket — vagyis a hiba NEM látszott.
+A collector-hibák propagálása után kiderült a valódi ok:
+
+```
+binance ok:false — BTC: http_error — Binance HTTP 451 (BTC) · ETH: … 451 · SOL: … 451
+```
+
+A HTTP 451 (Unavailable For Legal Reasons) a Binance geo-blokkja a Vercel alapértelmezett
+`iad1` (USA) régiójának kimenő IP-jére. Ugyanaz a kérés magyar IP-ről HTTP 200.
+
+Mivel gyertya nélkül nincs trend-, momentum- és ATR-számítás, a belépő-szűrő minden vételt
+elutasít: a bot ilyenkor CSAK HOLD-ol, akármit mond az LLM.
+
+A `vercel.json` ezért rögzíti a `fra1` (Frankfurt) régiót. Ez egyben a Neon adatbázis
+régiója is (`eu-central-1`), tehát a DB-körök is az óceánon innen maradnak.
+
+**Ha a régió bármikor visszakerül USA-ba, a gyertya-lánc némán elnémul** — a tünet a
+`0/48` és a `binance ok:false` a TickInspectorban, illetve a `/api/market` `sources`
+mezőjében.
 
 ---
 

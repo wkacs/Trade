@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { collectAll, type DataCollector } from "@/lib/collectors/base";
+import { collectAllWithOutcomes, type DataCollector } from "@/lib/collectors/base";
 import { CoinGeckoCollector } from "@/lib/collectors/coingecko";
 import { FearGreedCollector } from "@/lib/collectors/feargreed";
 import { BinanceOHLCCollector } from "@/lib/collectors/binance";
@@ -31,7 +31,8 @@ export async function GET() {
       new BinanceOHLCCollector([...COIN_UNIVERSE]),
       new FearGreedCollector(),
     ];
-    const events = await collectAll(collectors);
+    const collected = await collectAllWithOutcomes(collectors);
+    const events = collected.points;
 
     // Aktuális ár + 24h változás (CoinGecko).
     const prices: Record<string, { usd: number; change24hPct: number }> = {};
@@ -69,6 +70,14 @@ export async function GET() {
       {
         prices,
         fearGreed: fg,
+        // Forrás-állapot: a néma degradáció (pl. HTTP 451 a Binance-tól) itt is látszik,
+        // nem csak a tick-rekordban.
+        sources: collected.outcomes.map((o) => ({
+          name: o.name,
+          ok: o.ok,
+          points: o.points,
+          error: o.error ?? null,
+        })),
         signals,
         weeklyBudgetRemainingUsd,
         mlAuc: (model as { metrics?: { testAuc?: number } }).metrics?.testAuc ?? null,
