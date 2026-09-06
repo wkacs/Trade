@@ -45,6 +45,17 @@ export async function shouldDecide(events: DataPoint[]): Promise<Phase1Outcome> 
     ...(e.rss ? { t: e.rss.title, src: e.rss.source } : {}),
     ...(e.sentiment ? { fng: e.sentiment.value, lbl: e.sentiment.classification } : {}),
     ...(e.social ? { t: e.social.title, score: e.social.score, sub: e.social.subreddit } : {}),
+    // Pozicionáltság — ortogonális az árra: nem azt mondja, mennyi az ár, hanem hogy a
+    // tömeg hogyan áll benne. A rövid kulcsnevek a token-költséget fogják vissza.
+    ...(e.derivatives
+      ? {
+          fund: e.derivatives.fundingRatePct,
+          oiChg: e.derivatives.openInterestChange1hPct,
+          taker: e.derivatives.takerBuySellRatio,
+          ls: e.derivatives.longShortAccountRatio,
+        }
+      : {}),
+    ...(e.premium ? { prem: e.premium.premiumPct } : {}),
   }));
   const fallback: Phase1Result = {
     shouldDecide: false,

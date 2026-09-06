@@ -1,9 +1,18 @@
 /** Egy adatgyűjtőtől érkező normalizált adatpont. */
 export interface DataPoint {
-  source: "coingecko" | "cryptopanic" | "whalealert" | "rss" | "binance" | "alternative" | "reddit";
+  source:
+    | "coingecko"
+    | "cryptopanic"
+    | "whalealert"
+    | "rss"
+    | "binance"
+    | "binance-futures"
+    | "coinbase"
+    | "alternative"
+    | "reddit";
   symbol: string;
   timestamp: number; // epoch ms
-  kind: "price" | "news" | "whale" | "rss" | "sentiment" | "social";
+  kind: "price" | "news" | "whale" | "rss" | "sentiment" | "social" | "derivatives" | "premium";
   // Tartalom a kind-től függően:
   price?: { usd: number; volume24h: number; change24hPct: number };
   /**
@@ -30,6 +39,29 @@ export interface DataPoint {
   sentiment?: { value: number; classification: string };
   /** Közösségi poszt (Reddit): cím + felfutás (score = figyelem-jel) + subreddit. */
   social?: { title: string; score: number; subreddit: string };
+  /**
+   * Határidős pozicionáltság (Binance USDT-M futures, kulcs nélkül). Ez ORTOGONÁLIS
+   * az árra: nem azt mondja, mennyi az ár, hanem hogy a tömeg hogyan áll benne.
+   * A hiányzó mező `null`, SOHA nem 0 — a nulla funding valós érték.
+   */
+  derivatives?: {
+    /** Finanszírozási ráta százalékban (0.01 = 0.01%). */
+    fundingRatePct: number | null;
+    /** Nyitott pozíció bázis-eszközben és quote-ban. */
+    openInterestBase: number | null;
+    openInterestUsd: number | null;
+    /** Az OI változása az előző órás mintához képest, százalékban. */
+    openInterestChange1hPct: number | null;
+    /** Agresszív vételi / eladási forgalom aránya (>1 = vevői nyomás). */
+    takerBuySellRatio: number | null;
+    /** Lakossági számlák long/short aránya (>1 = long-túlsúly). */
+    longShortAccountRatio: number | null;
+  };
+  /**
+   * Tőzsdék közötti árkülönbség (Coinbase USD vs Binance USDT). A pozitív prémium
+   * hagyományosan US-oldali keresletet jelez.
+   */
+  premium?: { venue: string; venuePrice: number; referencePrice: number; premiumPct: number };
 }
 
 /** ML jelzések egy coinra, egy időpontban. */

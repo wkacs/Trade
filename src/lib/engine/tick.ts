@@ -4,6 +4,8 @@ import { CryptoPanicCollector } from "@/lib/collectors/cryptopanic";
 import { WhaleAlertCollector } from "@/lib/collectors/whalealert";
 import { RSSCollector } from "@/lib/collectors/rss";
 import { BinanceOHLCCollector } from "@/lib/collectors/binance";
+import { BinanceDerivativesCollector } from "@/lib/collectors/derivatives";
+import { CoinbasePremiumCollector } from "@/lib/collectors/premium";
 import { FearGreedCollector } from "@/lib/collectors/feargreed";
 import { RedditCollector } from "@/lib/collectors/reddit";
 import { buildFeaturesWithDiagnostics } from "@/lib/ml/features";
@@ -269,6 +271,9 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     new BinanceOHLCCollector([...COIN_UNIVERSE]),
     new RSSCollector(RSS_SOURCES),
     new FearGreedCollector(),
+    // Kulcs nélküli, ortogonális jelek: pozicionáltság és tőzsdék közötti prémium.
+    new BinanceDerivativesCollector([...COIN_UNIVERSE]),
+    new CoinbasePremiumCollector([...COIN_UNIVERSE]),
   ];
   if (process.env.CRYPTOPANIC_TOKEN)
     collectors.push(new CryptoPanicCollector(process.env.CRYPTOPANIC_TOKEN, [...COIN_UNIVERSE]));

@@ -60,3 +60,40 @@ describe("shouldDecide — a hívás mérhető adatai nem vesznek el", () => {
     expect(r.usage).toBeNull();
   });
 });
+
+describe("shouldDecide — az új, ortogonális jelek eljutnak a modellhez", () => {
+  it("a derivatíva- és prémium-adat bekerül a promptba", async () => {
+    (chatJson as any).mockResolvedValue({
+      data: { shouldDecide: false, summary: "ok", notableEvents: [] },
+      raw: "",
+      usage: null,
+    });
+    await shouldDecide([
+      {
+        source: "binance-futures",
+        symbol: "BTC",
+        timestamp: 1,
+        kind: "derivatives",
+        derivatives: {
+          fundingRatePct: 0.0028,
+          openInterestBase: 106402,
+          openInterestUsd: 8477888632,
+          openInterestChange1hPct: 1.2,
+          takerBuySellRatio: 1.07,
+          longShortAccountRatio: 1.05,
+        },
+      },
+      {
+        source: "coinbase",
+        symbol: "BTC",
+        timestamp: 1,
+        kind: "premium",
+        premium: { venue: "coinbase", venuePrice: 80400, referencePrice: 80000, premiumPct: 0.5 },
+      },
+    ]);
+    const userPrompt = (chatJson as any).mock.calls.at(-1)[2] as string;
+    expect(userPrompt).toContain("fund");
+    expect(userPrompt).toContain("1.07");
+    expect(userPrompt).toContain("0.5");
+  });
+});
