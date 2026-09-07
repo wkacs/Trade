@@ -22,6 +22,23 @@ describe("classifyLlmError", () => {
   it("minden más hálózati hiba", () => {
     expect(classifyLlmError("Connection error.")).toBe("network");
   });
+
+  it("a HTTP-státusz erősebb az üzenetnél", () => {
+    // Rossz/lejárt kulcs vagy base-URL–kulcs eltérés → auth, nem néma network.
+    expect(classifyLlmError("Unauthorized", 401)).toBe("auth");
+    expect(classifyLlmError("Forbidden", 403)).toBe("auth");
+    // Leállított modellnév (pl. glm-4-flash) → not_found, hogy azonnal látszódjon az ok.
+    expect(classifyLlmError("model not found", 404)).toBe("not_found");
+    // Elutasított kérésalak (pl. a JSON-mód) → bad_request.
+    expect(classifyLlmError("Invalid request", 400)).toBe("bad_request");
+    // 429 státusz akkor is forgalomkorlát, ha az üzenet nem árulkodik.
+    expect(classifyLlmError("too many requests", 429)).toBe("rate_limited");
+  });
+
+  it("státusz nélkül az üzenetből is felismeri a kulcs- és modellhibát", () => {
+    expect(classifyLlmError("401 Invalid API key provided")).toBe("auth");
+    expect(classifyLlmError("The model `glm-4-flash` does not exist")).toBe("not_found");
+  });
 });
 
 describe("LLM időkorlát", () => {

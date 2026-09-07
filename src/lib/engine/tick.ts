@@ -691,7 +691,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     amountPct: 0,
     confidence: 0.3,
     reasoning: phase1.summary,
-    model: "phase1/glm-4-flash",
+    model: `phase1/${process.env.LLM_MODEL_PHASE1 ?? "glm-4.7-flash"}`,
   };
 
   if (input.decisionReplay) {

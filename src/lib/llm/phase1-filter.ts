@@ -63,7 +63,7 @@ export async function shouldDecide(events: DataPoint[]): Promise<Phase1Outcome> 
     notableEvents: [],
   };
   const { data, raw, usage } = await chatJson<Phase1Result>(
-    process.env.LLM_MODEL_PHASE1 ?? "glm-4-flash",
+    process.env.LLM_MODEL_PHASE1 ?? "glm-4.7-flash",
     SYSTEM,
     JSON.stringify(compact),
     fallback,
