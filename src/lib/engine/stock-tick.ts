@@ -33,6 +33,7 @@ import { DEFAULT_ORDER_RISK_PARAMS, originBudgetFor } from "@/lib/risk/risk-mana
 import { fillParamsForClass, stockSymbolFilters } from "@/lib/markets/execution";
 import { stopCandidate } from "@/lib/engine/plan-exits";
 import type { Instrument } from "@/lib/markets/registry";
+import type { EntryShape } from "@/lib/strategy/intraday-entries";
 import { etParts, etDateKey, usEquitySession, isUsTradingDay, minutesToSessionClose } from "@/lib/markets/calendar";
 import { type LedgerState, positionQty, setStop } from "@/lib/portfolio/ledger";
 import type { ExecutionIntent, Fill } from "@/lib/execution/contracts";
@@ -198,6 +199,12 @@ export interface PlanStockCycleInput {
   strategy?: StrategyConfig;
   /** A gyertyák időkerete. Napi swing: "1d"; day trading: "5m". */
   timeframe?: Timeframe;
+  /**
+   * Cserélhető BELÉPŐ-alak. Ha megadod, EZ dönti el symbolonként a belépő engedélyét a
+   * beépített kitörés-jel helyett (a hézag-kapu, a méretezés és a kilépés változatlan).
+   * Élesben alapból üres — a scripts/stock-intraday-backtest.ts --sweep shape méri.
+   */
+  entryShape?: EntryShape;
 }
 
 export interface PlanStockCycleResult {
@@ -298,7 +305,15 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
   for (const [sym, sig] of Object.entries(signals)) {
     atrBySymbol[sym] = sig.atr;
     trendOkBySymbol[sym] = sig.trendOk;
-    momentumOkBySymbol[sym] = sig.momentumOk;
+    momentumOkBySymbol[sym] = input.entryShape
+      ? sig.sufficient &&
+        input.entryShape({
+          symbol: sym,
+          candles: input.candlesBySymbol[sym] ?? [],
+          candlesBySymbol: input.candlesBySymbol,
+          strategy,
+        })
+      : sig.momentumOk;
   }
 
   // A birtokolt pozíciók gyertyája kell a stop/TP-hez; ha nincs friss gyertya, kimarad.
@@ -372,6 +387,14 @@ export interface RunStockCycleDeps {
    * visszaigazolta a `fractionable` jelzőt; enélkül a fill egész darabra kerekít.
    */
   fractional?: boolean;
+  /** Cserélhető belépő-alak (mérés). Üresen a beépített kitörés-jel dönt. */
+  entryShape?: EntryShape;
+  /**
+   * Fill-költség felülírás — CSAK mérésre. Ezzel dönthető el, hogy egy variáns előnye a
+   * jelből jön-e, vagy pusztán abból, hogy kevesebbet kereskedik (és így kevesebb
+   * spreadet/slippage-et fizet). Élesben soha nincs megadva.
+   */
+  costOverride?: { slippageBps?: number; spreadBps?: number; feePct?: string };
   /** Broker felülírás (teszt). Alap: PaperExecutionBroker USD/stock-paraméterekkel. */
   broker?: ExecutionBroker;
 }
@@ -415,6 +438,7 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
       getTrigger: (intent: ExecutionIntent) => pendingTrigger.get(intent.intentId) ?? null,
       params: {
         ...fillParamsForClass("stock"),
+        ...(deps.costOverride ?? {}),
         filters: stockSymbolFilters("STOCK", STOCK_QUOTE, now(), { fractional: deps.fractional === true }),
         nowMs: now(),
       },
@@ -494,6 +518,7 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
     fearGreedValue: deps.fearGreedValue ?? null,
     strategy,
     timeframe: deps.timeframe,
+    entryShape: deps.entryShape,
   });
 
   // Trailing ratchet: a stop CSAK felfelé kúszik.

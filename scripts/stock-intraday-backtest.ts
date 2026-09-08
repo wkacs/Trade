@@ -36,14 +36,21 @@ import {
   STOCK_QUOTE,
 } from "@/lib/engine/stock-tick";
 import { previousTradingDayKey } from "@/lib/engine/stock-tick";
-import { etParts, etDateKey } from "@/lib/markets/calendar";
+import { etParts, etDateKey, minutesFromSessionOpen } from "@/lib/markets/calendar";
 import { fetchEarningsCalendar } from "@/lib/markets/earnings";
 import { emptyLedger, cashOf, type LedgerState } from "@/lib/portfolio/ledger";
 import { toNumber } from "@/lib/portfolio/money";
 import type { StrategyConfig } from "@/lib/strategy/config";
+import { ENTRY_SHAPES, type EntryShape } from "@/lib/strategy/intraday-entries";
 
 const CACHE_DIR = ".cache";
 const CAPITAL = 10000;
+
+/**
+ * `--nocost`: spread és slippage nullázva. Kontroll-futás — ezzel válik el, hogy egy
+ * variáns előnye a JELBŐL jön-e, vagy csak abból, hogy kevesebbet kereskedik.
+ */
+const NO_COST = process.argv.includes("--nocost");
 
 /**
  * Széles, likvid univerzum a szélesség-méréshez. Csupa nagy forgalmú, Alpacán
@@ -93,6 +100,60 @@ async function loadBars(instruments: Instrument[], tf: Timeframe, tag = "core"):
   return out;
 }
 
+/**
+ * Időbélyeg-igazítás ELLENŐRZÉSE.
+ *
+ * A szimuláció minden szimbólumot UGYANAZZAL az indexszel olvas, és a döntés idejét az
+ * első szimbólum barjából veszi. Ha bármelyik papírból hiányzik egy bar, az adott papír
+ * onnantól ELŐRE csúszik: a jel-bemenete és a fill-ára is a döntés pillanata UTÁNI baré
+ * lenne. Ez néma look-ahead volna, ezért inkább leállunk.
+ */
+function assertAligned(bars: Record<string, OhlcvCandle[]>): void {
+  const symbols = Object.keys(bars);
+  if (symbols.length < 2) return;
+  const n = Math.min(...symbols.map((s) => bars[s].length));
+  for (let i = 0; i < n; i++) {
+    const t = bars[symbols[0]][i].openTime;
+    for (const s of symbols) {
+      if (bars[s][i].openTime !== t) {
+        throw new Error(
+          `Időbélyeg-elcsúszás a(z) ${i}. indexnél: ${symbols[0]}=${new Date(t).toISOString()} ` +
+            `vs ${s}=${new Date(bars[s][i].openTime).toISOString()}. A mérés look-ahead lenne, ezért leállt. ` +
+            `Töröld a .cache állományt és tölts újra.`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * A BEFEJEZETLEN utolsó ülés eldobása.
+ *
+ * Ha a letöltés kereskedési idő közben futott, az utolsó ET-nap csonka. Az ilyen napon
+ * nyitott pozíció SOHA nem kap nap végi laposra zárást, hanem a záró egyenlegben
+ * piaci áron marad — vagyis kilépési költség nélkül, nem realizált nyereséggel. Ez pont
+ * azokat a variánsokat hozza előnybe, amelyek a nap ELEJÉN lépnek be, tehát a
+ * napszak-mérést hamisítaná meg.
+ */
+function dropIncompleteLastSession(bars: Record<string, OhlcvCandle[]>): Record<string, OhlcvCandle[]> {
+  const symbols = Object.keys(bars);
+  if (symbols.length === 0) return bars;
+  const ref = bars[symbols[0]];
+  if (ref.length === 0) return bars;
+  const lastKey = etDateKey(etParts(ref[ref.length - 1].openTime));
+  const lastDay = ref.filter((b) => etDateKey(etParts(b.openTime)) === lastKey);
+  // Teljes ülésnek az számít, ahol a záráshoz tapadó bar (15:55 ET, azaz a nyitástól
+  // 385 perc) is megvan. A 16:00-s záró print ülésen kívüli, ezért nem számít bele.
+  const complete = lastDay.some((b) => (minutesFromSessionOpen(b.openTime) ?? -1) >= 385);
+  if (complete) return bars;
+  const out: Record<string, OhlcvCandle[]> = {};
+  for (const s of symbols) {
+    out[s] = bars[s].filter((b) => etDateKey(etParts(b.openTime)) !== lastKey);
+  }
+  console.error(`  csonka záró ülés eldobva: ${lastKey} (${lastDay.length} bar)`);
+  return out;
+}
+
 interface RunMetrics {
   label: string;
   finalEquity: number;
@@ -102,6 +163,13 @@ interface RunMetrics {
   winRatePct: number;
   maxDrawdownPct: number;
   eodFlats: number;
+  /** Átlagos trade-hozam százalékban (a méret nélküli, tiszta jel-minőség). */
+  avgTradePct: number;
+  /**
+   * A trade-hozamok t-statisztikája (átlag / szórás * sqrt(n)). Durva, de őszinte
+   * zaj-mérce: |t| < 2 mellett a variánsok sorrendje NEM megkülönböztethető a véletlentől.
+   */
+  tStat: number;
 }
 
 /** Egy variáns végigjátszása a történelmi barokon. */
@@ -114,6 +182,7 @@ async function simulate(
   range?: { fromPct: number; toPct: number },
   fractional = false,
   earningsByDate?: Map<string, Set<string>>,
+  entryShape?: EntryShape,
 ): Promise<RunMetrics> {
   const symbols = Object.keys(bars);
   const step = TIMEFRAME_MS[tf];
@@ -130,6 +199,7 @@ async function simulate(
   let wins = 0;
   let eodFlats = 0;
   const entryPrice: Record<string, number> = {};
+  const tradeReturns: number[] = [];
 
   for (let i = start; i < n; i++) {
     const barOpen = bars[symbols[0]][i].openTime;
@@ -156,6 +226,8 @@ async function simulate(
       strategy,
       fractional,
       entryBlocked,
+      entryShape,
+      ...(NO_COST ? { costOverride: { slippageBps: 0, spreadBps: 0, feePct: "0" } } : {}),
       weeklyBudgetRemainingUsd: equityNow * 0.05,
     });
     ledger = res.ledger;
@@ -168,7 +240,11 @@ async function simulate(
         sells++;
         if (a.kind === "eod-flat") eodFlats++;
         const entry = entryPrice[a.symbol];
-        if (entry && a.amountUsd / a.qty > entry) wins++;
+        if (entry) {
+          const exit = a.amountUsd / a.qty;
+          tradeReturns.push(exit / entry - 1);
+          if (exit > entry) wins++;
+        }
       }
     }
 
@@ -181,9 +257,17 @@ async function simulate(
     return pos ? total + toNumber(pos.qty) * bars[s][n - 1].close : total;
   }, toNumber(cashOf(ledger, STOCK_QUOTE)));
 
+  const tn = tradeReturns.length;
+  const mean = tn > 0 ? tradeReturns.reduce((a, b) => a + b, 0) / tn : 0;
+  const variance = tn > 1 ? tradeReturns.reduce((a, b) => a + (b - mean) ** 2, 0) / (tn - 1) : 0;
+  const sd = Math.sqrt(variance);
+  const tStat = tn > 1 && sd > 0 ? (mean / sd) * Math.sqrt(tn) : 0;
+
   return {
     label,
     finalEquity,
+    avgTradePct: mean * 100,
+    tStat,
     returnPct: (finalEquity / CAPITAL - 1) * 100,
     trades: sells,
     buys,
@@ -240,7 +324,8 @@ async function main() {
   const wide = process.argv.includes("--wide");
   const instruments = wide ? WIDE_UNIVERSE.map(stockInstrument) : activeByClass("stock");
   console.error(`Adat betöltése (${tf}, 60 nap, ${instruments.length} instrumentum)…`);
-  const bars = await loadBars(instruments, tf, wide ? "wide" : "core");
+  const bars = dropIncompleteLastSession(await loadBars(instruments, tf, wide ? "wide" : "core"));
+  assertAligned(bars);
   const symbols = Object.keys(bars);
   if (symbols.length === 0) {
     console.error("Nincs adat.");
@@ -251,7 +336,13 @@ async function main() {
   const to = new Date(first[first.length - 1].openTime).toISOString().slice(0, 10);
   console.error(`${symbols.join(", ")} — ${first.length} bar, ${from} → ${to}\n`);
 
-  const variants: { label: string; strategy: StrategyConfig; fractional?: boolean; earnings?: boolean }[] = [];
+  const variants: {
+    label: string;
+    strategy: StrategyConfig;
+    fractional?: boolean;
+    earnings?: boolean;
+    shape?: string;
+  }[] = [];
   if (sweep === "stop-tp") {
     for (const stop of [0.003, 0.005, 0.0075, 0.01]) {
       for (const tp of [0.005, 0.0075, 0.01, 0.015]) {
@@ -305,6 +396,50 @@ async function main() {
       const full = await simulate(label, bars, instruments, strategy, tf);
       const fmt = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`.padStart(8);
       console.log(`${label.padEnd(30)}${fmt(a.returnPct)}${fmt(b.returnPct)}${fmt(full.returnPct)}${String(full.trades).padStart(8)}`);
+    }
+    return;
+  } else if (sweep === "shape") {
+    // A BELÉPŐ ALAKJA — a stratégia-tér valódi kérdése. Minden alak UGYANAZT a kockázati
+    // keretet, méretezést, stopot és nap végi zárást kapja; csak a belépő jele más.
+    // Mindegyik a 60 nap MINDKÉT felén külön is mérve (a szerencsés ablak így kiderül).
+    const only = arg("shape", "");
+    const names = only ? only.split(",") : Object.keys(ENTRY_SHAPES);
+    const rows: { label: string; a: number; b: number; full: RunMetrics }[] = [];
+    for (const name of names) {
+      if (!ENTRY_SHAPES[name]) {
+        console.error(`  ismeretlen alak: ${name}`);
+        continue;
+      }
+      const shape = ENTRY_SHAPES[name];
+      // A jel-ablakok BAR-ban értendők, ezért más gyertya-méreten át kell skálázni
+      // (5m: 78 bar = 1 ülés; 1m: 390 bar = 1 ülés).
+      const smaArg = Number(arg('sma', '0'));
+      const lookArg = Number(arg('look', '0'));
+      const st: StrategyConfig = smaArg > 0 && lookArg > 0
+        ? { ...STOCK_INTRADAY_STRATEGY, entryFilterSmaPeriod: smaArg, momentumSmaPeriod: smaArg, momentumLookback: lookArg }
+        : STOCK_INTRADAY_STRATEGY;
+      const frac = process.argv.includes('--fractional');
+      const a = await simulate(name, bars, instruments, st, tf, { fromPct: 0, toPct: 0.5 }, frac, undefined, shape);
+      const b = await simulate(name, bars, instruments, st, tf, { fromPct: 0.5, toPct: 1 }, frac, undefined, shape);
+      const full = await simulate(name, bars, instruments, st, tf, undefined, frac, undefined, shape);
+      rows.push({ label: name, a: a.returnPct, b: b.returnPct, full });
+      console.error(
+        `  ${name.padEnd(14)} teljes ${full.returnPct >= 0 ? "+" : ""}${full.returnPct.toFixed(2)}%  ` +
+          `trade ${String(full.trades).padStart(4)}  win ${full.winRatePct.toFixed(0)}%  maxDD ${full.maxDrawdownPct.toFixed(2)}%`,
+      );
+    }
+    rows.sort((x, y) => y.full.returnPct - x.full.returnPct);
+    const fmt = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`.padStart(9);
+    console.log(`\n=== ${tf} · belépő-alak · 60 nap · ${symbols.join("/")}${NO_COST ? " · KÖLTSÉG NÉLKÜL" : ""} ===`);
+    console.log("alak            1. fél    2. fél    teljes   trade  win%   maxDD%   átlag/trade      t  robusztus");
+    for (const r of rows) {
+      const robust = r.a > 0 && r.b > 0 ? "IGEN" : "nem";
+      console.log(
+        `${r.label.padEnd(14)}${fmt(r.a)}${fmt(r.b)}${fmt(r.full.returnPct)}` +
+          `${String(r.full.trades).padStart(8)}${r.full.winRatePct.toFixed(0).padStart(6)}%` +
+          `${r.full.maxDrawdownPct.toFixed(2).padStart(8)}%${r.full.avgTradePct.toFixed(3).padStart(11)}%` +
+          `${r.full.tStat.toFixed(2).padStart(7)}   ${robust}`,
+      );
     }
     return;
   } else if (sweep === "earnings") {
@@ -383,6 +518,7 @@ async function main() {
       undefined,
       v.fractional === true,
       v.earnings ? earningsByDate : undefined,
+      v.shape ? ENTRY_SHAPES[v.shape] : undefined,
     );
     results.push(m);
     console.error(

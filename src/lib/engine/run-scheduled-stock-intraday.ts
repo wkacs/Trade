@@ -33,6 +33,7 @@ import { persistWarning } from "@/lib/engine/run-scheduled-stock-tick";
 import { etParts, etDateKey } from "@/lib/markets/calendar";
 import { allFractionable } from "@/lib/markets/alpaca";
 import { symbolsWithEarningsOn } from "@/lib/markets/earnings";
+import { resolveEntryShape } from "@/lib/strategy/intraday-entries";
 
 /**
  * DAY TRADING részvény-ciklus — 5 percenként, az amerikai ülés alatt.
@@ -62,6 +63,8 @@ export interface ScheduledStockIntradayResult {
   fractional?: boolean;
   /** Papírok, amikre ma nem nyitunk (gyorsjelentés napja). */
   entryBlocked?: string[];
+  /** A használt belépő-alak neve (`built-in`, ha a beépített kitörés-jel dönt). */
+  entryShape?: string;
   /** Nem végzetes, de NEM elhallgatható figyelmeztetések (pl. duplikált fill). */
   warnings?: string[];
   lease?: { key: string; owner: string; fencingToken: number };
@@ -181,6 +184,18 @@ export async function executeScheduledStockIntraday(
       console.log(`[stock-intraday] gyorsjelentés miatt nincs belépő: ${[...entryBlocked].join(", ")}`);
     }
 
+    // Cserélhető belépő-alak. Alapból NINCS beállítva → a beépített kitörés-jel dönt,
+    // vagyis az élő viselkedés csak akkor változik, ha valaki tudatosan átállítja.
+    // A mért ajánlás: STOCK_INTRADAY_ENTRY_SHAPE=tod60+regime (lásd a stratégia-verseny
+    // dokumentumot); a névtár a src/lib/strategy/intraday-entries.ts-ben van.
+    const shapeName = (process.env.STOCK_INTRADAY_ENTRY_SHAPE ?? "").trim();
+    const entryShape = resolveEntryShape(shapeName) ?? undefined;
+    if (shapeName !== "" && !entryShape) {
+      const warning = `ismeretlen STOCK_INTRADAY_ENTRY_SHAPE: "${shapeName}" — a beépített kitörés-jel marad`;
+      console.warn(`[stock-intraday] ${warning}`);
+      warnings.push(warning);
+    }
+
     const result = await runStockCycle({
       tickId: slot,
       now,
@@ -191,6 +206,7 @@ export async function executeScheduledStockIntraday(
       phase,
       fractional,
       entryBlocked,
+      entryShape,
       strategy: STOCK_INTRADAY_STRATEGY,
       strategyVersion: STOCK_INTRADAY_STRATEGY_VERSION,
       weeklyBudgetRemainingUsd: Number(cashOf(ledger, STOCK_QUOTE)) * 0.05,
@@ -225,6 +241,7 @@ export async function executeScheduledStockIntraday(
       actions: result.actions,
       seeded,
       fractional,
+      entryShape: entryShape ? shapeName : "built-in",
       ...(entryBlocked.size > 0 ? { entryBlocked: [...entryBlocked] } : {}),
       lease: leaseInfo,
       ...(warnings.length > 0 ? { warnings } : {}),

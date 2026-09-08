@@ -179,12 +179,17 @@ const YAHOO_UA =
  *
  * Intraday-nél a Yahoo KEMÉNY korlátja 60 nap (`5m`/`15m`) — ennél régebbi kérés
  * `Unprocessable Entity`. Egy ülés 78 db 5 perces bar, ezért a napokra váltás onnan jön.
+ *
+ * Az `1m` sorozat KÜLÖN eset: arra a Yahoo csak 7 napot ad, és a 60 napos (vagy akár
+ * 1 hónapos) kérést `Unprocessable Entity`-vel utasítja el. Enélkül MINDEN perces
+ * lekérés némán hibára futott.
  */
 export function rangeForBars(bars: number, timeframe: Timeframe = "1d"): string {
   if (timeframe !== "1d") {
     const barsPerSession = Math.max(1, Math.floor((6.5 * 60 * 60 * 1000) / TIMEFRAME_MS[timeframe]));
     const sessions = Math.ceil(bars / barsPerSession) + 1;
     if (sessions <= 5) return "5d";
+    if (timeframe === "1m") return "7d"; // a perces sorozat maximuma
     if (sessions <= 20) return "1mo";
     return "60d"; // a maximum, amit a Yahoo intraday-re ad
   }

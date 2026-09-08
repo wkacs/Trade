@@ -205,6 +205,12 @@ describe("markets/yahoo – intraday gyertyák", () => {
     expect(rangeForBars(5000, "5m")).toBe("60d"); // a Yahoo maximuma
   });
 
+  it("1 perces sorozatra 7 napnál nem kér többet (a Yahoo ott ennyit ad)", () => {
+    expect(rangeForBars(100, "1m")).toBe("5d");
+    expect(rangeForBars(2000, "1m")).toBe("7d"); // ~6 ülés
+    expect(rangeForBars(50000, "1m")).toBe("7d");
+  });
+
   it("a lekérés az intraday intervallumot kéri", async () => {
     const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, json: async () => intraday })) as unknown as typeof fetch;
     const res = await fetchYahooCandles("AAPL", "AAPL", 2, "5m", { now: () => t0 + 10 * FIVE_MIN, fetchImpl });

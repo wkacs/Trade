@@ -67,7 +67,31 @@ const WEEKDAY_INDEX: Record<string, number> = {
  * Egy epoch ms felbontása America/New_York fali-órára. A DST-t az `Intl` intézi —
  * ugyanaz az abszolút pillanat nyáron EDT, télen EST helyi időt ad.
  */
+/**
+ * Perc-vödrös gyorsítótár az `etParts` elé.
+ *
+ * Az `Intl.formatToParts` drága, és a jel-számítás gyertyánként többször is hívja: egy
+ * 30 papíros, 60 napos intraday backteszt így több tízmillió hívást csinál (mérve
+ * ~235 000 hívás/mp, azaz percekben mérhető tiszta `Intl`-idő futásonként).
+ *
+ * A vödör kulcsa a UTC-perc. Ez pontos: az America/New_York eltolás egész órás, tehát
+ * egy UTC-perc mindig pontosan egy ET-percre képződik le — a DST-váltás sem oszt percet
+ * ketté. A gyorsítótár csak az `Intl`-hívást spórolja meg, az eredményt nem változtatja.
+ */
+const ET_PARTS_CACHE = new Map<number, EtParts>();
+const ET_PARTS_CACHE_MAX = 200_000;
+
 export function etParts(nowMs: number): EtParts {
+  const bucket = Math.floor(nowMs / 60_000);
+  const hit = ET_PARTS_CACHE.get(bucket);
+  if (hit) return hit;
+  const computed = computeEtParts(nowMs);
+  if (ET_PARTS_CACHE.size >= ET_PARTS_CACHE_MAX) ET_PARTS_CACHE.clear();
+  ET_PARTS_CACHE.set(bucket, computed);
+  return computed;
+}
+
+function computeEtParts(nowMs: number): EtParts {
   const parts = ET_FORMAT.formatToParts(new Date(nowMs));
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
   // hour12:false mellett a "24" éjfélt jelenthet — normalizáljuk 0-ra.
@@ -78,15 +102,20 @@ export function etParts(nowMs: number): EtParts {
     day: Number(get("day")),
     hour: rawHour === 24 ? 0 : rawHour,
     minute: Number(get("minute")),
-    weekday: WEEKDAY_INDEX[get("weekday")] ?? new Date(nowMs).getUTCDay(),
+    // Ha az Intl váratlan hétköznap-nevet ad, a napot az ET DÁTUMBÓL számoljuk. A régi
+    // UTC-fallback néma hibát okozott: ET vasárnap 20:00 UTC-ben már hétfő, tehát a
+    // hétvégéből kereskedési nap lett volna.
+    weekday:
+      WEEKDAY_INDEX[get("weekday")] ??
+      new Date(Date.UTC(Number(get("year")), Number(get("month")) - 1, Number(get("day")))).getUTCDay(),
   };
 }
 
 /**
  * US tőzsdei zárva-tartó ünnepnapok (teljes zárás), `YYYY-MM-DD` (ET dátum) formában.
  * 2025–2027, a hivatalos NYSE naptár szerint; a megfigyelt (observed) eltolások benne
- * vannak. Bővíthető — a fél-napos ülések (korai zárás) itt NEM szerepelnek, mert a
- * napi close akkor is létrejön.
+ * vannak. Bővíthető. A KORAI ZÁRÁSÚ napok külön listában vannak
+ * (`US_MARKET_HALF_DAYS`), mert azok kereskedési napok, csak rövidebbek.
  */
 export const US_MARKET_HOLIDAYS: ReadonlySet<string> = new Set([
   // 2025
@@ -124,6 +153,33 @@ export const US_MARKET_HOLIDAYS: ReadonlySet<string> = new Set([
   "2027-12-24", // Christmas (observed, dec. 25 szombat)
 ]);
 
+/**
+ * KORAI ZÁRÁSÚ (fél-napos) tőzsdei ülések: 09:30–13:00 ET. Kereskedési napok, de három
+ * órával rövidebbek.
+ *
+ * Miért számít: a day-trading ciklus fázisait (belépő-stop, nap végi laposra zárás) a
+ * zárásig hátralévő perc vezérli. E lista nélkül a bot fél-napon 13:00 után is
+ * `trading` fázisban maradna, ELAVULT áron nyitna pozíciót, és a laposra zárás három
+ * órával a valódi záró UTÁN futna — vagyis a pozíció bent ragadna éjszakára.
+ *
+ * NYSE szabály szerint korai zárás: a hálaadás UTÁNI péntek, és a karácsony előtti nap,
+ * ha az önmagában kereskedési nap. (Amikor július 4. hétvégére esik, nincs korai zárás,
+ * mert a piac a megfigyelt ünnepen egész nap zárva van.)
+ */
+export const US_MARKET_HALF_DAYS: ReadonlySet<string> = new Set([
+  "2025-07-03", // július 4. előtti nap
+  "2025-11-28", // hálaadás utáni péntek
+  "2025-12-24", // szenteste
+  "2026-11-27", // hálaadás utáni péntek
+  "2026-12-24", // szenteste
+  "2027-11-26", // hálaadás utáni péntek
+]);
+
+/** Igaz, ha az adott ET-nap korai zárású (13:00 ET). */
+export function isHalfDay(nowMs: number): boolean {
+  return US_MARKET_HALF_DAYS.has(etDateKey(etParts(nowMs)));
+}
+
 /** ET dátumkulcs (`YYYY-MM-DD`) egy bontásból. */
 export function etDateKey(p: Pick<EtParts, "year" | "month" | "day">): string {
   const mm = String(p.month).padStart(2, "0");
@@ -138,9 +194,15 @@ export function isUsTradingDay(nowMs: number): boolean {
   return !US_MARKET_HOLIDAYS.has(etDateKey(p));
 }
 
-// Szabályos ülés: 09:30–16:00 ET. Percben az éjfél óta.
+// Szabályos ülés: 09:30–16:00 ET, korai zárású napon 09:30–13:00. Percben az éjfél óta.
 const SESSION_OPEN_MIN = 9 * 60 + 30;
 const SESSION_CLOSE_MIN = 16 * 60;
+const HALF_DAY_CLOSE_MIN = 13 * 60;
+
+/** Az adott nap zárási perce ET-ben (korai zárású napon 13:00, egyébként 16:00). */
+export function sessionCloseMinute(nowMs: number): number {
+  return isHalfDay(nowMs) ? HALF_DAY_CLOSE_MIN : SESSION_CLOSE_MIN;
+}
 
 /** Az amerikai részvénypiac ülés-állapota egy időpontban. */
 export function usEquitySession(nowMs: number): MarketSession {
@@ -149,7 +211,7 @@ export function usEquitySession(nowMs: number): MarketSession {
   if (US_MARKET_HOLIDAYS.has(etDateKey(p))) return { open: false, reason: "holiday" };
   const minutes = p.hour * 60 + p.minute;
   if (minutes < SESSION_OPEN_MIN) return { open: false, reason: "pre-market" };
-  if (minutes >= SESSION_CLOSE_MIN) return { open: false, reason: "after-hours" };
+  if (minutes >= sessionCloseMinute(nowMs)) return { open: false, reason: "after-hours" };
   return { open: true, reason: "regular-session" };
 }
 
@@ -161,7 +223,18 @@ export function minutesToSessionClose(nowMs: number): number | null {
   const session = usEquitySession(nowMs);
   if (!session.open) return null;
   const p = etParts(nowMs);
-  return SESSION_CLOSE_MIN - (p.hour * 60 + p.minute);
+  return sessionCloseMinute(nowMs) - (p.hour * 60 + p.minute);
+}
+
+/**
+ * Hány perc telt el a szabályos ülés nyitása (09:30 ET) óta. null, ha épp nincs ülés.
+ * Az ülés-relatív belépők (opening range, napszak-szűrő) ebből tudják, hol tartunk a napban.
+ */
+export function minutesFromSessionOpen(nowMs: number): number | null {
+  const session = usEquitySession(nowMs);
+  if (!session.open) return null;
+  const p = etParts(nowMs);
+  return p.hour * 60 + p.minute - SESSION_OPEN_MIN;
 }
 
 /** A piac állapota eszközosztály szerint. */

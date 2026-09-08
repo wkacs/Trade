@@ -470,3 +470,25 @@ describe("engine/stock-tick – belépő-tiltás és tört lot", () => {
     expect(Math.abs(1000 - f.amountUsd)).toBeLessThan(Math.abs(1000 - w.amountUsd));
   });
 });
+
+describe("intradayPhaseAt – korai zárású (fél-napos) ülés", () => {
+  // 2026-11-27 péntek, hálaadás utáni nap: 09:30–13:00 ET (EST = UTC−5).
+  const half = (etHour: number, etMin: number) => Date.UTC(2026, 10, 27, etHour + 5, etMin);
+
+  it("12:00-kor még kereskedik (60 perc a zárásig)", () => {
+    const g = intradayPhaseAt(half(12, 0));
+    expect(g).toMatchObject({ due: true, phase: "trading", minutesToClose: 60 });
+  });
+
+  it("12:35-kor már NEM nyit új pozíciót", () => {
+    expect(intradayPhaseAt(half(12, 35)).phase).toBe("no-new-entries");
+  });
+
+  it("12:55-kor laposra zár — nem 15:50-kor, három órával a valódi záró után", () => {
+    expect(intradayPhaseAt(half(12, 55)).phase).toBe("flatten");
+  });
+
+  it("13:30-kor már zárva (korábban 16:00-ig kereskedett volna)", () => {
+    expect(intradayPhaseAt(half(13, 30))).toMatchObject({ due: false, phase: "closed" });
+  });
+});
