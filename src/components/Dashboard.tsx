@@ -14,11 +14,22 @@ import { TickInspector } from "./TickInspector";
 import { AnalyticsPanel } from "./AnalyticsPanel";
 import { ShadowPanel } from "./ShadowPanel";
 
+interface StockFillApi {
+  symbol: string;
+  side: string;
+  qty: number;
+  amountUsd: number;
+  price: number;
+  origin: string | null;
+  executedAt: string;
+}
+
 interface StockLaneApi {
   initialized: boolean;
   cashUsd: number;
   quote: string;
   positions: { symbol: string; qty: number; entryPrice: number; stopPrice?: number }[];
+  recentFills?: StockFillApi[];
 }
 
 interface PortfolioApi {
@@ -97,6 +108,7 @@ export function Dashboard() {
   const stockValue = stockPositions.reduce((s, p) => s + p.entryPrice * p.qty, 0);
   const stockEquity = stockCash + stockValue;
   const stockReady = !!stock?.initialized;
+  const stockFills = stock?.recentFills ?? [];
 
   return (
     <div className="min-h-screen">
@@ -218,7 +230,7 @@ export function Dashboard() {
           <Gauge label="Equity (USD)" value={stockReady ? fmtUsd(stockEquity) : "—"} />
           <Gauge label="Készpénz (USD)" value={stockReady ? fmtUsd(stockCash) : "—"} />
           <Gauge label="Pozíciók" value={stockReady ? String(stockPositions.length) : "—"} />
-          <Gauge label="Elszámoló" value={stock?.quote ?? "USD"} />
+          <Gauge label="Kötések" value={stockReady ? String(stockFills.length) : "—"} />
         </section>
 
         <div className="grid gap-4 lg:grid-cols-3">
@@ -229,6 +241,7 @@ export function Dashboard() {
             <div className="mb-2 font-display text-[11px] font-medium uppercase tracking-[0.2em] text-info">
               Részvény-motor állapota
             </div>
+            {stockFills.length > 0 && <StockFillList fills={stockFills} />}
             {stockReady ? (
               <p>
                 A részvény paper-pénztárca aktív, saját USD-elszámolással.{" "}
@@ -254,6 +267,50 @@ export function Dashboard() {
           külön pénztárcák &nbsp;·&nbsp; konzervatív limitek
         </footer>
       </main>
+    </div>
+  );
+}
+
+/**
+ * A részvény-sáv legutóbbi kötései. Day tradingben ez a nap története: mikor, mire, és
+ * MIÉRT (momentum-belépő, stop, take-profit vagy nap végi laposra zárás).
+ */
+function StockFillList({ fills }: { fills: StockFillApi[] }) {
+  const originLabel: Record<string, string> = {
+    momentum: "kitörés",
+    dca: "DCA",
+    "stop-loss": "stop",
+    "take-profit": "take-profit",
+    "eod-flat": "nap végi zárás",
+  };
+  return (
+    <div className="mb-4 overflow-x-auto">
+      <table className="w-full min-w-[420px] text-left font-mono text-[11px]">
+        <thead className="text-faint">
+          <tr>
+            <th className="pb-1 font-normal">idő (UTC)</th>
+            <th className="pb-1 font-normal">papír</th>
+            <th className="pb-1 font-normal">irány</th>
+            <th className="pb-1 text-right font-normal">db</th>
+            <th className="pb-1 text-right font-normal">ár</th>
+            <th className="pb-1 text-right font-normal">érték</th>
+            <th className="pb-1 font-normal">miért</th>
+          </tr>
+        </thead>
+        <tbody>
+          {fills.map((f, i) => (
+            <tr key={`${f.executedAt}-${f.symbol}-${i}`} className="border-t border-line/60">
+              <td className="py-1 text-dim">{f.executedAt.slice(5, 16).replace("T", " ")}</td>
+              <td className="py-1 text-ink">{f.symbol}</td>
+              <td className={`py-1 ${f.side === "BUY" ? "text-info" : "text-accent"}`}>{f.side}</td>
+              <td className="py-1 text-right text-dim">{f.qty}</td>
+              <td className="py-1 text-right text-dim">{f.price.toFixed(2)}</td>
+              <td className="py-1 text-right text-dim">{f.amountUsd.toFixed(2)}</td>
+              <td className="py-1 text-faint">{f.origin ? (originLabel[f.origin] ?? f.origin) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

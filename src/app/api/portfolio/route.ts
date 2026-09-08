@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, schema } from "@/db/client";
+import { getDb, getSql, schema } from "@/db/client";
 import { desc } from "drizzle-orm";
 import { getPerformanceSummary } from "@/lib/portfolio/evaluate";
 import { loadLedgerState, hasLedgerState } from "@/lib/execution/order-store";
@@ -12,6 +12,18 @@ import { toNumber, div, isPositive } from "@/lib/portfolio/money";
 // és a dashboard sosem frissülne. Lásd spec §3.5.
 export const dynamic = "force-dynamic";
 
+/** Egy elszámolt részvény-kötés a dashboard számára. */
+export interface StockFill {
+  symbol: string;
+  side: string;
+  qty: number;
+  amountUsd: number;
+  price: number;
+  /** momentum | stop-loss | take-profit | eod-flat | dca — az intent eredete. */
+  origin: string | null;
+  executedAt: string;
+}
+
 /** A részvény-sáv SAJÁT pénztárcája — a külön `stock-paper` USD-ledger scope-ból. */
 export interface StockLane {
   /** Igaz, ha a részvény-ledger már inicializált (van cash/pozíció sor). */
@@ -19,11 +31,54 @@ export interface StockLane {
   cashUsd: number;
   quote: string;
   positions: { symbol: string; qty: number; entryPrice: number; stopPrice?: number }[];
+  /** A legutóbbi kötések (day trading: ezek a mai nap kereskedései). */
+  recentFills: StockFill[];
+}
+
+/**
+ * A részvény-sáv legutóbbi kötései. A fill maga nem hordozza az eredetet (momentum /
+ * stop-loss / nap végi zárás), ezért az intent-táblából olvassuk hozzá — enélkül a
+ * dashboardon nem lenne látható, MIÉRT történt a kötés.
+ */
+async function loadStockFills(limit = 12): Promise<StockFill[]> {
+  const sql = getSql();
+  if (!sql) return [];
+  try {
+    const rows = (await sql`
+      SELECT f.symbol, f.side, f.filled_base_qty, f.gross_quote_amount, f.fill_price,
+             f.executed_at, i.origin
+        FROM execution_fills f
+        LEFT JOIN execution_intents i ON i.intent_id = f.intent_id
+       WHERE f.portfolio_id = ${STOCK_PORTFOLIO_ID}
+       ORDER BY f.executed_at DESC
+       LIMIT ${limit}
+    `) as {
+      symbol: string;
+      side: string;
+      filled_base_qty: string;
+      gross_quote_amount: string;
+      fill_price: string;
+      executed_at: string;
+      origin: string | null;
+    }[];
+    return rows.map((r) => ({
+      symbol: r.symbol,
+      side: r.side,
+      qty: Number(r.filled_base_qty),
+      amountUsd: Number(r.gross_quote_amount),
+      price: Number(r.fill_price),
+      origin: r.origin,
+      executedAt: new Date(r.executed_at).toISOString(),
+    }));
+  } catch (e) {
+    console.error("[api/portfolio] részvény-kötések:", e);
+    return [];
+  }
 }
 
 /** A részvény pénztárca betöltése. DB nélkül vagy hibánál nem-inicializált üres sáv. */
 async function loadStockLane(): Promise<StockLane> {
-  const empty: StockLane = { initialized: false, cashUsd: 0, quote: STOCK_QUOTE, positions: [] };
+  const empty: StockLane = { initialized: false, cashUsd: 0, quote: STOCK_QUOTE, positions: [], recentFills: [] };
   const db = getDb();
   if (!db) return empty;
   try {
@@ -38,7 +93,13 @@ async function loadStockLane(): Promise<StockLane> {
         entryPrice: toNumber(div(p.costBasisQuote, p.qty)),
         stopPrice: p.stopPrice ? toNumber(p.stopPrice) : undefined,
       }));
-    return { initialized: true, cashUsd: toNumber(cashOf(ledger, STOCK_QUOTE)), quote: STOCK_QUOTE, positions };
+    return {
+      initialized: true,
+      cashUsd: toNumber(cashOf(ledger, STOCK_QUOTE)),
+      quote: STOCK_QUOTE,
+      positions,
+      recentFills: await loadStockFills(),
+    };
   } catch (e) {
     console.error("[api/portfolio] részvény-sáv:", e);
     return empty;
@@ -56,7 +117,7 @@ export async function GET() {
       portfolio: null,
       positions: [],
       recentTrades: [],
-      stock: { initialized: false, cashUsd: 0, quote: STOCK_QUOTE, positions: [] } satisfies StockLane,
+      stock: { initialized: false, cashUsd: 0, quote: STOCK_QUOTE, positions: [], recentFills: [] } satisfies StockLane,
       note: "DATABASE_URL nincs beállítva — demo adatok nélkül.",
     });
   }
@@ -83,7 +144,7 @@ export async function GET() {
         portfolio: null,
         positions: [],
         recentTrades: [],
-        stock: { initialized: false, cashUsd: 0, quote: STOCK_QUOTE, positions: [] } satisfies StockLane,
+        stock: { initialized: false, cashUsd: 0, quote: STOCK_QUOTE, positions: [], recentFills: [] } satisfies StockLane,
       },
       { status: 500 },
     );
