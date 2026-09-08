@@ -48,6 +48,10 @@ A kripto `DEFAULT_STRATEGY`-ből, két szándékos eltéréssel:
 take-profit, napi circuit breaker — mind változatlan. A belépő jel: breakout, azaz a
 záróár az SMA(24 ülés) fölött ÉS a 48 ülés maximuma.
 
+> **FRISSÍTÉS (2026-09-08 este):** a sáv azóta **day tradingre** állt át — 5 perces
+> ciklus az ülés alatt, nap végi laposra zárás, mért paraméterekkel. A napi swing
+> ütemezés kikapcsolva. Lásd: `docs/2026-09-08-reszveny-day-trading.md`.
+
 ## 4. A sáv mai állapota
 
 - Univerzum: AAPL, MSFT, NVDA, SPY (Yahoo, napi gyertya, USD).

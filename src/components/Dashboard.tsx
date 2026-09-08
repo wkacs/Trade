@@ -203,12 +203,12 @@ export function Dashboard() {
           <AdminPanel />
         </div>
 
-        {/* ══════════ 2. SÁV — RÉSZVÉNY (USD, napi) ══════════ */}
+        {/* ══════════ 2. SÁV — RÉSZVÉNY (USD, day trading) ══════════ */}
         <div className="pt-4">
           <LaneHeader
             tone="info"
             label="Részvény"
-            sub="AAPL · MSFT · NVDA · SPY · USD · napi (zárás után)"
+            sub="AAPL · MSFT · NVDA · SPY · USD · day trading (5 perc, zárásra flat)"
             status={stockReady ? "paper" : "készenlét"}
           />
         </div>
@@ -231,14 +231,16 @@ export function Dashboard() {
             </div>
             {stockReady ? (
               <p>
-                A részvény paper-pénztárca aktív, saját USD-elszámolással. A napi profit-ciklus
-                (stop / take-profit / trailing) az ülés zárása után fut.
+                A részvény paper-pénztárca aktív, saját USD-elszámolással.{" "}
+                <span className="text-ink">Day trading</span>: az amerikai ülés alatt 5 percenként
+                dönt 5 perces gyertyán, az utolsó fél órában már nem nyit újat, az utolsó 10 percben
+                pedig mindent laposra zár — nincs overnight pozíció.
               </p>
             ) : (
               <p>
-                A részvény-motor kész (napi profit-ciklus, USD-pénztárca, a közös kockázati kapun),
-                de a <span className="text-ink">napi ütemező</span> még nincs élesítve — ezért ez a
-                sáv <span className="text-ink">készenléti</span> állapotban van, még nincs
+                A részvény day-trading motor kész (5 perces ciklus, USD-pénztárca, a közös kockázati
+                kapun), de az <span className="text-ink">ütemező</span> még nincs élesítve — ezért ez
+                a sáv <span className="text-ink">készenléti</span> állapotban van, még nincs
                 inicializált pénztárca. Bekapcsolás után itt jelennek meg a részvény-pozíciók és a
                 saját egyenleg.
               </p>
@@ -248,7 +250,7 @@ export function Dashboard() {
 
         <footer className="pt-4 text-center font-mono text-[11px] text-faint">
           <span className="text-accent">KRIPTÓ</span> BTC · ETH · SOL (USDT) &nbsp;·&nbsp;{" "}
-          <span className="text-info">RÉSZVÉNY</span> AAPL · MSFT · NVDA · SPY (USD) &nbsp;·&nbsp;
+          <span className="text-info">RÉSZVÉNY</span> AAPL · MSFT · NVDA · SPY (USD, day trading) &nbsp;·&nbsp;
           külön pénztárcák &nbsp;·&nbsp; konzervatív limitek
         </footer>
       </main>
