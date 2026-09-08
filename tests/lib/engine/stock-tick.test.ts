@@ -24,7 +24,9 @@ const NOW = Date.parse("2026-02-02T22:00:00Z"); // hétfő 17:00 ET → after-ho
 
 // Napi gyertya-építő (idő szerint növekvő openTime).
 function daily(closes: Array<{ o: number; h: number; l: number; c: number }>): OhlcvCandle[] {
-  const t0 = Date.parse("2026-01-01T13:30:00Z");
+  // A sor az AKTUÁLIS döntési napon (NOW = 2026-02-02) ér véget: a friss-adat kapu óta egy
+  // hetekkel korábbi utolsó bar joggal elavult, és nem is adna végrehajtási árat.
+  const t0 = Date.parse("2026-02-02T13:30:00Z") - (closes.length - 1) * STOCK_STEP_MS;
   return closes.map((b, i) => ({
     symbol: "AAPL",
     timeframe: "1d",
@@ -743,19 +745,23 @@ describe("engine/stock-tick – elavult gyertyából nincs ÚJ belépő", () => 
     expect(res.staleSymbols).toEqual(["AAPL"]);
   });
 
-  it("elavult adat mellett a VÉDELMI kilépés megmarad (a zárás nem tiltott)", async () => {
-    const res = await runStockCycle({
+  it("elavult áron NEM gyárt kötést: a pozíció nyitva marad, és incidensként látszik", () => {
+    // Egy öt napja lezárt gyertya nem bizonyítja, hogy az ár most is érvényes. Ebből
+    // eladást „teljesíteni" kitalált fill-ár és kitalált eredmény lenne — a hiányzó adatot
+    // nem oldjuk fel, hanem MEGNEVEZZÜK.
+    return runStockCycle({
       tickId: "stale-flat",
       now: () => NOW + 5 * 24 * 60 * 60 * 1000,
       ledger: ledgerWithPosition("3", "290", "80"),
       instruments: [AAPL],
       candlesBySymbol: { AAPL: fresh },
       phase: "flatten",
+    }).then((res) => {
+      expect(res.actions).toEqual([]);
+      expect(res.unflattened).toEqual(["AAPL"]);
+      expect(res.staleSymbols).toEqual(["AAPL"]);
+      expect(res.ledger.positions.AAPL).toBeDefined();
     });
-    const closing = res.actions.find((a) => a.side === "SELL");
-    expect(closing).toBeDefined();
-    expect(res.ledger.positions.AAPL).toBeUndefined();
-    expect(res.unflattened).toEqual([]);
   });
 
   it("a küszöb felülírható (a backteszt és a demó saját idővonalon fut)", async () => {

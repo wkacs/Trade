@@ -211,3 +211,36 @@ describe("runBacktest – hiányzó ár mellett nincs KITALÁLT equity (audit 1.
     expect(result.rejections.day_baseline_missing ?? 0).toBeGreaterThan(0);
   });
 });
+
+describe("runBacktest – a napi referencia minden nap rögzül (független audit)", () => {
+  it("esemény nélküli nap után a zuhanás latch-el, nem születik friss baseline a zuhanás UTÁN", () => {
+    // 78 óra: vétel a 49. órában, majd két csendes nap. A 4. nap 74. órájában −20%-os
+    // zuhanás. A napkezdő referencia a nap ELSŐ bárján rögzül, ezért a latch bekapcsol, és
+    // a 75. órában tervezett vétel a 76. órában NEM teljesülhet.
+    const history: HistoryFrame[] = Array.from({ length: 78 }, (_, i) => {
+      const px = i >= 74 ? 80 : 100;
+      return {
+        ts: i * H,
+        candles: { BTC: { ts: i * H, open: px, high: px, low: px, close: px, volume: 1 } },
+        fearGreedValue: i === 48 || i === 75 ? 20 : 50,
+      };
+    });
+    const result = runBacktest(
+      history,
+      { symbols: ["BTC"], initialCapitalUsd: 10000, feePct: 0, slippageBps: 0 },
+      {
+        ...DEFAULT_STRATEGY,
+        entryFilter: "off" as const,
+        dcaBuyPct: 0.2,
+        dcaWeeklyBudgetPct: 0.9,
+        maxPositionPct: 0.8,
+        stopLossPct: 0.9,
+        takeProfitPct: 10,
+        dcaMax24hDropPct: 1,
+      },
+    );
+    expect(result.entries.some((e) => e.ts === 49 * H)).toBe(true);
+    expect(result.entries.some((e) => e.ts === 76 * H)).toBe(false);
+    expect(result.rejections.daily_loss_latched ?? 0).toBeGreaterThan(0);
+  });
+});

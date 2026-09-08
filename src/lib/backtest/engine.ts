@@ -259,6 +259,19 @@ export function runBacktest(
   for (let fi = 0; fi < frames.length; fi++) {
     const frame = frames[fi];
 
+    // ── 0) NAPI KAPU MINDEN KERETBEN. A futó tick minden ciklusban kiértékeli, ezért a
+    //    napkezdő referencia a nap ELSŐ bárján rögzül, és a latch akkor is bekapcsol, ha
+    //    aznap egyetlen order sem futott. Ha ezt csak az order-értékeléshez kötnénk, egy
+    //    esemény nélküli nap után a baseline a zuhanás UTÁNI equityből születne, és a
+    //    backteszt olyan vételt engedne át, amit az éles rendszer letiltana.
+    {
+      const openPrices = priceMap(frame, "open");
+      const unpricedHeld = Object.values(ledger.positions).some(
+        (p) => isPositive(p.qty) && openPrices[p.symbol] === undefined,
+      );
+      dayGateAt(frame.ts, unpricedHeld ? null : equityAt(ledger, openPrices, QUOTE));
+    }
+
     // ── 1) A tőzsdén ÜLŐ védőorderek: a gyertyán belül is tüzelhetnek. ────────
     if (model === "exchange-stop") {
       for (const symbol of Object.keys(ledger.positions)) {

@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
+import type { Db } from "@/db/client";
 import {
   evaluateDayGate,
+  resolveDayGate,
   utcDayKey,
   utcDayStart,
   sinceInceptionPnlPct,
@@ -203,5 +205,43 @@ describe("evaluateDayGate – injektált nap-definíció", () => {
     });
     expect(res.latched).toBe(true);
     expect(res.blockNewBuys).toBe(true);
+  });
+});
+
+// ── DB-kimaradás: a napi kapu FAIL-CLOSED (független audit, 2026-09-08) ──────────
+
+describe("resolveDayGate – adatbázis-kimaradás", () => {
+  const outageDb = {
+    select: () => {
+      throw new Error("szintetikus olvasási hiba");
+    },
+    insert: () => {
+      throw new Error("szintetikus írási hiba");
+    },
+  } as unknown as Db;
+
+  it("olvasási hiba esetén NINCS kitalált napkezdő referencia — az új vétel tiltott", async () => {
+    const gate = await resolveDayGate("stock-paper", "paper", "9000", "0.03", Date.now(), outageDb);
+    expect(gate.blockNewBuys).toBe(true);
+    expect(gate.dayPnlPct).toBeNull();
+    expect(gate.row.source).toBe("missing");
+  });
+
+  it("ha az ÚJ baseline mentése nem sikerül, szintén tiltott az új vétel", async () => {
+    const writeOnlyOutage = {
+      select: () => ({
+        from: () => ({ where: () => ({ limit: async () => [] }) }),
+      }),
+      insert: () => {
+        throw new Error("szintetikus írási hiba");
+      },
+    } as unknown as Db;
+    const gate = await resolveDayGate("stock-paper", "paper", "9000", "0.03", Date.now(), writeOnlyOutage);
+    expect(gate.blockNewBuys).toBe(true);
+  });
+
+  it("DB NÉLKÜL (nincs perzisztencia-réteg) a viselkedés változatlan", async () => {
+    const gate = await resolveDayGate("stock-paper", "paper", "9000", "0.03", Date.now(), null);
+    expect(gate.blockNewBuys).toBe(false);
   });
 });

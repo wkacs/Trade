@@ -196,6 +196,32 @@ export function withCashFlow(row: DayEquityRow, amount: Dec): DayEquityRow {
 import { getDb, schema, type Db } from "@/db/client";
 import { and, eq } from "drizzle-orm";
 
+/**
+ * A nap sorának betöltése, a HIBA és a HIÁNY megkülönböztetésével.
+ *
+ * Miért kell: a `loadDayEquityRow` mindkét esetre `null`-t ad, a hívó pedig a `null`-t
+ * „még nincs mai sor"-nak olvassa, és ÚJ baseline-t vesz fel a mostani equityből. Egy
+ * adatbázis-kimaradás így csendben ELDOBTA volna a napi latch-et és felengedte volna az
+ * új vételt — pont a fordítottja annak, amit egy kapunak hibánál tennie kell.
+ */
+async function readDayEquityRow(
+  portfolioId: string,
+  mode: "paper" | "live",
+  dayUtc: string,
+  dbOverride?: Db | null,
+): Promise<{ ok: true; row: DayEquityRow | null } | { ok: false }> {
+  const db = dbOverride !== undefined ? dbOverride : getDb();
+  // NINCS perzisztencia-réteg (memóriában futó demó/teszt): ez nem kimaradás.
+  if (!db) return { ok: true, row: null };
+  try {
+    const row = await loadDayEquityRowOrThrow(portfolioId, mode, dayUtc, db);
+    return { ok: true, row };
+  } catch (e) {
+    console.error("[day-equity] a napi referencia nem olvasható:", e);
+    return { ok: false };
+  }
+}
+
 /** A mai (UTC) sor betöltése. Hiba vagy hiányzó DB esetén null — nem dob. */
 export async function loadDayEquityRow(
   portfolioId: string,
@@ -206,6 +232,21 @@ export async function loadDayEquityRow(
   const db = dbOverride !== undefined ? dbOverride : getDb();
   if (!db) return null;
   try {
+    return await loadDayEquityRowOrThrow(portfolioId, mode, dayUtc, db);
+  } catch (e) {
+    console.error("[day-equity] loadDayEquityRow hiba:", e);
+    return null;
+  }
+}
+
+/** A tényleges lekérdezés. Hibát DOB — a hívó dönti el, mit kezd vele. */
+async function loadDayEquityRowOrThrow(
+  portfolioId: string,
+  mode: "paper" | "live",
+  dayUtc: string,
+  db: Db,
+): Promise<DayEquityRow | null> {
+  {
     const [row] = await db
       .select()
       .from(schema.dailyEquity)
@@ -226,9 +267,6 @@ export async function loadDayEquityRow(
       lossLatched: row.lossLatched,
       latchedAt: row.latchedAt ? row.latchedAt.getTime() : null,
     };
-  } catch (e) {
-    console.error("[day-equity] loadDayEquityRow hiba:", e);
-    return null;
   }
 }
 
@@ -285,15 +323,48 @@ export async function resolveDayGate(
   day?: { dayKey?: string; dayStartMs?: number },
 ): Promise<DayGateResult> {
   const dayUtc = day?.dayKey ?? utcDayKey(nowMs);
-  const existing = await loadDayEquityRow(portfolioId, mode, dayUtc, dbOverride);
   const evalInput = { nowMs, currentEquity, thresholdPct, dayKey: dayUtc, dayStartMs: day?.dayStartMs };
-  const result = evaluateDayGate({ ...evalInput, row: existing });
+
+  /** FAIL-CLOSED válasz: nincs hiteles referencia, tehát nincs új vétel. */
+  const unavailable = (reason: string): DayGateResult => ({
+    dayUtc,
+    row: {
+      dayUtc,
+      baselineEquity: ZERO,
+      cashFlowQuote: ZERO,
+      source: "missing",
+      lossLatched: false,
+      latchedAt: null,
+    },
+    dayPnlPct: null,
+    latched: false,
+    blockNewBuys: true,
+    reason,
+    needsPersist: false,
+  });
+
+  const read = await readDayEquityRow(portfolioId, mode, dayUtc, dbOverride);
+  if (!read.ok) {
+    return unavailable("A napi equity-referencia nem olvasható (adatbázis-hiba) — új vétel szünetel.");
+  }
+
+  const result = evaluateDayGate({ ...evalInput, row: read.row });
   if (result.needsPersist) {
-    await saveDayEquityRow(portfolioId, mode, result.row, dbOverride);
+    const saved = await saveDayEquityRow(portfolioId, mode, result.row, dbOverride);
+    // A mentés bukása NEM hagyható figyelmen kívül: enélkül egy latch a következő ciklusra
+    // eltűnne, egy új baseline pedig minden ciklusban újraszületne a mostani equityből.
+    // Az egyetlen kivétel: ha egyáltalán NINCS perzisztencia-réteg (memóriában futó demó).
+    const hasDb = (dbOverride !== undefined ? dbOverride : getDb()) !== null;
+    if (!saved && hasDb) {
+      return unavailable("A napi equity-referencia nem menthető (adatbázis-hiba) — új vétel szünetel.");
+    }
     // Verseny esetén a másik futó baseline-ja nyert: olvassuk vissza és számoljunk azzal.
-    const persisted = await loadDayEquityRow(portfolioId, mode, dayUtc, dbOverride);
-    if (persisted && persisted.baselineEquity !== result.row.baselineEquity) {
-      return evaluateDayGate({ ...evalInput, row: persisted });
+    const reread = await readDayEquityRow(portfolioId, mode, dayUtc, dbOverride);
+    if (!reread.ok) {
+      return unavailable("A napi equity-referencia nem olvasható vissza (adatbázis-hiba) — új vétel szünetel.");
+    }
+    if (reread.row && reread.row.baselineEquity !== result.row.baselineEquity) {
+      return evaluateDayGate({ ...evalInput, row: reread.row });
     }
   }
   return result;

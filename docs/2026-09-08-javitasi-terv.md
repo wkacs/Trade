@@ -120,6 +120,26 @@ NÉGY valós hibát találtam benne. Mind reprodukálva, majd javítva:
 Tanulság a folyamatra: az „1035 teszt zöld" nem bizonyíték. Mind a négy hiba ÚJ, célzott
 reprodukciós tesztet igényelt; a meglévő suite egyiket sem fogta meg.
 
+## Harmadik kör — a Codex öt átvételi tesztje (2026-09-08)
+
+A Codex öt független átvételi tesztet küldött a `bc80a67` ellen. Lefuttattam őket a
+javított HEAD-en: **kettő már zöld volt** (a duplikátum-delta és a nem mérhető equity, lásd
+az utókört), **három bukott — mind valós hiba**:
+
+| Codex-teszt | mi volt a hiba | javítás |
+|---|---|---|
+| „failed daily-equity reads and writes must block new buys" | a `loadDayEquityRow` a HIÁNYZÓ sorra és az OLVASÁSI HIBÁRA is `null`-t adott, amit a `resolveDayGate` „még nincs mai sor"-ként olvasott: egy adatbázis-kimaradás CSENDBEN új baseline-t vett fel a mostani equityből, eldobta a latch-et, és felengedte az új vételt | a betöltés megkülönbözteti a hibát a hiánytól; olvasási VAGY írási hiba esetén a kapu FAIL-CLOSED (`blockNewBuys`, `dayPnlPct: null`). A „nincs perzisztencia-réteg" (memóriában futó demó) továbbra sem kimaradás |
+| „stock flatten must not manufacture a successful fill from a five-day-old price" | az elavultság csak a BELÉPŐT tiltotta; az eladás egy öt napja lezárt gyertya árán „teljesült", vagyis kitalált fill-árat és kitalált eredményt könyveltünk | elavult adat = NINCS végrehajtási ár: sem belépő, sem stop, sem nap végi zárás nem gyárt kötést. A pozíció nyitva marad, és az `unflattened` + `staleSymbols` mezőben incidensként látszik. Az equity emiatt nem mérhető, ami a napi kaput is fail-closed állapotba viszi |
+| „crypto backtest must establish each daily baseline even when no orders are pending" | a napi kaput csak az order-értékelés hívta, ezért egy esemény nélküli nap után a baseline a ZUHANÁS UTÁNI equityből született, és a backteszt olyan vételt engedett át, amit az éles rendszer letiltana | a napi kapu MINDEN keretben kiértékelődik, ahogy a futó tick minden ciklusban |
+
+Az elavult-áras zárásnál a saját korábbi tesztem a ROSSZ invariánst rögzítette („a védelmi
+kilépés elavult áron is fusson le"). Ez szembement az audit saját elfogadási feltételével
+(„adathiányt ne oldj fel kitalált fillárral"), ezért a tesztet lecseréltem.
+
+Ellenőrizve: a Codex mind az öt tesztje zöld, a repó suite **1045 teszt** zöld, `tsc`
+tiszta. A részvény-mérés változatlan (`tod60+regime` 10%/3: +1,69%), tehát a szigorítások
+ezen a mintán nem költségek.
+
 ## Ami továbbra is nyitva van
 
 - **A 2. pont teljes alakja**: külön `signalAsOf`/`observedAt`/`decisionAt`/`executionAt`

@@ -95,6 +95,28 @@ export function defaultMaxBarAgeMs(timeframe: Timeframe): number {
   return timeframe === "1d" ? 36 * 60 * 60 * 1000 : 3 * TIMEFRAME_MS[timeframe];
 }
 
+/**
+ * Elavult gyertyasorú papírok a döntés idejéhez mérve. A `closeTime` a valódi zárás; ahol
+ * nincs, a nyitás + időkeret a konzervatív becslés.
+ */
+export function staleSymbolsAt(
+  candlesBySymbol: Record<string, OhlcvCandle[]>,
+  nowMs: number,
+  timeframe: Timeframe,
+  maxBarAgeMs?: number,
+): string[] {
+  const maxAge = maxBarAgeMs ?? defaultMaxBarAgeMs(timeframe);
+  const stepMs = TIMEFRAME_MS[timeframe];
+  const out: string[] = [];
+  for (const [symbol, candles] of Object.entries(candlesBySymbol)) {
+    if (candles.length === 0) continue;
+    const last = candles[candles.length - 1];
+    const closedAt = last.closeTime ?? last.openTime + stepMs;
+    if (nowMs - closedAt > maxAge) out.push(symbol);
+  }
+  return out.sort();
+}
+
 export interface StockDayGateState {
   /** Igaz, ha a napi veszteség-latch ma bekapcsolt → nincs ÚJ vétel a nap végéig. */
   latched: boolean;
@@ -346,19 +368,11 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
     }
   }
 
-  // ADAT-FRISSESSÉG (audit 2. pont): a lezárt bar kora a döntés idejéhez mérve. A
-  // `closeTime` a valódi zárás; ahol nincs, a nyitás + időkeret a konzervatív becslés.
-  const maxBarAge = input.maxBarAgeMs ?? defaultMaxBarAgeMs(timeframe);
-  const staleSymbols: string[] = [];
-  if (input.nowMs !== undefined) {
-    for (const [symbol, candles] of Object.entries(input.candlesBySymbol)) {
-      if (candles.length === 0) continue;
-      const last = candles[candles.length - 1];
-      const closedAt = last.closeTime ?? last.openTime + stepMs;
-      if (input.nowMs - closedAt > maxBarAge) staleSymbols.push(symbol);
-    }
-    staleSymbols.sort();
-  }
+  // ADAT-FRISSESSÉG (audit 2. pont): elavult sorozatból nincs ÚJ belépő.
+  const staleSymbols =
+    input.nowMs === undefined
+      ? []
+      : staleSymbolsAt(input.candlesBySymbol, input.nowMs, timeframe, input.maxBarAgeMs);
   const stale = new Set(staleSymbols);
 
   const signals = computeAllSignals(signalCandles, strategy, stepMs);
@@ -530,9 +544,20 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
   let weeklyRemaining = dec(deps.weeklyBudgetRemainingUsd ?? 0);
 
   const allowedSymbols = deps.instruments.map((i) => i.symbol);
+
+  // ELAVULT ADAT = NINCS ÁR. Egy öt napja lezárt gyertya nem bizonyítja, hogy az ár most is
+  // érvényes, ezért nemcsak a belépő tiltott: ebből az árból KÖTÉST SEM gyártunk — sem
+  // stopot, sem nap végi zárást. Kitalált fill-ár helyett a pozíció nyitva marad, és az
+  // `unflattened`/`staleSymbols` mezőben megnevezve, incidensként látszik. Az equity is
+  // emiatt válik nem mérhetővé, ami a napi kaput is fail-closed állapotba viszi.
+  const staleForExecution = new Set(
+    staleSymbolsAt(deps.candlesBySymbol, now(), deps.timeframe ?? "1d", deps.maxBarAgeMs),
+  );
   const pricesDec: Record<string, Dec> = {};
   for (const [symbol, candles] of Object.entries(deps.candlesBySymbol)) {
-    if (candles.length > 0) pricesDec[symbol] = dec(candles[candles.length - 1].close);
+    if (candles.length > 0 && !staleForExecution.has(symbol)) {
+      pricesDec[symbol] = dec(candles[candles.length - 1].close);
+    }
   }
 
   // A napi close a végrehajtási ár (a backteszt konvenciója). A broker ezt kapja `last`-ként.
