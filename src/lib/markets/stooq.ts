@@ -15,7 +15,7 @@
  */
 
 import type { OhlcvCandle, Timeframe } from "@/lib/market/candles";
-import { etParts, etDateKey, usEquitySession } from "./calendar";
+import { isDailyBarClosed } from "./calendar";
 
 const STOOQ_TF: Timeframe = "1d";
 
@@ -26,18 +26,11 @@ export interface StooqNormalizeResult {
 }
 
 /**
- * Egy napi gyertya lezárt-e az adott ET-időben.
- *
- * A `closeTime` aritmetika helyett a NAPTÁRRA támaszkodunk: a napi bar záró pillanata
- * a szabályos ülés vége (16:00 ET), amit a kézi DST helyett a naptár dönt el.
+ * A napi bar lezártsága a naptárból (provider-független, `markets/calendar`).
+ * Itt re-exportáljuk, mert a Stooq-normalizáló ezt használja, és a korábbi hívók
+ * (tesztek) erről a modulról importálják.
  */
-export function isDailyBarClosed(dateKey: string, nowMs: number): "closed" | "unclosed" | "future" {
-  const todayKey = etDateKey(etParts(nowMs));
-  if (dateKey < todayKey) return "closed";
-  if (dateKey > todayKey) return "future";
-  // Ma: csak akkor lezárt, ha az ülés véget ért.
-  return usEquitySession(nowMs).reason === "after-hours" ? "closed" : "unclosed";
-}
+export { isDailyBarClosed } from "./calendar";
 
 // A napi gyertya reprezentatív időbélyegei UTC-ben. NEM használjuk „árazásra"; a lezártságot
 // a naptár dönti el (isDailyBarClosed). A ~13:30 / ~21:00 UTC az EDT-beli 09:30 / 16:00 ET-hez

@@ -30,7 +30,7 @@ describe("markets/registry", () => {
     const active = activeInstruments({ MARKETS_ENABLE_STOCKS: "1" });
     const stocks = active.filter((i) => i.assetClass === "stock");
     expect(stocks.length).toBeGreaterThan(0);
-    expect(stocks.every((i) => i.quote === "USD" && i.dataProvider === "stooq")).toBe(true);
+    expect(stocks.every((i) => i.quote === "USD" && i.dataProvider === "yahoo")).toBe(true);
     expect(active.map((i) => i.symbol)).toContain("AAPL");
   });
 
@@ -40,7 +40,7 @@ describe("markets/registry", () => {
   });
 
   it("findInstrument a teljes katalógusból keres, kis/nagybetűtől függetlenül", () => {
-    expect(findInstrument("aapl")?.providerSymbol).toBe("aapl.us");
+    expect(findInstrument("aapl")?.providerSymbol).toBe("AAPL");
     expect(findInstrument("BTC")?.assetClass).toBe("crypto");
     expect(findInstrument("NOPE")).toBeUndefined();
   });

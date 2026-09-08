@@ -2,7 +2,8 @@
  * Egységes piaci-adat réteg — a gyertyákat az instrumentum eszközosztálya szerint a
  * megfelelő providertől tölti:
  *   - crypto → Binance klines (1h, USDT-pár), a meglévő `fetchClosedCandles`
- *   - stock  → Stooq napi CSV (1d, USD), a `fetchStooqDailyCandles`
+ *   - stock  → Yahoo napi chart-JSON (1d, USD), a `fetchYahooDailyCandles`
+ *     (a Stooq-út megmarad a modulban, de 2026-09-08 óta bot-ellenőrzés mögött van)
  *
  * A kimenet egységes (`InstrumentCandles`), így a hívó (backteszt, engine, dashboard)
  * nem tud a forrás különbségéről. A hiba MINDIG strukturált — a néma üres sorozat tilos.
@@ -14,6 +15,7 @@
 import type { OhlcvCandle, Timeframe } from "@/lib/market/candles";
 import { fetchClosedCandles } from "@/lib/market/candles";
 import { fetchStooqDailyCandles } from "./stooq";
+import { fetchYahooDailyCandles } from "./yahoo";
 import { activeInstruments, type Instrument, type MarketEnv, type AssetClass } from "./registry";
 
 /** Az eszközosztály natív időkerete. */
@@ -44,6 +46,11 @@ export async function fetchInstrumentCandles(
   opts: FetchOptions = {},
 ): Promise<InstrumentCandles> {
   const timeframe = timeframeFor(instrument.assetClass);
+
+  if (instrument.dataProvider === "yahoo") {
+    const res = await fetchYahooDailyCandles(instrument.providerSymbol, instrument.symbol, bars, opts);
+    return { instrument, timeframe, candles: res.candles, error: res.error };
+  }
 
   if (instrument.dataProvider === "stooq") {
     const res = await fetchStooqDailyCandles(instrument.providerSymbol, instrument.symbol, bars, opts);

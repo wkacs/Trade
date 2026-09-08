@@ -163,3 +163,18 @@ export function marketSession(assetClass: AssetClass, nowMs: number): MarketSess
 export function isMarketOpen(assetClass: AssetClass, nowMs: number): boolean {
   return marketSession(assetClass, nowMs).open;
 }
+
+/**
+ * Egy NAPI gyertya lezárt-e az adott ET-időben.
+ *
+ * A `closeTime` aritmetika helyett a NAPTÁRRA támaszkodunk: a napi bar záró pillanata
+ * a szabályos ülés vége (16:00 ET), amit a kézi DST helyett a naptár dönt el.
+ * Provider-független (Stooq és Yahoo is ezt használja).
+ */
+export function isDailyBarClosed(dateKey: string, nowMs: number): "closed" | "unclosed" | "future" {
+  const todayKey = etDateKey(etParts(nowMs));
+  if (dateKey < todayKey) return "closed";
+  if (dateKey > todayKey) return "future";
+  // Ma: csak akkor lezárt, ha az ülés véget ért.
+  return usEquitySession(nowMs).reason === "after-hours" ? "closed" : "unclosed";
+}

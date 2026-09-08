@@ -18,7 +18,7 @@ import type { AssetClass } from "./calendar";
 export type { AssetClass };
 
 /** Melyik adatprovider tölti az instrumentum gyertyáit. */
-export type DataProvider = "binance" | "stooq";
+export type DataProvider = "binance" | "stooq" | "yahoo";
 
 /** Egy kereskedhető instrumentum leírója. */
 export interface Instrument {
@@ -32,7 +32,7 @@ export interface Instrument {
   displayName: string;
   /**
    * A provider-specifikus lekérdező azonosító. Kriptónál a base szimbólum (a pár a
-   * quote-tal áll össze, pl. BTC+USDT); Stooq-nál a teljes ticker (pl. "aapl.us").
+   * quote-tal áll össze, pl. BTC+USDT); Yahoo-nál a tőzsdei ticker (pl. "AAPL").
    */
   providerSymbol: string;
 }
@@ -62,13 +62,16 @@ const EXTRA_CRYPTO_CATALOG: Instrument[] = [
 
 /**
  * Részvény-katalógus. Csak akkor AKTÍV, ha `MARKETS_ENABLE_STOCKS` igaz. Napi gyertyán,
- * Stooq adatprovider (`<ticker>.us`), USD quote.
+ * Yahoo adatprovider (tőzsdei ticker), USD quote.
+ *
+ * A provider 2026-09-08-án Stooq-ról Yahoo-ra váltott: a Stooq CSV-végpontja azóta
+ * JS-alapú bot-ellenőrzés mögött van, és kulcs nélküli HTTP-ből HTML-t ad CSV helyett.
  */
 const STOCK_CATALOG: Instrument[] = [
-  { symbol: "AAPL", assetClass: "stock", quote: "USD", dataProvider: "stooq", displayName: "Apple", providerSymbol: "aapl.us" },
-  { symbol: "MSFT", assetClass: "stock", quote: "USD", dataProvider: "stooq", displayName: "Microsoft", providerSymbol: "msft.us" },
-  { symbol: "NVDA", assetClass: "stock", quote: "USD", dataProvider: "stooq", displayName: "NVIDIA", providerSymbol: "nvda.us" },
-  { symbol: "SPY", assetClass: "stock", quote: "USD", dataProvider: "stooq", displayName: "S&P 500 ETF", providerSymbol: "spy.us" },
+  { symbol: "AAPL", assetClass: "stock", quote: "USD", dataProvider: "yahoo", displayName: "Apple", providerSymbol: "AAPL" },
+  { symbol: "MSFT", assetClass: "stock", quote: "USD", dataProvider: "yahoo", displayName: "Microsoft", providerSymbol: "MSFT" },
+  { symbol: "NVDA", assetClass: "stock", quote: "USD", dataProvider: "yahoo", displayName: "NVIDIA", providerSymbol: "NVDA" },
+  { symbol: "SPY", assetClass: "stock", quote: "USD", dataProvider: "yahoo", displayName: "S&P 500 ETF", providerSymbol: "SPY" },
 ];
 
 /** A teljes katalógus (mindaz, amit ISMERÜNK — nem feltétlenül aktív). */
