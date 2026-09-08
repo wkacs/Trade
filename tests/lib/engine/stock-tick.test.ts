@@ -793,3 +793,67 @@ describe("engine/stock-tick – végrehajtási ár felülírás (mérés)", () =
     expect(buy!.qty).toBe(4);
   });
 });
+
+describe("engine/stock-tick – a napi kapu nem kaphat KITALÁLT equityt", () => {
+  it("ha egy birtokolt papírra nincs ár, az equity NEM MÉRHETŐ (null) — nincs kitalált napi hozam", async () => {
+    let seen: unknown = "nem hívták";
+    await runStockCycle({
+      tickId: "equity-null",
+      now: () => NOW,
+      ledger: ledgerWithPosition("3", "290", "80"), // AAPL pozíció…
+      instruments: [AAPL],
+      candlesBySymbol: {}, // …de EGYETLEN papírra sincs gyertya
+      resolveDayGate: (equityUsd) => {
+        seen = equityUsd;
+        return { latched: false, baselineMissing: equityUsd === null };
+      },
+    });
+    expect(seen).toBeNull();
+  });
+
+  it("mérhető equity mellett a szám megy tovább (kontroll)", async () => {
+    let seen: unknown = null;
+    await runStockCycle({
+      tickId: "equity-ok",
+      now: () => NOW,
+      ledger: ledgerWithPosition("3", "290", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: daily([{ o: 100, h: 101, l: 99, c: 100 }]) },
+      resolveDayGate: (equityUsd) => {
+        seen = equityUsd;
+        return { latched: false, baselineMissing: false };
+      },
+    });
+    expect(Number(seen)).toBe(10300);
+  });
+});
+
+describe("engine/stock-tick – az elavult adat a DCA-utat is zárja", () => {
+  const fresh = risingTradingDaysEnding(60, "2026-02-02");
+
+  it("friss adaton a fear-DCA belép — kontroll", async () => {
+    const res = await runStockCycle({
+      tickId: "dca-fresh",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: fresh },
+      weeklyBudgetRemainingUsd: 5000,
+      fearGreedValue: 10, // extrém félelem → DCA-jel
+    });
+    expect(res.actions.some((a) => a.side === "BUY")).toBe(true);
+  });
+
+  it("ELAVULT adaton a DCA sem léphet be (nem csak a momentum tiltott)", async () => {
+    const res = await runStockCycle({
+      tickId: "dca-stale",
+      now: () => NOW + 5 * 24 * 60 * 60 * 1000,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: fresh },
+      weeklyBudgetRemainingUsd: 5000,
+      fearGreedValue: 10,
+    });
+    expect(res.actions.some((a) => a.side === "BUY")).toBe(false);
+  });
+});

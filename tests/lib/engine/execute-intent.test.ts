@@ -316,3 +316,17 @@ describe("executeIntent — elutasított tartós könyvelés", () => {
     expect(Number(cashOf(h.ledger, "USDT"))).toBeCloseTo(90, 9);
   });
 });
+
+describe("executeIntent — a duplikátum NEM alkalmazhat még egy deltamozgást", () => {
+  it("a tartós tár szerint már könyvelt fill nem mozdítja MÉGEGYSZER a memóriabeli ledgert", async () => {
+    // A `loadLedgerState` a DB egyenlegeiből épít, de az `appliedFillKeys` üresen jön:
+    // a memóriabeli dedup ezért NEM látja a DB-ben már meglévő fillt. Ha ilyenkor a
+    // persist duplikátumot jelez, a delta másodszor is ráfutna a MÁR FRISS állapotra.
+    const h = harness("100");
+    h.deps.persist = async () => ({ applied: false, reason: "duplicate_fill" });
+    const r = await h.run({ side: "BUY", symbol: "BTC", desiredQuote: "10", origin: "ai", referencePrice: "60000" });
+    expect(r.status).toBe("executed");
+    expect(Number(cashOf(h.ledger, "USDT"))).toBe(100);
+    expect(Number(positionQty(h.ledger, "BTC"))).toBe(0);
+  });
+});

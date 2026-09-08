@@ -105,6 +105,21 @@ KÖNYVELÉS és a KOCKÁZAT hitelességéről szól, a többi a mérés paritás
 - `scripts/stock-intraday-backtest.ts --sweep ranking` a 4 és a 30 papíros univerzumon,
   beépített és `tod60+regime` belépő-alakkal, plusz `--fill next-open` kontroll.
 
+## Utókör — a saját javítás átvizsgálása (2026-09-08, Codex-visszajelzés után)
+
+A Codex visszajelzése szerint a javítás nem volt kész. Újra átnéztem a saját munkámat, és
+NÉGY valós hibát találtam benne. Mind reprodukálva, majd javítva:
+
+| hiba | miért rossz | javítás |
+|---|---|---|
+| A duplikátum-ág MÁSODSZOR alkalmazta a deltát (`execute-intent.ts`) | a `loadLedgerState` a DB egyenlegeiből épít, de `appliedFillKeys: []`-szel: a memóriabeli dedup NEM látja a DB-ben már meglévő fillt. Ha a persist duplikátumot jelzett, a delta ráfutott a MÁR FRISS állapotra (a repró: 100 USD-ből 90 lett) | duplikátumnál nem vezetjük tovább a memóriabeli állapotot, a fill nem számít új kötésnek, és a `reasons` megnevezi |
+| Kitalált equity a részvény napi kapuban (`stock-tick.ts`) | az `equityUsd()` kihagyja az ártalan pozíciókat, így egy hiányzó gyertya úgy látszott, mintha a pozíció nullát érne — hamis napi veszteség-latch vagy hamis napkezdő referencia | nem mérhető equity esetén `null` megy a kapunak (ahogy a kripto ág is teszi), és az új vétel szünetel |
+| Ugyanez a kripto-backtesztben (`backtest/engine.ts`) | `equityAt` hiányos ár-térképpel: ugyanaz a hamis napi hozam, csak a mérésben | `null`, ha egy birtokolt papírra nincs ár abban a keretben |
+| A frissesség-kapu csak a momentum-utat zárta (`stock-tick.ts`) | elavult sorozaton a fear-DCA belépő továbbra is nyitva volt (a trend-engedélyen és a jelölt-listán át) | az elavult papír kiesik a trend-engedélyből ÉS a jelölt-listából is |
+
+Tanulság a folyamatra: az „1035 teszt zöld" nem bizonyíték. Mind a négy hiba ÚJ, célzott
+reprodukciós tesztet igényelt; a meglévő suite egyiket sem fogta meg.
+
 ## Ami továbbra is nyitva van
 
 - **A 2. pont teljes alakja**: külön `signalAsOf`/`observedAt`/`decisionAt`/`executionAt`

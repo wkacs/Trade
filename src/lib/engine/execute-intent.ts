@@ -182,6 +182,8 @@ export async function executeIntent(
   // Könyvelés a KÖZÖS ledgerrel. A perzisztencia hibája NEM néma: kifelé dobjuk.
   let ledger = deps.getLedger();
   const booked: Fill[] = [];
+  /** A tartós tárban MÁR meglévő fillek — a memóriabeli delta nem futott rájuk újra. */
+  const duplicateFills: string[] = [];
   let consumed: Dec = ZERO;
   for (const fill of receipt.fills) {
     const result = applyFill(ledger, fill, {
@@ -200,13 +202,21 @@ export async function executeIntent(
           ? withReservation(result.deltas!, intent.intentId, fill.grossQuoteAmount)
           : result.deltas!;
       const outcome = await deps.persist(intent, fill, deltas);
-      // A DB nem könyvelt: a memóriabeli állapotot NEM vezetjük tovább, és a ciklus áll.
-      // A `duplicate_fill` a kivétel: ott a sor már bent van, tehát nincs eltérés.
-      if (outcome && outcome.applied === false && outcome.reason !== "duplicate_fill") {
-        throw new Error(
-          `[execute-intent] a tartós könyvelés elutasítva (${outcome.reason ?? "ismeretlen ok"}) — ` +
-            `a ciklus megáll, állapot-egyeztetés kell: ${intent.intentId}`,
-        );
+      if (outcome && outcome.applied === false) {
+        // A DB nem könyvelt: a memóriabeli állapotot NEM vezetjük tovább, és a ciklus áll.
+        if (outcome.reason !== "duplicate_fill") {
+          throw new Error(
+            `[execute-intent] a tartós könyvelés elutasítva (${outcome.reason ?? "ismeretlen ok"}) — ` +
+              `a ciklus megáll, állapot-egyeztetés kell: ${intent.intentId}`,
+          );
+        }
+        // DUPLIKÁTUM: a tartós tár MÁR tartalmazza ezt a fillt, tehát az egyenlegei is
+        // tükrözik. A memóriabeli ledger a DB-ből épül, de az `appliedFillKeys` üresen jön
+        // (loadLedgerState), így a memóriabeli dedup NEM látja a meglévő sort. Ha itt
+        // továbbvezetnénk az állapotot, a delta MÁSODSZOR futna rá a már friss egyenlegre.
+        // Ezért nem alkalmazzuk, és nem is jelentjük új kötésnek — csak megnevezzük.
+        duplicateFills.push(fill.fillId);
+        continue;
       }
     }
     ledger = result.state;
@@ -219,5 +229,17 @@ export async function executeIntent(
     await deps.releaseReservation(intent);
   }
 
-  return { status: "executed", intent, fills: booked, ledger, reasons: verdict.reasons };
+  return {
+    status: "executed",
+    intent,
+    fills: booked,
+    ledger,
+    reasons:
+      duplicateFills.length > 0
+        ? [
+            ...verdict.reasons,
+            `Már könyvelt fill (${duplicateFills.join(", ")}) — a tartós tár állapota érvényes, a memóriabeli delta nem futott újra.`,
+          ]
+        : verdict.reasons,
+  };
 }

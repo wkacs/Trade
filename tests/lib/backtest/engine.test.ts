@@ -176,3 +176,38 @@ describe("runBacktest – a futó rendszerrel közös szabályok (audit 6.)", ()
     expect(result.rejections.daily_loss_latched ?? 0).toBeGreaterThan(0);
   });
 });
+
+describe("runBacktest – hiányzó ár mellett nincs KITALÁLT equity (audit 1./6.)", () => {
+  const H2 = 3600_000;
+  /** Két papíros keret; a `btc: null` azt jelenti, hogy arra a papírra NINCS gyertya. */
+  const f2 = (
+    i: number,
+    btc: { o: number; h: number; l: number; c: number } | null,
+    eth: { o: number; h: number; l: number; c: number },
+    fg: number | null,
+  ): HistoryFrame => ({
+    ts: i * H2,
+    candles: {
+      ...(btc ? { BTC: { ts: i * H2, open: btc.o, high: btc.h, low: btc.l, close: btc.c, volume: 1 } } : {}),
+      ETH: { ts: i * H2, open: eth.o, high: eth.h, low: eth.l, close: eth.c, volume: 1 },
+    },
+    fearGreedValue: fg,
+  });
+
+  it("birtokolt, de ÁRTALAN papír mellett az új vétel a hiányzó referencia miatt elutasul", () => {
+    const cfg2: BacktestConfig = { symbols: ["BTC", "ETH"], initialCapitalUsd: 10000, feePct: 0.001, slippageBps: 5 };
+    const strategy = { ...DEFAULT_STRATEGY, entryFilter: "off" as const, dcaBuyPct: 0.2, dcaWeeklyBudgetPct: 0.5 };
+    const flat = { o: 100, h: 100, l: 100, c: 100 };
+    const history: HistoryFrame[] = [
+      ...Array.from({ length: 48 }, (_, i) => f2(i, flat, flat, 50)),
+      f2(48, flat, flat, 20), // BTC/ETH DCA-t tervez
+      f2(49, flat, flat, 20), // teljesül (lesz pozíció), újat tervez
+      // A BIRTOKOLT BTC-re nincs ár; a DCA-jelölt az eső ETH lesz.
+      f2(50, null, { o: 95, h: 95, l: 95, c: 95 }, 20),
+      f2(51, null, { o: 95, h: 95, l: 95, c: 95 }, 20),
+      f2(52, null, { o: 95, h: 95, l: 95, c: 95 }, 20),
+    ];
+    const result = runBacktest(history, cfg2, strategy);
+    expect(result.rejections.day_baseline_missing ?? 0).toBeGreaterThan(0);
+  });
+});

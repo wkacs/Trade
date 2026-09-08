@@ -367,7 +367,9 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
   const momentumOkBySymbol: Record<string, boolean> = {};
   for (const [sym, sig] of Object.entries(signals)) {
     atrBySymbol[sym] = sig.atr;
-    trendOkBySymbol[sym] = sig.trendOk;
+    // Az elavult sorozat MINDEN belépő-utat zár, nem csak a momentumot: a fear-DCA a
+    // trend-engedélyen és a változás-listán keresztül lépne be, ezért ott is tiltjuk.
+    trendOkBySymbol[sym] = stale.has(sym) ? false : sig.trendOk;
     momentumOkBySymbol[sym] = stale.has(sym)
       ? false
       : input.entryShape
@@ -403,7 +405,7 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
       positions: input.positions,
       candles: posCandles,
       fearGreedValue: input.fearGreedValue ?? null,
-      coinChanges: changePct,
+      coinChanges: changePct.filter((c) => !stale.has(c.symbol)),
       weeklyBudgetRemainingUsd: input.weeklyBudgetRemainingUsd,
       totalEquity: input.totalEquityUsd,
       atrBySymbol,
@@ -477,7 +479,7 @@ export interface RunStockCycleDeps {
    * A kapu KIZÁRÓLAG új vételt tilthat: a stop, a take-profit és a nap végi laposra zárás
    * a risk-manager SELL-ágán fut, amit a latch nem érint.
    */
-  resolveDayGate?: (equityUsd: Dec, nowMs: number) => Promise<StockDayGateState> | StockDayGateState;
+  resolveDayGate?: (equityUsd: Dec | null, nowMs: number) => Promise<StockDayGateState> | StockDayGateState;
   /** Az adat-életkor küszöbének felülírása. Üresen `defaultMaxBarAgeMs(timeframe)`. */
   maxBarAgeMs?: number;
   /**
@@ -579,8 +581,16 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
 
   // A kaput a döntés ELŐTT oldjuk fel, a ciklus előtti equityvel — a saját kötéseink
   // ne mozdítsák el a napi referenciát menet közben.
+  //
+  // Ha egy BIRTOKOLT papírra nincs ár, az equity NEM MÉRHETŐ: ilyenkor `null` megy tovább,
+  // nem egy hiányos összeg. Enélkül a hiányzó ár úgy látszana, mintha a pozíció nullát
+  // érne — hamis napi veszteséget latch-elve, vagy egy hamis napkezdő referenciát rögzítve.
+  const unpricedHeld = Object.values(ledger.positions).some(
+    (p) => isPositive(p.qty) && pricesDec[p.symbol] === undefined,
+  );
+  const measurableEquity = unpricedHeld ? null : equityUsd();
   const dayGate: StockDayGateState = deps.resolveDayGate
-    ? await deps.resolveDayGate(equityUsd(), now())
+    ? await deps.resolveDayGate(measurableEquity, now())
     : { latched: false, baselineMissing: false };
 
   let seq = 0;

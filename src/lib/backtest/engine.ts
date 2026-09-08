@@ -126,7 +126,7 @@ export function runBacktest(
    * amiket az éles rendszer a napi latch miatt meg sem kötne.
    */
   let dayRow: DayEquityRow | null = null;
-  const dayGateAt = (nowMs: number, equity: Dec): { latched: boolean; baselineMissing: boolean } => {
+  const dayGateAt = (nowMs: number, equity: Dec | null): { latched: boolean; baselineMissing: boolean } => {
     const gate = evaluateDayGate({
       nowMs,
       row: dayRow,
@@ -153,7 +153,13 @@ export function runBacktest(
     at: "open" | "close" = "close",
   ): OrderRiskContext => {
     const prices = priceMap(frame, at);
-    const gate = dayGateAt(frame.ts, equityAt(ledger, prices, QUOTE));
+    // Ha egy BIRTOKOLT papírra nincs ár ebben a keretben, az equity NEM MÉRHETŐ: `null`
+    // megy tovább, nem egy hiányos összeg. Enélkül a hiányzó gyertya úgy látszana, mintha
+    // a pozíció nullát érne — hamis napi veszteséget latch-elve.
+    const unpricedHeld = Object.values(ledger.positions).some(
+      (p) => isPositive(p.qty) && prices[p.symbol] === undefined,
+    );
+    const gate = dayGateAt(frame.ts, unpricedHeld ? null : equityAt(ledger, prices, QUOTE));
     return {
       ledger,
       prices,
