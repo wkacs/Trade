@@ -4,6 +4,7 @@ import { desc } from "drizzle-orm";
 import { getPerformanceSummary } from "@/lib/portfolio/evaluate";
 import { loadLedgerState, hasLedgerState } from "@/lib/execution/order-store";
 import { STOCK_PORTFOLIO_ID, STOCK_QUOTE } from "@/lib/engine/stock-tick";
+import { activeByClass } from "@/lib/markets/registry";
 import { resolveEntryShape } from "@/lib/strategy/intraday-entries";
 import { cashOf } from "@/lib/portfolio/ledger";
 import { toNumber, div, isPositive } from "@/lib/portfolio/money";
@@ -51,6 +52,13 @@ export interface StockLane {
    * hogy egy átállítás valóban hatott-e az élő futásra.
    */
   entryShape: string;
+  /**
+   * Igaz, ha a részvény sáv TÉNYLEG fegyverben van: van aktív részvény-instrumentum
+   * (`MARKETS_ENABLE_STOCKS`). Ez KÜLÖN kérdés a pénztárcától: a ledger a seed óta akkor is
+   * mutat egyenleget, ha a flag közben lekapcsolt — ilyenkor a ciklus némán kihagyja magát,
+   * és a felület egészséges automatizálásnak látszana. Enélkül egy env-elírás észrevétlen marad.
+   */
+  enabled: boolean;
 }
 
 /**
@@ -103,6 +111,7 @@ async function loadStockLane(): Promise<StockLane> {
     positions: [],
     recentFills: [],
     entryShape: activeEntryShapeName(),
+      enabled: activeByClass("stock").length > 0,
   };
   const db = getDb();
   if (!db) return empty;
@@ -125,6 +134,7 @@ async function loadStockLane(): Promise<StockLane> {
       positions,
       recentFills: await loadStockFills(),
       entryShape: activeEntryShapeName(),
+      enabled: activeByClass("stock").length > 0,
     };
   } catch (e) {
     console.error("[api/portfolio] részvény-sáv:", e);
@@ -150,6 +160,7 @@ export async function GET() {
           positions: [],
           recentFills: [],
           entryShape: activeEntryShapeName(),
+          enabled: activeByClass("stock").length > 0,
         } satisfies StockLane,
       note: "DATABASE_URL nincs beállítva — demo adatok nélkül.",
     });
@@ -184,6 +195,7 @@ export async function GET() {
           positions: [],
           recentFills: [],
           entryShape: activeEntryShapeName(),
+      enabled: activeByClass("stock").length > 0,
         } satisfies StockLane,
       },
       { status: 500 },

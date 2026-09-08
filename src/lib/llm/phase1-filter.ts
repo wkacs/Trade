@@ -1,6 +1,8 @@
 import type { DataPoint } from "@/lib/types";
 import { chatJson, type LlmUsage } from "./client";
 import { Phase1ResultSchema, type Phase1Result } from "./schemas";
+import { holdReason } from "./hold-reason";
+import { DEFAULT_STRATEGY, type StrategyConfig } from "@/lib/strategy/config";
 
 const SYSTEM = `Te egy kripto-trading asszisztens első szűrő fázisa vagy.
 A feladat: eldönteni, hogy az elmúlt órában történt-e olyan érdemi esemény
@@ -32,7 +34,10 @@ export interface Phase1Outcome extends Phase1Result {
  * A `usage` KÖTELEZŐEN kijön: enélkül egy bukott phase-1 a naplóban ugyanúgy nézne ki,
  * mint egy nyugodt óra — 2026-09-06-án órákig ez rejtette el a 30 s-os időtúllépéseket.
  */
-export async function shouldDecide(events: DataPoint[]): Promise<Phase1Outcome> {
+export async function shouldDecide(
+  events: DataPoint[],
+  strategy: StrategyConfig = DEFAULT_STRATEGY,
+): Promise<Phase1Outcome> {
   if (events.length === 0) {
     return { shouldDecide: false, summary: "Nincsenek események.", notableEvents: [], usage: null };
   }
@@ -57,9 +62,10 @@ export async function shouldDecide(events: DataPoint[]): Promise<Phase1Outcome> 
       : {}),
     ...(e.premium ? { prem: e.premium.premiumPct } : {}),
   }));
+  // A fallback SZÖVEGE a hívás után áll össze: az LLM kiesésének oka csak akkor ismert.
   const fallback: Phase1Result = {
     shouldDecide: false,
-    summary: "LLM hiba, HOLD.",
+    summary: "",
     notableEvents: [],
   };
   const { data, raw, usage } = await chatJson<Phase1Result>(
@@ -73,7 +79,19 @@ export async function shouldDecide(events: DataPoint[]): Promise<Phase1Outcome> 
   const parsed = Phase1ResultSchema.safeParse(data);
   if (!parsed.success) {
     console.warn("[phase1] séma-eltérés → HOLD. Nyers kimenet:", raw.slice(0, 200));
-    return { ...fallback, usage: usage ?? null };
+    return {
+      ...fallback,
+      summary: holdReason(events, strategy, { errorCode: "bad_response" }),
+      usage: usage ?? null,
+    };
+  }
+  // Bukott hívás: a napló a TÉNYLEGES kapukat mondja el, nem csak azt, hogy „LLM hiba".
+  if (usage?.failed) {
+    return {
+      ...fallback,
+      summary: holdReason(events, strategy, { errorCode: usage.errorCode, errorMessage: usage.errorMessage }),
+      usage,
+    };
   }
   return { ...parsed.data, usage: usage ?? null };
 }

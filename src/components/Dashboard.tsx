@@ -33,6 +33,8 @@ interface StockLaneApi {
   recentFills?: StockFillApi[];
   /** A ténylegesen futó belépő-alak neve (built-in = a beépített kitörés-jel). */
   entryShape?: string;
+  /** Igaz, ha van AKTÍV részvény-instrumentum (MARKETS_ENABLE_STOCKS). */
+  enabled?: boolean;
 }
 
 interface PortfolioApi {
@@ -111,6 +113,9 @@ export function Dashboard() {
   const stockValue = stockPositions.reduce((s, p) => s + p.entryPrice * p.qty, 0);
   const stockEquity = stockCash + stockValue;
   const stockReady = !!stock?.initialized;
+  // A pénztárca megléte NEM jelenti, hogy a sáv fegyverben van: a flag közben lekapcsolhat,
+  // és akkor a ciklus némán kihagyja magát. Ezt külön kell látni.
+  const stockEnabled = stock?.enabled !== false;
   const stockFills = stock?.recentFills ?? [];
 
   return (
@@ -173,7 +178,7 @@ export function Dashboard() {
               tone="info"
               label="Részvény"
               sub="AAPL · MSFT · NVDA · SPY · USD"
-              status={stockReady ? "paper" : "készenlét"}
+              status={!stockEnabled ? "kikapcsolva" : stockReady ? "paper" : "készenlét"}
               right={
                 <span className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
                   <StockSessionChip />
@@ -188,7 +193,12 @@ export function Dashboard() {
               <Gauge label="Kötések" value={stockReady ? String(stockFills.length) : "—"} />
             </KpiRow>
             <PortfolioPanel cashUsd={stockCash} positions={stockPositions} hasDb={stockReady} />
-            <StockEnginePanel ready={stockReady} fills={stockFills} entryShape={stock?.entryShape} />
+            <StockEnginePanel
+              ready={stockReady}
+              enabled={stockEnabled}
+              fills={stockFills}
+              entryShape={stock?.entryShape}
+            />
           </section>
 
           <section className="lane-crypto min-w-0 space-y-4" aria-labelledby="lane-crypto">
@@ -286,10 +296,12 @@ function KpiRow({ children }: { children: React.ReactNode }) {
  */
 function StockEnginePanel({
   ready,
+  enabled,
   fills,
   entryShape,
 }: {
   ready: boolean;
+  enabled: boolean;
   fills: StockFillApi[];
   entryShape?: string;
 }) {
@@ -300,6 +312,13 @@ function StockEnginePanel({
       </h3>
       <div className="mt-3 font-mono text-[12px] leading-relaxed text-dim">
         <StockSessionLine />
+        {!enabled && (
+          <p className="mb-3 rounded-lg border border-down/40 bg-down/10 px-3 py-2 text-[12px] text-ink">
+            A sáv KI van kapcsolva: nincs aktív részvény-instrumentum
+            (<span className="text-dim">MARKETS_ENABLE_STOCKS</span>). A ciklus lefut, de nem
+            értékel ki papírt — a lenti egyenleg a korábbi állapot, nem élő kereskedés.
+          </p>
+        )}
         {fills.length > 0 && <StockFillList fills={fills} />}
         {ready ? (
           <>

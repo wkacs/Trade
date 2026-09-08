@@ -693,7 +693,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
           notableEvents: [],
           usage: null,
         })
-      : shouldDecide(llmEvents),
+      : shouldDecide(llmEvents, strategy),
   );
 
   let phase2Snapshot: import("@/lib/engine/tick-process").TickProcess["phase2"] = null;
@@ -737,6 +737,8 @@ export async function runTick(input: TickInput): Promise<TickResult> {
 
     const phase2 = await decide({
       events: llmEvents,
+      // A futó stratégia a HOLD indoklásához kell (a naplóban a valódi kapuk szerepeljenek).
+      strategy,
       mlSignals,
       portfolio: {
         cashUsd: toNumber(cashOf(ledger, "USDT")),

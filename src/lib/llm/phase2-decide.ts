@@ -1,6 +1,8 @@
 import type { DataPoint, MlSignal } from "@/lib/types";
 import { chatJson, DEFAULT_LLM_TIMEOUT_MS, type LlmUsage } from "./client";
 import { normalizePhase2, HOLD_DECISION, DECISION_SCHEMA_VERSION, type Phase2Decision } from "./schemas";
+import { holdReason } from "./hold-reason";
+import { DEFAULT_STRATEGY, type StrategyConfig } from "@/lib/strategy/config";
 
 /** A prompt verziója — MINDEN naplózott döntés ezzel visszavezethető az utasításra. */
 export const PHASE2_PROMPT_VERSION = "p2-v2-2026-09-05";
@@ -48,6 +50,11 @@ export interface PortfolioContextPosition {
 
 export interface DecideInput {
   events: DataPoint[];
+  /**
+   * A FUTÓ stratégia. Csak a HOLD indoklásához kell: a kapuk (fear-küszöb, momentum)
+   * belőle olvashatók ki, hogy a napló a valódi konfigurációt idézze, ne egy alapértéket.
+   */
+  strategy?: StrategyConfig;
   mlSignals: MlSignal[];
   portfolio: {
     cashUsd: number;
@@ -124,8 +131,13 @@ export async function decide(input: DecideInput): Promise<DecideResult> {
 
   if (usage.failed || data === null) {
     return {
+      // A napló ne az LLM kiesését mondja el, hanem hogy MIÉRT nincs vétel: a kapuk
+      // determinisztikusak, tehát a valódi ok kiszámolható (audit K1).
       decision: HOLD_DECISION(
-        `LLM hiba (${usage.errorCode ?? "ismeretlen"}), HOLD.`,
+        holdReason(input.events, input.strategy ?? DEFAULT_STRATEGY, {
+          errorCode: usage.errorCode,
+          errorMessage: usage.errorMessage,
+        }),
         usage.errorMessage ? [usage.errorMessage] : [],
       ),
       usage,
