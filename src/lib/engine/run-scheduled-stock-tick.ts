@@ -34,7 +34,24 @@ export interface ScheduledStockTickResult {
   error?: string;
   actions?: StockCycleAction[];
   seeded?: boolean;
+  /** Nem végzetes, de NEM elhallgatható figyelmeztetések (pl. duplikált fill). */
+  warnings?: string[];
   lease?: { key: string; owner: string; fencingToken: number };
+}
+
+/**
+ * A fill-könyvelés eredményének ellenőrzése. Az `apply_fill_v2` idempotens: ismert
+ * `fill_key`-re `applied: false, reason: "duplicate_fill"`. Ez normál üzemben nem fordul
+ * elő, de a napi intent-azonosító determinisztikus (`<ET-dátum>-stock-<origin>-<n>`), így
+ * egy `--force`-szal ISMÉTELT napi futás ugyanazt a kulcsot állítaná elő. Ilyenkor a
+ * memóriabeli ledger elmozdulna, a DB viszont NEM — ezt tilos elhallgatni.
+ */
+export function persistWarning(
+  intentId: string,
+  outcome: { applied: boolean; reason?: string },
+): string | null {
+  if (outcome.applied) return null;
+  return `nem könyvelt fill (${intentId}): ${outcome.reason ?? "ismeretlen ok"} — a DB nem mozdult`;
 }
 
 /** Napi lezárás után annyi bar, hogy a leghosszabb visszatekintés (momentum 48) is elférjen. */
@@ -92,6 +109,7 @@ export async function executeScheduledStockTick(
   }
 
   const scope: LedgerScope = { portfolioId: STOCK_PORTFOLIO_ID, mode: "paper" };
+  const warnings: string[] = [];
   const fence = { leaseKey: key, owner, fencingToken: lease.fencingToken };
   /** A result `lease` mezője `key`-t vár (a fence `leaseKey`-t az order-store-nak). */
   const leaseInfo = { key, owner, fencingToken: lease.fencingToken };
@@ -139,7 +157,12 @@ export async function executeScheduledStockTick(
         await recordIntent(intent, receipt);
       },
       persist: async (intent, fill, deltas) => {
-        await persistFill(intent, fill, { ...deltas, fence });
+        const outcome = await persistFill(intent, fill, { ...deltas, fence });
+        const warning = persistWarning(intent.intentId, outcome);
+        if (warning) {
+          console.warn(`[stock-tick] ${warning}`);
+          warnings.push(warning);
+        }
       },
       persistStop: async (symbol, stopPrice) => {
         await persistStopPrice(scope, symbol, stopPrice);
@@ -148,7 +171,14 @@ export async function executeScheduledStockTick(
     ledger = result.ledger;
 
     console.log(`[stock-tick] ${tickId}: ${result.actions.length} akció`);
-    return { ok: true, tickId, actions: result.actions, seeded, lease: leaseInfo };
+    return {
+      ok: true,
+      tickId,
+      actions: result.actions,
+      seeded,
+      lease: leaseInfo,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
   } catch (e) {
     console.error("[stock-tick] ciklus hiba:", e);
     await releaseLease(key, owner);
