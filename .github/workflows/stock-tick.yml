@@ -1,5 +1,11 @@
 name: daily-stock-tick
 
+# ÜTEMEZÉS KIKAPCSOLVA (2026-09-08): a részvény-sáv DAY TRADING ritmusra állt át — 5
+# percenként dönt az ülés alatt (`/api/cron/exit` → executeScheduledStockIntraday), és a
+# nap végén laposra zár. Ez a napi swing-tick ugyanabba a `stock-paper` pénztárcába
+# könyvelne, ezért a kettő egyszerre nem futhat. A workflow KÉZZEL indítható marad
+# (workflow_dispatch), ha valaki a napi swing-ágat akarja egyszer lefuttatni.
+#
 # NAPI részvény-tick a GitHub-runnerben. A kripto `hourly-tick` párja, de a részvény
 # NAPI ritmusban dönt: az amerikai ülés ZÁRÁSA (16:00 ET) UTÁN, hétköznap.
 #
@@ -12,8 +18,8 @@ name: daily-stock-tick
 # A napi lease kizárja a dupla futást. A stock-paper USD-ledger első futáskor seedelődik
 # (STOCK_PAPER_CAPITAL_USD, alap 10000).
 on:
-  schedule:
-    - cron: "30 22 * * 1-5" # hétköznap 22:30 UTC (US-zárás után)
+  # schedule:
+  #   - cron: "30 22 * * 1-5" # hétköznap 22:30 UTC (US-zárás után) — day trading alatt KI
   workflow_dispatch:
     inputs:
       force:

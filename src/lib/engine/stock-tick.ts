@@ -101,6 +101,40 @@ export function stockDecisionDue(nowMs: number, lastDecisionDate: string | null)
 /** A day-trading sáv gyertya-mérete. */
 export const STOCK_INTRADAY_TF: Timeframe = "5m";
 
+/**
+ * A day-trading (intraday) stratégia — MÉRT paraméterekkel, nem tippelve.
+ *
+ * Forrás: `scripts/stock-intraday-backtest.ts`, 60 nap 5 perces Yahoo-gyertyán
+ * (AAPL/MSFT/NVDA/SPY, 4681 bar/szimbólum), a LIVE úton (ugyanaz a döntés-agy, ugyanaz a
+ * risk + paper-fill + egész részvény lot + díj/spread). Amit a mérés mondott:
+ *
+ *  - MINDEN szűk stop/TP variáns VESZTETT (stop 0,3-1% × TP 0,5-1,5%: −2,7%-tól −6,6%-ig),
+ *    és annál rosszabb, minél szűkebb a stop, mert a zaj kirázza. Ugyanez az ATR-trailingre
+ *    (x1 → −4,96%). A gyakori kereskedés itt is a költségen és a whipsaw-n bukik.
+ *  - Ami POZITÍV: belépés a kitörésre, kilépés a nap végi laposra zárással. A stop marad
+ *    katasztrófa-stop (5%), a TP 10% — intraday gyakorlatilag nem sülnek el.
+ *  - A lassabb jel jobb: SMA 78 / lookback 156 bar (≈1, illetve 2 ülés) +1,08% / 60 nap,
+ *    98 trade, 55% találat, 0,81% maxDD — és a 60 nap MINDKÉT felén pozitív
+ *    (+0,39% / +0,68%), tehát nem egyetlen szerencsés ablak.
+ *  - A 15 perces gyertya rosszabb (a legjobb variáns +0,40%).
+ *
+ * ŐSZINTE KERET: ugyanebben a 60 napban a puszta tartás SPY +5,9%, MSFT +27,7% volt. Ez a
+ * sáv NEM veri a vételt-és-tartást egy emelkedő piacon; amit ad, az az alacsony drawdown
+ * és a nulla overnight kockázat. A day trading itt kockázat-profil, nem hozam-ígéret.
+ */
+export const STOCK_INTRADAY_STRATEGY: StrategyConfig = {
+  ...STOCK_STRATEGY,
+  entryFilterSmaPeriod: 78,
+  momentumSmaPeriod: 78,
+  momentumLookback: 156,
+};
+
+/** A day-trading stratégia verzió-címkéje (a döntés-napló ezt rögzíti). */
+export const STOCK_INTRADAY_STRATEGY_VERSION = `${STRATEGY_VERSION}-stock-intraday5m`;
+
+/** Ennyi 5 perces bar kell a jelekhez (156 lookback + bemelegítés). */
+export const STOCK_INTRADAY_BARS = 220;
+
 /** Az utolsó ennyi percben már NEM nyitunk új pozíciót (nem érné el a célt zárásig). */
 export const INTRADAY_ENTRY_CUTOFF_MIN = 30;
 /** Az utolsó ennyi percben MINDENT laposra zárunk — nincs overnight kockázat. */

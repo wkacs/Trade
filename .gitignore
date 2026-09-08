@@ -43,3 +43,6 @@ audit-exports/
 src/lib/ml/model.candidate.json
 
 .vercel
+
+# intraday backteszt gyertya-gyorsítótár (Yahoo, 60 nap)
+.cache/
