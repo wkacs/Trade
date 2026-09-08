@@ -11,12 +11,12 @@ const config: Config = {
       colors: {
         // "Trading Terminal" paletta — mély, neutrális fekete + amber akcent.
         bg: "#0a0c0f", // terminál-fekete
-        panel: "#13171c", // panel
-        panel2: "#1c2128", // emelt panel / sorok
-        line: "#232a32", // vonal / keret
+        panel: "rgb(var(--panel-rgb) / <alpha-value>)", // panel (sávonként árnyalva)
+        panel2: "rgb(var(--panel2-rgb) / <alpha-value>)", // emelt panel / sorok
+        line: "rgb(var(--line-rgb) / <alpha-value>)", // vonal / keret
         ink: "#e8ebee", // elsődleges szöveg
-        dim: "#8b929b", // másodlagos szöveg
-        faint: "#59616b", // halvány / címke
+        dim: "#9aa2ad", // másodlagos szöveg (4,5:1 fölött a panelen)
+        faint: "#848c97", // címke / halvány — még olvasható, nem dekoráció
         accent: "#e3a542", // amber/arany — AI/rendszer-akcentus
         accentBright: "#f2b75e", // világosabb amber (hover/kiemelés)
         accentDim: "#b97a1e", // sötétebb amber (keret/gradient)

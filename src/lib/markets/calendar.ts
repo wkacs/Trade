@@ -252,6 +252,38 @@ export function sessionOpenMs(nowMs: number): number {
   return Math.floor(nowMs / 60_000) * 60_000 - (minutesOfDay - SESSION_OPEN_MIN) * 60_000;
 }
 
+/**
+ * Az adott nap ÜLÉS-ZÁRÁSA epoch ms-ban (16:00 ET, fél napon 13:00 ET). `null`, ha az adott
+ * nap nem kereskedési nap. A visszaszámláló ebből tudja, meddig tart még a mai ülés.
+ *
+ * Ugyanaz a visszafelé-számolás, mint a `sessionOpenMs`-nél: az ET-eltolás így kiesik.
+ */
+export function sessionCloseMs(nowMs: number): number | null {
+  if (!isUsTradingDay(nowMs)) return null;
+  const p = etParts(nowMs);
+  const minutesOfDay = p.hour * 60 + p.minute;
+  return Math.floor(nowMs / 60_000) * 60_000 - (minutesOfDay - sessionCloseMinute(nowMs)) * 60_000;
+}
+
+/**
+ * A KÖVETKEZŐ ülés-nyitás (09:30 ET) epoch ms-ban a mostani időponthoz képest.
+ *
+ * A „következő" azt jelenti, ami még ELŐTTÜNK van: nyitás előtt az aznapi nyitás, nyitás
+ * után (ülés közben vagy zárás után) a soron következő KERESKEDÉSI nap nyitása — a
+ * hétvégét és az ünnepnapokat átugorva. A visszaszámláló ebből tudja, mikor ébred a
+ * részvény-sáv.
+ */
+export function nextSessionOpenMs(nowMs: number): number {
+  const todayOpen = sessionOpenMs(nowMs);
+  if (isUsTradingDay(nowMs) && nowMs < todayOpen) return todayOpen;
+  // Legfeljebb 10 nap: a leghosszabb reális szünet (hosszú hétvége ünneppel) is belefér.
+  for (let i = 1; i <= 10; i++) {
+    const probe = nowMs + i * 24 * 60 * 60 * 1000;
+    if (isUsTradingDay(probe)) return sessionOpenMs(probe);
+  }
+  return todayOpen + 24 * 60 * 60 * 1000;
+}
+
 /** A piac állapota eszközosztály szerint. */
 export function marketSession(assetClass: AssetClass, nowMs: number): MarketSession {
   if (assetClass === "crypto") return { open: true, reason: "crypto-always-open" };

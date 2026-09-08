@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   etParts,
   sessionOpenMs,
+  nextSessionOpenMs,
+  sessionCloseMs,
   isUsTradingDay,
   usEquitySession,
   marketSession,
@@ -108,5 +110,49 @@ describe("sessionOpenMs", () => {
   it("nyitás előtt is az aznapi nyitást adja (a jövőben)", () => {
     const preMarket = Date.parse("2026-02-02T14:00:00Z"); // 09:00 ET
     expect(sessionOpenMs(preMarket)).toBe(Date.parse("2026-02-02T14:30:00Z"));
+  });
+});
+
+describe("nextSessionOpenMs", () => {
+  it("nyitás előtt az AZNAPI nyitást adja", () => {
+    const preMarket = Date.parse("2026-02-02T14:00:00Z"); // hétfő 09:00 ET
+    expect(nextSessionOpenMs(preMarket)).toBe(Date.parse("2026-02-02T14:30:00Z"));
+  });
+
+  it("ülés közben a KÖVETKEZŐ nap nyitását adja (ma már nyitva van)", () => {
+    const midSession = Date.parse("2026-02-02T16:00:00Z"); // hétfő 11:00 ET
+    expect(nextSessionOpenMs(midSession)).toBe(Date.parse("2026-02-03T14:30:00Z"));
+  });
+
+  it("péntek zárás után hétfőre ugrik (a hétvégét átlépi)", () => {
+    const fridayEvening = Date.parse("2026-02-06T22:00:00Z"); // péntek 17:00 ET
+    expect(nextSessionOpenMs(fridayEvening)).toBe(Date.parse("2026-02-09T14:30:00Z"));
+  });
+
+  it("ünnepnapot is átugrik (MLK, 2026-01-19 hétfő)", () => {
+    const sundayBefore = Date.parse("2026-01-18T18:00:00Z");
+    expect(nextSessionOpenMs(sundayBefore)).toBe(Date.parse("2026-01-20T14:30:00Z"));
+  });
+});
+
+describe("sessionCloseMs", () => {
+  it("ülés közben az AZNAPI 16:00 ET zárást adja", () => {
+    const midSession = Date.parse("2026-02-02T16:00:00Z"); // hétfő 11:00 ET
+    expect(sessionCloseMs(midSession)).toBe(Date.parse("2026-02-02T21:00:00Z"));
+  });
+
+  it("nyitás előtt is az aznapi zárást adja (a nap ismert)", () => {
+    const preMarket = Date.parse("2026-02-02T14:00:00Z"); // 09:00 ET
+    expect(sessionCloseMs(preMarket)).toBe(Date.parse("2026-02-02T21:00:00Z"));
+  });
+
+  it("nem kereskedési napon null", () => {
+    expect(sessionCloseMs(Date.parse("2026-02-07T16:00:00Z"))).toBeNull(); // szombat
+  });
+
+  it("fél napon a korábbi (13:00 ET) zárást adja", () => {
+    // 2026-11-27 péntek — hálaadás utáni fél nap.
+    const halfDay = Date.parse("2026-11-27T16:00:00Z"); // 11:00 ET
+    expect(sessionCloseMs(halfDay)).toBe(Date.parse("2026-11-27T18:00:00Z"));
   });
 });

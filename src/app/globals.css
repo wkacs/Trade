@@ -4,6 +4,11 @@
 
 :root {
   --bg: #0a0c0f;
+  /* A panel- és vonalszínek RGB-komponensekben állnak, hogy a Tailwind opacity-módosítói
+     (bg-panel2/60, border-line/60) is működjenek rajtuk. */
+  --panel-rgb: 19 23 28;
+  --panel2-rgb: 28 33 40;
+  --line-rgb: 35 42 50;
   --bg-deep: #07090b;
   --line: #232a32;
   --accent: #e3a542;
@@ -93,4 +98,33 @@ body {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* A műhely-szekció nyitás-jelzője: a chevron elfordul, nem cserélünk ikont. */
+details[open] > summary .chevron {
+  transform: rotate(90deg);
+}
+
+/* A summary saját listajelölője a Safarin is eltűnik. */
+summary::-webkit-details-marker {
+  display: none;
+}
+
+/*
+  SÁV-ÁRNYALAT. A két eszközosztály nem csak a fejlécében különbözik: a panelek háttere is
+  elmozdul — a részvény hidegkék, a kriptó zöld felé. Az eltolás SZÁNDÉKOSAN kicsi (a kék
+  és a zöld csatorna néhány pontja): a terminál-világ neutrális marad, de a szem egy
+  pillantás alatt tudja, melyik oszlopban jár. A döntés-napló a kriptó gondolkodása, ezért
+  ugyanazt a zöld árnyalatot viseli.
+*/
+.lane-stock {
+  --panel-rgb: 16 26 34;
+  --panel2-rgb: 23 36 46;
+  --line-rgb: 34 48 60;
+}
+
+.lane-crypto {
+  --panel-rgb: 16 28 23;
+  --panel2-rgb: 23 40 31;
+  --line-rgb: 34 50 41;
 }

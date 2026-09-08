@@ -13,6 +13,7 @@ import { MarketPanel, type MlSignalView, type PerfView } from "./MarketPanel";
 import { TickInspector } from "./TickInspector";
 import { AnalyticsPanel } from "./AnalyticsPanel";
 import { ShadowPanel } from "./ShadowPanel";
+import { NextCycle, StockSessionChip, StockSessionLine } from "./NextCycle";
 
 interface StockFillApi {
   symbol: string;
@@ -114,9 +115,9 @@ export function Dashboard() {
 
   return (
     <div className="min-h-screen">
-      {/* ── Command bar ── */}
+      {/* ── Parancssáv: mi fut, milyen módban, milyen frissen ── */}
       <header className="sticky top-0 z-10 border-b border-line bg-bg/85 backdrop-blur-md">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-3">
+        <div className="mx-auto flex max-w-[1680px] flex-wrap items-center justify-between gap-3 px-5 py-3">
           <div className="flex items-center gap-3">
             <span className="pulse-dot h-2 w-2 rounded-full bg-accent" aria-hidden />
             <span className="font-display text-sm font-bold tracking-[0.18em] text-ink">
@@ -135,153 +136,197 @@ export function Dashboard() {
                 </span>
               </span>
             )}
-            <span className="text-line">/</span>
+            <span className="text-line" aria-hidden>
+              /
+            </span>
             <span>
               ML·AUC <span className="text-dim">{market?.mlAuc?.toFixed(3) ?? "—"}</span>
             </span>
-            <span className="text-line">/</span>
+            <span className="text-line" aria-hidden>
+              /
+            </span>
             <span>
               GLM <span className="text-dim">glm-4.7-flash</span>
             </span>
-            <span className="text-line">/</span>
-            <span className="text-dim">{loading ? "betöltés…" : "élő · 60s"}</span>
+            <span className="text-line" aria-hidden>
+              /
+            </span>
+            <span className="text-dim">{loading ? "betöltés…" : "élő · 60 mp"}</span>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl space-y-4 px-5 py-6">
-        {/* ══════════ 1. SÁV — KRIPTÓ (USDT, óránkénti) ══════════ */}
-        <LaneHeader
-          tone="accent"
-          label="Kriptó"
-          sub="BTC · ETH · SOL · USDT · óránkénti tick"
-          status={hasDb ? "paper" : "offline"}
-        />
-
-        {/* ── Ticker ── */}
+      <main className="mx-auto max-w-[1680px] space-y-5 px-5 py-6">
+        {/* Piaci pulzus — az egyetlen élő ár-feed, ezért a két sáv FÖLÖTT áll. */}
         {prices && <TickerStrip prices={prices} />}
 
-        {/* ── KPI readout ── */}
-        <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-3 lg:grid-cols-6">
-          <Gauge label="Equity" value={hasDb ? fmtUsd(equity) : "—"} accent />
-          <Gauge
-            label="P&L (kezdő)"
-            value={hasDb ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "—"}
-            tone={pnlPct >= 0 ? "up" : "down"}
-            muted={!hasDb || Math.abs(pnlPct) < 0.005}
-          />
-          <Gauge label="Készpénz" value={hasDb ? fmtUsd(cashUsd) : "—"} />
-          <Gauge label="Pozíciók" value={hasDb ? String(positions.length) : "—"} />
-          <Gauge
-            label="Találati arány"
-            value={perf?.hitRate == null ? "—" : `${Math.round(perf.hitRate * 100)}%`}
-            sub={perf ? `${perf.actionable} szándék` : undefined}
-          />
-          <Gauge
-            label="Átlag irány-pontszám"
-            value={dirScore == null ? "—" : `${dirScore >= 0 ? "+" : ""}${dirScore.toFixed(2)}%`}
-            tone={dirScore != null && dirScore < 0 ? "down" : "up"}
-            muted={dirScore == null}
-          />
-        </section>
-
-        {/* ── Fő rács: döntés-konzol (széles) + pozíciók/kockázat ── */}
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="lg:col-span-2">
-            <DecisionsTimeline />
-          </div>
-          <div className="space-y-4">
-            <PortfolioPanel cashUsd={cashUsd} positions={positions} hasDb={hasDb} prices={prices} />
-            <RiskPanel config={market?.config ?? null} weeklyBudgetRemainingUsd={market?.weeklyBudgetRemainingUsd ?? null} />
-            <StrategyPanel config={market?.config ?? null} />
-          </div>
-        </div>
-
-        {/* ── Trade-napló + ML-jel/teljesítmény ── */}
-        <div className="grid gap-4 lg:grid-cols-2">
-          <TradeBlotter trades={data?.recentTrades ?? []} />
-          <MarketPanel signals={market?.signals ?? []} mlAuc={market?.mlAuc ?? null} performance={perf} />
-        </div>
-
-        <TickInspector />
-
-        {/* ── Realized teljesítmény-analitika + előre menő árnyék-mérés ── */}
-        <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
-          <AnalyticsPanel />
-          <ShadowPanel />
-        </div>
-
-        {/* ── Backtest + admin ── */}
-        <div className="grid gap-4 lg:grid-cols-2">
-          <BacktestPanel />
-          <AdminPanel />
-        </div>
-
-        {/* ══════════ 2. SÁV — RÉSZVÉNY (USD, day trading) ══════════ */}
-        <div className="pt-4">
-          <LaneHeader
-            tone="info"
-            label="Részvény"
-            sub="AAPL · MSFT · NVDA · SPY · USD · day trading (5 perc, zárásra flat)"
-            status={stockReady ? "paper" : "készenlét"}
-          />
-        </div>
-
-        {/* Részvény KPI — SAJÁT pénztárca (USD, stock-paper scope) */}
-        <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-4">
-          <Gauge label="Equity (USD)" value={stockReady ? fmtUsd(stockEquity) : "—"} />
-          <Gauge label="Készpénz (USD)" value={stockReady ? fmtUsd(stockCash) : "—"} />
-          <Gauge label="Pozíciók" value={stockReady ? String(stockPositions.length) : "—"} />
-          <Gauge label="Kötések" value={stockReady ? String(stockFills.length) : "—"} />
-        </section>
-
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="lg:col-span-1">
+        {/*
+          A két eszközosztály KÜLÖN pénztárcát vezet, ezért a felületen is külön oszlop:
+          bal a részvény, jobb a kriptó. A két oszlop szerkezete SZÁNDÉKOSAN azonos
+          (állapot → számok → pozíciók → mi történt), így egy pillantással összevethető,
+          és a szem nem tanul meg két külön elrendezést.
+        */}
+        <div className="grid items-start gap-5 xl:grid-cols-2">
+          <section className="lane-stock min-w-0 space-y-4" aria-labelledby="lane-stock">
+            <LaneHeader
+              id="lane-stock"
+              tone="info"
+              label="Részvény"
+              sub="AAPL · MSFT · NVDA · SPY · USD"
+              status={stockReady ? "paper" : "készenlét"}
+              right={
+                <span className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+                  <StockSessionChip />
+                  <NextCycle lane="stock" />
+                </span>
+              }
+            />
+            <KpiRow>
+              <Gauge label="Equity (USD)" value={stockReady ? fmtUsd(stockEquity) : "—"} />
+              <Gauge label="Készpénz" value={stockReady ? fmtUsd(stockCash) : "—"} />
+              <Gauge label="Pozíciók" value={stockReady ? String(stockPositions.length) : "—"} />
+              <Gauge label="Kötések" value={stockReady ? String(stockFills.length) : "—"} />
+            </KpiRow>
             <PortfolioPanel cashUsd={stockCash} positions={stockPositions} hasDb={stockReady} />
-          </div>
-          <div className="lg:col-span-2 rounded-xl border border-line bg-panel p-5 font-mono text-[12px] leading-relaxed text-dim">
-            <div className="mb-2 font-display text-[11px] font-medium uppercase tracking-[0.2em] text-info">
-              Részvény-motor állapota
-            </div>
-            {stockFills.length > 0 && <StockFillList fills={stockFills} />}
-            {stockReady ? (
-              <>
-                <p>
-                  A részvény paper-pénztárca aktív, saját USD-elszámolással.{" "}
-                  <span className="text-ink">Day trading</span>: az amerikai ülés alatt 5 percenként
-                  dönt 5 perces gyertyán, az utolsó fél órában már nem nyit újat, az utolsó 10
-                  percben pedig mindent laposra zár — nincs overnight pozíció.
-                </p>
-                {/* A futó belépő-alak környezeti változóból jön, amit a Vercelen kívülről nem
-                    lehet visszaolvasni — ezért itt látszik, mi fut VALÓJÁBAN. */}
-                <p className="mt-2">
-                  Futó belépő-alak:{" "}
-                  <span className="text-ink">{stock?.entryShape ?? "built-in"}</span>
-                  {stock?.entryShape === "tod60+regime" &&
-                    " — belépő csak az ülés első 60 percében, és csak ha az SPY a saját trendje fölött van."}
-                  {(stock?.entryShape ?? "built-in") === "built-in" &&
-                    " — a beépített kitörés-jel dönt, napszak-szűrő nélkül."}
-                </p>
-              </>
-            ) : (
-              <p>
-                A részvény day-trading motor kész (5 perces ciklus, USD-pénztárca, a közös kockázati
-                kapun), de az <span className="text-ink">ütemező</span> még nincs élesítve — ezért ez
-                a sáv <span className="text-ink">készenléti</span> állapotban van, még nincs
-                inicializált pénztárca. Bekapcsolás után itt jelennek meg a részvény-pozíciók és a
-                saját egyenleg.
-              </p>
-            )}
-          </div>
+            <StockEnginePanel ready={stockReady} fills={stockFills} entryShape={stock?.entryShape} />
+          </section>
+
+          <section className="lane-crypto min-w-0 space-y-4" aria-labelledby="lane-crypto">
+            <LaneHeader
+              id="lane-crypto"
+              tone="accent"
+              label="Kriptó"
+              sub="BTC · ETH · SOL · USDT"
+              status={hasDb ? "paper" : "offline"}
+              right={<NextCycle lane="crypto" />}
+            />
+            <KpiRow>
+              <Gauge label="Equity (USDT)" value={hasDb ? fmtUsd(equity) : "—"} accent />
+              <Gauge
+                label="P&L (kezdő óta)"
+                value={hasDb ? `${pnlPct >= 0 ? "+" : "−"}${Math.abs(pnlPct).toFixed(2)}%` : "—"}
+                tone={pnlPct >= 0 ? "up" : "down"}
+                muted={!hasDb || Math.abs(pnlPct) < 0.005}
+              />
+              <Gauge label="Készpénz" value={hasDb ? fmtUsd(cashUsd) : "—"} />
+              <Gauge label="Pozíciók" value={hasDb ? String(positions.length) : "—"} />
+            </KpiRow>
+            <PortfolioPanel cashUsd={cashUsd} positions={positions} hasDb={hasDb} prices={prices} />
+            <TradeBlotter trades={data?.recentTrades ?? []} />
+            <RiskPanel
+              config={market?.config ?? null}
+              weeklyBudgetRemainingUsd={market?.weeklyBudgetRemainingUsd ?? null}
+            />
+            <StrategyPanel config={market?.config ?? null} />
+          </section>
         </div>
 
-        <footer className="pt-4 text-center font-mono text-[11px] text-faint">
-          <span className="text-accent">KRIPTÓ</span> BTC · ETH · SOL (USDT) &nbsp;·&nbsp;{" "}
-          <span className="text-info">RÉSZVÉNY</span> AAPL · MSFT · NVDA · SPY (USD, day trading) &nbsp;·&nbsp;
-          külön pénztárcák &nbsp;·&nbsp; konzervatív limitek
+        {/* A döntés-napló a teljes szélességet kéri: itt az ÉRVELÉS a tartalom, nem a szám.
+            A kriptó sáv gondolkodása, ezért annak a zöld árnyalatát viseli. */}
+        <div className="lane-crypto">
+          <DecisionsTimeline />
+        </div>
+
+        {/* Jel-minőség és realizált teljesítmény — a döntések MÖGÖTTI mérés. */}
+        <MarketPanel signals={market?.signals ?? []} mlAuc={market?.mlAuc ?? null} performance={perf} />
+
+        {/*
+          Műhely: backteszt, analitika, árnyék-variánsok, tick-vizsgáló, admin. A napi út az
+          OLVASÁS, ezért ezek nem tolakodhatnak a sávok elé — de egy kattintásra ott vannak.
+        */}
+        <details className="pt-1">
+          <summary className="flex cursor-pointer list-none items-center gap-3 border-t border-line py-3 font-display text-[11px] font-medium uppercase tracking-[0.2em] text-dim transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent">
+            <svg
+              className="chevron h-3 w-3 shrink-0 text-faint transition-transform duration-200"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              aria-hidden
+            >
+              <path d="M4.5 2.5 8 6l-3.5 3.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Műhely — backteszt, analitika, árnyék-variánsok, admin
+          </summary>
+          <div className="space-y-4 pt-4">
+            <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
+              <AnalyticsPanel />
+              <ShadowPanel />
+            </div>
+            <TickInspector />
+            <div className="grid gap-4 lg:grid-cols-2">
+              <BacktestPanel />
+              <AdminPanel />
+            </div>
+          </div>
+        </details>
+
+        <footer className="border-t border-line pt-4 text-center font-mono text-[11px] text-faint">
+          <span className="text-info">RÉSZVÉNY</span> AAPL · MSFT · NVDA · SPY (USD, day trading)
+          &nbsp;·&nbsp; <span className="text-accent">KRIPTÓ</span> BTC · ETH · SOL (USDT)
+          &nbsp;·&nbsp; külön pénztárcák &nbsp;·&nbsp; papír-mód, valódi pénz nincs a rendszerben
         </footer>
       </main>
     </div>
+  );
+}
+
+/** A KPI-sor: hajszálvonallal elválasztott mérőórák, egyetlen keretben. */
+function KpiRow({ children }: { children: React.ReactNode }) {
+  return (
+    <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-4">
+      {children}
+    </section>
+  );
+}
+
+/**
+ * A részvény-motor állapota: ha fut, a mai kötések; ha nem, az ŐSZINTE ok. Készenléti
+ * állapotban sem üres a panel — a napi olvasásnak azt is meg kell tudnia, MIÉRT csendes.
+ */
+function StockEnginePanel({
+  ready,
+  fills,
+  entryShape,
+}: {
+  ready: boolean;
+  fills: StockFillApi[];
+  entryShape?: string;
+}) {
+  return (
+    <section className="rounded-xl border border-line bg-panel p-5">
+      <h3 className="font-display text-[11px] font-medium uppercase tracking-[0.2em] text-info">
+        Motor-állapot
+      </h3>
+      <div className="mt-3 font-mono text-[12px] leading-relaxed text-dim">
+        <StockSessionLine />
+        {fills.length > 0 && <StockFillList fills={fills} />}
+        {ready ? (
+          <>
+            <p>
+              A részvény paper-pénztárca aktív, saját USD-elszámolással.{" "}
+              <span className="text-ink">Day trading</span>: az amerikai ülés alatt 5 percenként
+              dönt 5 perces gyertyán, az utolsó fél órában már nem nyit újat, az utolsó 10 percben
+              pedig mindent laposra zár — nincs overnight pozíció.
+            </p>
+            <p className="mt-2">
+              Futó belépő-alak: <span className="text-ink">{entryShape ?? "built-in"}</span>
+              {entryShape === "tod60+regime" &&
+                " — belépő csak az ülés első 60 percében, és csak ha az SPY a saját trendje fölött van."}
+              {(entryShape ?? "built-in") === "built-in" &&
+                " — a beépített kitörés-jel dönt, napszak-szűrő nélkül."}
+            </p>
+          </>
+        ) : (
+          <p>
+            A day-trading motor kész (5 perces ciklus, USD-pénztárca, közös kockázati kapu), de az{" "}
+            <span className="text-ink">ütemező még nincs élesítve</span> — ezért ez a sáv készenléti
+            állapotban áll, és nincs inicializált pénztárca. Bekapcsolás után itt jelennek meg a
+            pozíciók, a kötések és az egyenleg.
+          </p>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -299,15 +344,15 @@ function StockFillList({ fills }: { fills: StockFillApi[] }) {
   };
   return (
     <div className="mb-4 overflow-x-auto">
-      <table className="w-full min-w-[420px] text-left font-mono text-[11px]">
+      <table className="w-full min-w-[460px] text-left font-mono text-[11px]">
         <thead className="text-faint">
           <tr>
             <th className="pb-1 font-normal">idő (UTC)</th>
-            <th className="pb-1 font-normal">papír</th>
+            <th className="pb-1 pl-3 font-normal">papír</th>
             <th className="pb-1 font-normal">irány</th>
-            <th className="pb-1 text-right font-normal">db</th>
-            <th className="pb-1 text-right font-normal">ár</th>
-            <th className="pb-1 text-right font-normal">érték</th>
+            <th className="pb-1 pl-3 text-right font-normal">db</th>
+            <th className="pb-1 pl-3 text-right font-normal">ár</th>
+            <th className="pb-1 pr-3 text-right font-normal">érték</th>
             <th className="pb-1 font-normal">miért</th>
           </tr>
         </thead>
@@ -315,11 +360,11 @@ function StockFillList({ fills }: { fills: StockFillApi[] }) {
           {fills.map((f, i) => (
             <tr key={`${f.executedAt}-${f.symbol}-${i}`} className="border-t border-line/60">
               <td className="py-1 text-dim">{f.executedAt.slice(5, 16).replace("T", " ")}</td>
-              <td className="py-1 text-ink">{f.symbol}</td>
+              <td className="py-1 pl-3 text-ink">{f.symbol}</td>
               <td className={`py-1 ${f.side === "BUY" ? "text-info" : "text-accent"}`}>{f.side}</td>
-              <td className="py-1 text-right text-dim">{f.qty}</td>
-              <td className="py-1 text-right text-dim">{f.price.toFixed(2)}</td>
-              <td className="py-1 text-right text-dim">{f.amountUsd.toFixed(2)}</td>
+              <td className="py-1 pl-3 text-right text-dim">{f.qty}</td>
+              <td className="py-1 pl-3 text-right text-dim">{f.price.toFixed(2)}</td>
+              <td className="py-1 pr-3 text-right text-dim">{f.amountUsd.toFixed(2)}</td>
               <td className="py-1 text-faint">{f.origin ? (originLabel[f.origin] ?? f.origin) : "—"}</td>
             </tr>
           ))}
@@ -331,15 +376,20 @@ function StockFillList({ fills }: { fills: StockFillApi[] }) {
 
 /** Egy sáv (eszközosztály) fejléce — vizuálisan elválasztja a kriptó és a részvény szekciót. */
 function LaneHeader({
+  id,
   tone,
   label,
   sub,
   status,
+  right,
 }: {
+  id: string;
   tone: "accent" | "info";
   label: string;
   sub: string;
   status: string;
+  /** Jobb oldali kiegészítő — a ciklus-visszaszámláló ül itt. */
+  right?: React.ReactNode;
 }) {
   const accent = tone === "accent";
   const dot = accent ? "bg-accent" : "bg-info";
@@ -348,12 +398,15 @@ function LaneHeader({
   return (
     <div className={`flex items-center gap-3 rounded-xl border ${ring} px-4 py-2.5`}>
       <span className={`h-2.5 w-2.5 rounded-full ${dot}`} aria-hidden />
-      <span className={`font-display text-sm font-bold tracking-[0.16em] ${text}`}>
+      <h2 id={id} className={`font-display text-sm font-bold tracking-[0.16em] ${text}`}>
         {label.toUpperCase()}
-      </span>
+      </h2>
       <span className="hidden font-mono text-[11px] text-faint sm:inline">{sub}</span>
-      <span className={`ml-auto rounded border ${ring} px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest ${text}`}>
-        {status}
+      <span className="ml-auto flex items-center gap-3">
+        {right}
+        <span className={`rounded border ${ring} px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest ${text}`}>
+          {status}
+        </span>
       </span>
     </div>
   );

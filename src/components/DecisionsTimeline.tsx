@@ -7,8 +7,13 @@ import { DecisionCard, type DecisionRow } from "./DecisionCard";
  * A döntés-napló — a konzol főszereplője. Időrendi szál (a rendszer szívverése)
  * köti össze az óránkénti döntéseket, mindegyik a teljes érveléssel. Lásd spec §3.5.
  */
+/** Ennyi döntés látszik alapból — egy napi ellenőrzés ennél többet úgysem olvas el. */
+const VISIBLE = 8;
+
 export function DecisionsTimeline() {
   const [decisions, setDecisions] = useState<DecisionRow[]>([]);
+  // A napi olvasáshoz a friss döntések kellenek; az 50 elemű lista görgetés-fal volt.
+  const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,7 +61,7 @@ export function DecisionsTimeline() {
             aria-hidden
           />
           <ol className="space-y-3">
-            {decisions.map((d, i) => (
+            {(expanded ? decisions : decisions.slice(0, VISIBLE)).map((d, i) => (
               <li key={d.id} className="relative pl-8">
                 <span
                   className={
@@ -77,6 +82,18 @@ export function DecisionsTimeline() {
               </li>
             )}
           </ol>
+
+          {decisions.length > VISIBLE && (
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="mt-4 w-full rounded-lg border border-line bg-panel2/60 py-2 font-mono text-[11px] text-dim transition-colors hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+            >
+              {expanded
+                ? "kevesebb"
+                : `további ${decisions.length - VISIBLE} döntés`}
+            </button>
+          )}
         </div>
       )}
     </section>
