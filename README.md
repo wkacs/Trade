@@ -1,7 +1,9 @@
 # AI Kereskedő Bot
 
-Személyes használatú web app: egy **hibrid AI** (ML-jel + GLM) óránkénti döntésekkel
-menedzsel egy kripto-portfóliót (**BTC, ETH, SOL**), **látható érveléssel**.
+Személyes használatú web app **két sávval**: egy **hibrid AI** (ML-jel + GLM) óránkénti
+döntésekkel menedzsel egy kripto-portfóliót (**BTC, ETH, SOL**), **látható érveléssel**, és
+mellette egy **day-trading részvény-sáv** (**AAPL, MSFT, NVDA, SPY**) 5 percenként dönt az
+amerikai ülés alatt, a nap végére laposra zárva. A két sáv pénztárcája teljesen elkülönül.
 
 **Jelenlegi státusz: paper (demó) mód. Live kereskedés kikapcsolva.**
 
@@ -23,6 +25,17 @@ menedzsel egy kripto-portfóliót (**BTC, ETH, SOL**), **látható érveléssel*
 | Phase-2 LLM | `glm-5.2` (**fizetős**, egyenleg kell) — strukturált döntés + érvelés |
 | ML-jel | logisztikus regresszió (`src/lib/ml/model.json`). **A modell karanténban van**, amíg nincs újratanítva a `f2-2026-09-05` feature-verzióra. Karanténban nincs ML-jel; a rendszer LLM + kód-alapú szabályokkal fut. |
 | Stratégia-verzió | `v2-2026-09-05` (minden intent és fill hordozza) |
+
+### Részvény-sáv (day trading, paper)
+
+| Kérdés | Válasz |
+|---|---|
+| Univerzum / elszámolás | AAPL, MSFT, NVDA, SPY — **USD**, külön `stock-paper` ledger |
+| Adat | **Yahoo** chart API, 5 perces gyertya, kulcs nélkül (a Stooq 2026-09-08 óta bot-fal mögött) |
+| Ritmus | **5 percenként**, csak a szabályos ülésben; az utolsó 30 percben nincs új belépő, az utolsó 10 percben **minden zárul** |
+| Belépő | momentum-breakout (SMA 78 / lookback 156 bar), tétel az equity 10%-a, egész részvény |
+| Ütemező | a MEGLÉVŐ 5 perces külső cron (`/api/cron/exit`) indítja a kripto kilépés mellett |
+| Mérés | `scripts/stock-intraday-backtest.ts` — 60 nap, a live úton. Részletek és őszinte keret: [`docs/2026-09-08-reszveny-day-trading.md`](docs/2026-09-08-reszveny-day-trading.md) |
 
 Az ütemezés, indítás, leállítás, health és rollback részletei:
 **[`docs/worker-runbook.md`](docs/worker-runbook.md)**.
