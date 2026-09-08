@@ -9,6 +9,7 @@ import {
   toSignalCandles,
   previousTradingDayKey,
   STOCK_STRATEGY,
+  intradayPhaseAt,
 } from "@/lib/engine/stock-tick";
 import { contiguousTail } from "@/lib/engine/profit-cycle";
 import { etParts, etDateKey, isUsTradingDay } from "@/lib/markets/calendar";
@@ -351,5 +352,72 @@ describe("engine/stock-tick – toSignalCandles intraday", () => {
     });
     expect(signals.AAPL.bars).toBe(60);
     expect(signals.AAPL.sufficient).toBe(true);
+  });
+});
+
+// ── Day trading: ülés-fázisok és nap végi laposra zárás ─────────────────────────
+describe("engine/stock-tick – intradayPhaseAt", () => {
+  const at = (utc: string) => intradayPhaseAt(Date.parse(utc));
+
+  it("zárt piacon nincs ciklus", () => {
+    expect(at("2026-02-02T14:00:00Z")).toMatchObject({ due: false, phase: "closed", reason: "pre-market" });
+    expect(at("2026-02-01T18:00:00Z")).toMatchObject({ due: false, phase: "closed", reason: "weekend" });
+    expect(at("2026-02-02T22:00:00Z")).toMatchObject({ due: false, phase: "closed", reason: "after-hours" });
+  });
+
+  it("ülés közben teljes ciklus, a hátralévő perccel", () => {
+    expect(at("2026-02-02T15:00:00Z")).toMatchObject({ due: true, phase: "trading", minutesToClose: 360 });
+  });
+
+  it("zárás előtt 30 percen belül nincs ÚJ belépő", () => {
+    expect(at("2026-02-02T20:40:00Z")).toMatchObject({ due: true, phase: "no-new-entries", minutesToClose: 20 });
+  });
+
+  it("zárás előtt 10 percen belül MINDENT zárunk", () => {
+    expect(at("2026-02-02T20:55:00Z")).toMatchObject({ due: true, phase: "flatten", minutesToClose: 5 });
+  });
+});
+
+describe("engine/stock-tick – nap végi laposra zárás", () => {
+  const flatCandles = { AAPL: daily([{ o: 100, h: 101, l: 99, c: 100 }]) };
+
+  it("flatten fázisban a nyitott pozíció ELADÓDIK, akkor is, ha nincs stop/TP jel", async () => {
+    const res = await runStockCycle({
+      tickId: "flat",
+      now: () => NOW,
+      ledger: ledgerWithPosition("3", "290", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: flatCandles,
+      phase: "flatten",
+    });
+    const flat = res.actions.find((a) => a.kind === "eod-flat");
+    expect(flat).toMatchObject({ side: "SELL", symbol: "AAPL", qty: 3 });
+    expect(res.ledger.positions.AAPL).toBeUndefined();
+  });
+
+  it("trading fázisban ugyanez a pozíció NEM záródik", async () => {
+    const res = await runStockCycle({
+      tickId: "keep",
+      now: () => NOW,
+      ledger: ledgerWithPosition("3", "290", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: flatCandles,
+      phase: "trading",
+    });
+    expect(res.actions.find((a) => a.kind === "eod-flat")).toBeUndefined();
+    expect(res.ledger.positions.AAPL?.qty).toBe("3");
+  });
+
+  it("no-new-entries fázisban breakout-soron sem VESZ", async () => {
+    const bars = risingTradingDays(60, "2025-11-03");
+    const res = await runStockCycle({
+      tickId: "cutoff",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: bars },
+      phase: "no-new-entries",
+    });
+    expect(res.actions.filter((a) => a.side === "BUY")).toEqual([]);
   });
 });

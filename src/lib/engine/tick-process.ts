@@ -1,7 +1,7 @@
 import type { CycleAction } from "@/lib/engine/tick";
 
 /** Egy trade hajtóereje. */
-export type TradeOrigin = "dca" | "stop-loss" | "take-profit" | "momentum" | "ai" | "manual";
+export type TradeOrigin = "dca" | "stop-loss" | "take-profit" | "momentum" | "ai" | "manual" | "eod-flat";
 
 /**
  * A tickenkénti teljes folyamat pillanatképe (a tick_runs.process JSON alakja).

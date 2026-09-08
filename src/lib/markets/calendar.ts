@@ -153,6 +153,17 @@ export function usEquitySession(nowMs: number): MarketSession {
   return { open: true, reason: "regular-session" };
 }
 
+/**
+ * Hány perc van hátra a szabályos ülés zárásáig (16:00 ET). `null`, ha épp nincs ülés.
+ * A day-trading sáv ebből tudja, mikor kell laposra zárnia és mikor ne nyisson újat.
+ */
+export function minutesToSessionClose(nowMs: number): number | null {
+  const session = usEquitySession(nowMs);
+  if (!session.open) return null;
+  const p = etParts(nowMs);
+  return SESSION_CLOSE_MIN - (p.hour * 60 + p.minute);
+}
+
 /** A piac állapota eszközosztály szerint. */
 export function marketSession(assetClass: AssetClass, nowMs: number): MarketSession {
   if (assetClass === "crypto") return { open: true, reason: "crypto-always-open" };

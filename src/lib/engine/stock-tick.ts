@@ -33,7 +33,7 @@ import { DEFAULT_ORDER_RISK_PARAMS, originBudgetFor } from "@/lib/risk/risk-mana
 import { fillParamsForClass, stockSymbolFilters } from "@/lib/markets/execution";
 import { stopCandidate } from "@/lib/engine/plan-exits";
 import type { Instrument } from "@/lib/markets/registry";
-import { etParts, etDateKey, usEquitySession, isUsTradingDay } from "@/lib/markets/calendar";
+import { etParts, etDateKey, usEquitySession, isUsTradingDay, minutesToSessionClose } from "@/lib/markets/calendar";
 import { type LedgerState, positionQty, setStop } from "@/lib/portfolio/ledger";
 import type { ExecutionIntent, Fill } from "@/lib/execution/contracts";
 import { type Dec, ZERO, dec, div, mul, add, toNumber, isPositive } from "@/lib/portfolio/money";
@@ -94,6 +94,50 @@ export function stockDecisionDue(nowMs: number, lastDecisionDate: string | null)
   }
   if (lastDecisionDate === today) return { due: false, decisionDate: today, reason: "already-ran" };
   return { due: true, decisionDate: today, reason: "after-hours" };
+}
+
+// ── Day trading: intraday időkeret és ülés-fázisok ──────────────────────────────
+
+/** A day-trading sáv gyertya-mérete. */
+export const STOCK_INTRADAY_TF: Timeframe = "5m";
+
+/** Az utolsó ennyi percben már NEM nyitunk új pozíciót (nem érné el a célt zárásig). */
+export const INTRADAY_ENTRY_CUTOFF_MIN = 30;
+/** Az utolsó ennyi percben MINDENT laposra zárunk — nincs overnight kockázat. */
+export const INTRADAY_FLATTEN_MIN = 10;
+
+/** Mit csinálhat a ciklus MOST, az ülés állapota szerint. */
+export type IntradayPhase = "closed" | "trading" | "no-new-entries" | "flatten";
+
+export interface IntradayGate {
+  /** Fusson-e egyáltalán a ciklus (zárt piacon nincs mit tenni). */
+  due: boolean;
+  phase: IntradayPhase;
+  /** Hány perc van hátra a zárásig (null, ha nincs ülés). */
+  minutesToClose: number | null;
+  reason: string;
+}
+
+/**
+ * A day-trading ciklus fázisa egy időpontban.
+ *
+ * A nap végi laposra zárás a day trading LÉNYEGE: a pozíció nem viheti át az éjszakai
+ * gap-kockázatot. Ezért zárás előtt előbb leáll az új belépő (`no-new-entries`), majd
+ * minden nyitott pozíció zárul (`flatten`).
+ */
+export function intradayPhaseAt(nowMs: number): IntradayGate {
+  const session = usEquitySession(nowMs);
+  if (!session.open) {
+    return { due: false, phase: "closed", minutesToClose: null, reason: session.reason };
+  }
+  const left = minutesToSessionClose(nowMs) ?? 0;
+  if (left <= INTRADAY_FLATTEN_MIN) {
+    return { due: true, phase: "flatten", minutesToClose: left, reason: "eod-flat" };
+  }
+  if (left <= INTRADAY_ENTRY_CUTOFF_MIN) {
+    return { due: true, phase: "no-new-entries", minutesToClose: left, reason: "entry-cutoff" };
+  }
+  return { due: true, phase: "trading", minutesToClose: left, reason: "regular-session" };
 }
 
 // ── Döntés-agy (TISZTA) ─────────────────────────────────────────────────────────
@@ -250,7 +294,7 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
 // ── Végrehajtás (INJEKTÁLHATÓ) ───────────────────────────────────────────────────
 
 export interface StockCycleAction {
-  kind: "stop-loss" | "take-profit" | "dca" | "momentum";
+  kind: "stop-loss" | "take-profit" | "dca" | "momentum" | "eod-flat";
   side: "BUY" | "SELL";
   symbol: string;
   amountUsd: number;
@@ -269,6 +313,11 @@ export interface RunStockCycleDeps {
   candlesBySymbol: Record<string, OhlcvCandle[]>;
   /** A gyertyák időkerete. Napi swing: "1d"; day trading: "5m". */
   timeframe?: Timeframe;
+  /**
+   * Az ülés fázisa (day trading). `trading` = teljes ciklus; `no-new-entries` = csak
+   * kilépés; `flatten` = MINDEN pozíció zárása. Napi swing-módban hagyd üresen.
+   */
+  phase?: IntradayPhase;
   weeklyBudgetRemainingUsd?: number;
   fearGreedValue?: number | null;
   positionIdBySymbol?: Record<string, string>;
@@ -412,10 +461,13 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
   }
 
   const actions: StockCycleAction[] = [];
-  // A SELL-ek előbb (a felszabaduló cash a DCA/momentum belépőnek hasznosul).
+  const phase = deps.phase ?? "trading";
+
+  // A SELL-ek előbb (a felszabaduló cash a belépőnek hasznosul). Belépő CSAK `trading`
+  // fázisban van: zárás előtt (`no-new-entries`, `flatten`) már nem nyitunk újat.
   const ordered = [
     ...planned.plan.orders.filter((o) => o.side === "SELL"),
-    ...planned.plan.orders.filter((o) => o.side === "BUY"),
+    ...(phase === "trading" ? planned.plan.orders.filter((o) => o.side === "BUY") : []),
   ];
   for (const o of ordered) {
     const px = pricesDec[o.symbol];
@@ -451,6 +503,31 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
     });
     if (o.side === "BUY" && o.kind === "dca") {
       weeklyRemaining = add(weeklyRemaining, mul(fill.grossQuoteAmount, "-1"));
+    }
+  }
+
+  // NAP VÉGI LAPOSRA ZÁRÁS (day trading): ami a stop/TP után is nyitva maradt, megy.
+  // Ez a day trading lényege — a pozíció nem viheti át az éjszakai gap-kockázatot.
+  if (phase === "flatten") {
+    for (const p of Object.values(ledger.positions)) {
+      if (!isPositive(p.qty)) continue;
+      const px = pricesDec[p.symbol];
+      if (!px) continue;
+      const fill = await runIntent({
+        side: "SELL",
+        symbol: p.symbol,
+        baseQty: p.qty,
+        origin: "eod-flat",
+        referencePrice: px,
+      });
+      if (!fill) continue;
+      actions.push({
+        kind: "eod-flat",
+        side: "SELL",
+        symbol: p.symbol,
+        amountUsd: toNumber(fill.grossQuoteAmount),
+        qty: toNumber(fill.filledBaseQty),
+      });
     }
   }
 
