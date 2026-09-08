@@ -8,6 +8,7 @@ import {
   STOCK_STEP_MS,
   toSignalCandles,
   previousTradingDayKey,
+  STOCK_STRATEGY,
 } from "@/lib/engine/stock-tick";
 import { contiguousTail } from "@/lib/engine/profit-cycle";
 import { etParts, etDateKey, isUsTradingDay } from "@/lib/markets/calendar";
@@ -219,5 +220,83 @@ describe("engine/stock-tick – toSignalCandles (naptár-rács)", () => {
     });
     expect(signals.AAPL.bars).toBe(70);
     expect(signals.AAPL.sufficient).toBe(true);
+  });
+});
+
+// ── A részvény-sáv belépő útja (a DEFAULT_STRATEGY-vel nem lenne egy sem) ────────
+/**
+ * Emelkedő napi sor VALÓDI kereskedési napokon (hétvége/ünnep kihagyva) — a naptár-rács
+ * csak így ad hézagmentes tailt, és a valós Yahoo-adat is pontosan így néz ki.
+ */
+function risingTradingDays(count: number, startDateKey: string): OhlcvCandle[] {
+  const out: OhlcvCandle[] = [];
+  let ms = Date.parse(`${startDateKey}T17:00:00Z`);
+  while (out.length < count) {
+    if (isUsTradingDay(ms)) {
+      const key = etDateKey(etParts(ms));
+      const c = 100 + out.length;
+      out.push({
+        symbol: "AAPL",
+        timeframe: "1d",
+        openTime: Date.parse(`${key}T14:30:00Z`),
+        closeTime: Date.parse(`${key}T21:00:00Z`),
+        open: c,
+        high: c + 1,
+        low: c - 1,
+        close: c,
+        baseVolume: 1000,
+        quoteVolume: 1000 * c,
+        trades: 0,
+        receivedAt: Date.parse(`${key}T21:00:00Z`),
+      });
+    }
+    ms += 24 * 60 * 60 * 1000;
+  }
+  return out;
+}
+describe("engine/stock-tick – STOCK_STRATEGY", () => {
+  it("a momentum-belépő BE van kapcsolva, a tétel 10% (egész részvény miatt)", () => {
+    expect(STOCK_STRATEGY.momentumEnabled).toBe(true);
+    expect(STOCK_STRATEGY.momentumBuyPct).toBe(0.1);
+    // A kockázati keret nem tágul a kriptóhoz képest.
+    expect(STOCK_STRATEGY.maxPositionPct).toBe(DEFAULT_STRATEGY.maxPositionPct);
+    expect(STOCK_STRATEGY.maxConcurrentPositions).toBe(DEFAULT_STRATEGY.maxConcurrentPositions);
+    expect(STOCK_STRATEGY.stopLossPct).toBe(DEFAULT_STRATEGY.stopLossPct);
+  });
+
+  it("breakout-soron VESZ (a DEFAULT_STRATEGY ugyanezen a soron nem venne)", async () => {
+    // 60 emelkedő ÜLÉS → az utolsó close a 48-as ablak maximuma ÉS az SMA fölött.
+    const candles = risingTradingDays(60, "2025-11-03");
+    const base = {
+      candlesBySymbol: { AAPL: candles },
+      positions: [],
+      totalEquityUsd: 10000,
+      weeklyBudgetRemainingUsd: 500,
+    };
+    const withStock = planStockCycle(base);
+    expect(withStock.signals.AAPL.momentumOk).toBe(true);
+    const buy = withStock.plan.orders.find((o) => o.kind === "momentum");
+    expect(buy).toBeDefined();
+    expect(buy!.amountUsd).toBeCloseTo(1000, 6); // 10% * 10 000 USD
+
+    const withCrypto = planStockCycle({ ...base, strategy: DEFAULT_STRATEGY });
+    expect(withCrypto.plan.orders).toEqual([]);
+  });
+
+  it("a végrehajtás EGÉSZ darabot vesz a napi close-on", async () => {
+    const ledger = emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE);
+    const res = await runStockCycle({
+      tickId: "2026-02-02",
+      now: () => NOW,
+      ledger,
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: risingTradingDays(60, "2025-11-03") },
+      weeklyBudgetRemainingUsd: 500,
+    });
+    const buy = res.actions.find((a) => a.kind === "momentum");
+    expect(buy).toBeDefined();
+    expect(Number.isInteger(buy!.qty)).toBe(true);
+    expect(buy!.qty).toBeGreaterThan(0);
+    expect(buy!.amountUsd).toBeLessThanOrEqual(1000 * 1.01); // a 10%-os keret + spread
   });
 });

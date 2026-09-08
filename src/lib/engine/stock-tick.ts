@@ -38,6 +38,30 @@ import { type LedgerState, positionQty, setStop } from "@/lib/portfolio/ledger";
 import type { ExecutionIntent, Fill } from "@/lib/execution/contracts";
 import { type Dec, ZERO, dec, div, mul, add, toNumber, isPositive } from "@/lib/portfolio/money";
 
+/**
+ * A részvény-sáv stratégiája — a kripto `DEFAULT_STRATEGY`-ből, KÉT eltéréssel:
+ *
+ * 1) `momentumEnabled: true`. A kripto-ág fő belépője a fear-DCA, aminek a kapuja a
+ *    Fear&Greed index ≤ 20 — a részvénynek NINCS ilyen jele (a sáv `fearGreedValue`-ja
+ *    null), tehát a DCA sosem aktivál. A momentum-breakout az EGYETLEN belépő út itt;
+ *    kikapcsolva a sáv örökre tétlen maradna (naponta 0 akció).
+ * 2) `momentumBuyPct: 0.10`. A részvény EGÉSZ darabban kereskedik (a paper-fill
+ *    konzervatív egész lotot enged csak), így a kripto 2%-os tétele 10 000 USD-n
+ *    200 USD = 0 darab SPY (~770 USD) vagy NVDA (~230 USD) — minden belépő némán
+ *    elhalna a kerekítésen. 10% ~1000 USD, ami 1 SPY / 4 NVDA.
+ *
+ * A kockázati keret VÁLTOZATLAN: 20% max pozíció, 3 egyidejű pozíció, 5% stop,
+ * 10% take-profit, napi circuit breaker.
+ */
+export const STOCK_STRATEGY: StrategyConfig = {
+  ...DEFAULT_STRATEGY,
+  momentumEnabled: true,
+  momentumBuyPct: 0.1,
+};
+
+/** A részvény-stratégia saját verzió-címkéje (a döntés-napló ezt rögzíti). */
+export const STOCK_STRATEGY_VERSION = `${STRATEGY_VERSION}-stock-momentum10`;
+
 /** A részvény-ág elszámoló pénzneme és időkerete. */
 export const STOCK_QUOTE = "USD";
 export const STOCK_STEP_MS = TIMEFRAME_MS["1d"];
@@ -154,7 +178,7 @@ export function toSignalCandles(candles: OhlcvCandle[]): SignalCandle[] {
  * kód-alapú ága használ; a különbség csak az adat (napi részvény) és a lépésköz.
  */
 export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult {
-  const strategy = input.strategy ?? DEFAULT_STRATEGY;
+  const strategy = input.strategy ?? STOCK_STRATEGY;
 
   const signalCandles: Record<string, SignalCandle[]> = {};
   const lastClose: Record<string, number> = {};
@@ -255,8 +279,8 @@ export interface RunStockCycleResult {
  */
 export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCycleResult> {
   const now = deps.now;
-  const strategy = deps.strategy ?? DEFAULT_STRATEGY;
-  const strategyVersion = deps.strategyVersion ?? STRATEGY_VERSION;
+  const strategy = deps.strategy ?? STOCK_STRATEGY;
+  const strategyVersion = deps.strategyVersion ?? STOCK_STRATEGY_VERSION;
   const positionIdBySymbol = deps.positionIdBySymbol ?? {};
   let ledger = deps.ledger;
   let weeklyRemaining = dec(deps.weeklyBudgetRemainingUsd ?? 0);
