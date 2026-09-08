@@ -1,0 +1,51 @@
+name: daily-stock-tick
+
+# NAPI részvény-tick a GitHub-runnerben. A kripto `hourly-tick` párja, de a részvény
+# NAPI ritmusban dönt: az amerikai ülés ZÁRÁSA (16:00 ET) UTÁN, hétköznap.
+#
+# Idő: 22:30 UTC hétköznap — ez ET-ben 17:30 (EST) / 18:30 (EDT), tehát mindig after-hours,
+# amikor a napi gyertya már végleges. A cadence-kapu (stockDecisionDue) is ezt követeli.
+#
+# BEKAPCSOLÁS: a részvény csak akkor aktív, ha MARKETS_ENABLE_STOCKS=1. Enélkül a tick
+# ZÖLDEN kihagyja magát (nincs aktív részvény). Így a workflow bekapcsolva maradhat.
+#
+# A napi lease kizárja a dupla futást. A stock-paper USD-ledger első futáskor seedelődik
+# (STOCK_PAPER_CAPITAL_USD, alap 10000).
+on:
+  schedule:
+    - cron: "30 22 * * 1-5" # hétköznap 22:30 UTC (US-zárás után)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Cadence-kapu kihagyása (kézi futtatás ülésidőn kívül)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-stock-tick
+  cancel-in-progress: false
+
+jobs:
+  stock-tick:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Napi részvény-tick futtatása
+        env:
+          # KÖTELEZŐ:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # BIZTONSÁG: "paper" — a részvény live út nincs megírva.
+          TRADING_MODE: ${{ secrets.TRADING_MODE }}
+          # A részvény-ág BEKAPCSOLÁSA (enélkül zölden kimarad):
+          MARKETS_ENABLE_STOCKS: ${{ vars.MARKETS_ENABLE_STOCKS }}
+          # OPCIONÁLIS induló paper-tőke (alap 10000 USD):
+          STOCK_PAPER_CAPITAL_USD: ${{ vars.STOCK_PAPER_CAPITAL_USD }}
+        run: pnpm tsx scripts/stock-tick.ts ${{ inputs.force && '--force' || '' }}

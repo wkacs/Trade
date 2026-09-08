@@ -14,11 +14,19 @@ import { TickInspector } from "./TickInspector";
 import { AnalyticsPanel } from "./AnalyticsPanel";
 import { ShadowPanel } from "./ShadowPanel";
 
+interface StockLaneApi {
+  initialized: boolean;
+  cashUsd: number;
+  quote: string;
+  positions: { symbol: string; qty: number; entryPrice: number; stopPrice?: number }[];
+}
+
 interface PortfolioApi {
   portfolio: { cashUsd: number; initialCapitalUsd: number } | null;
   positions: { symbol: string; qty: number; entryPrice: number; stopPrice?: number }[];
   recentTrades: BlotterTrade[];
   performance?: PerfView;
+  stock?: StockLaneApi;
   note?: string;
 }
 
@@ -81,6 +89,15 @@ export function Dashboard() {
   const hasDb = !!data?.portfolio;
   const fg = market?.fearGreed;
 
+  // ── Részvény-sáv: SAJÁT, elkülönített USD-pénztárca (stock-paper scope) ──
+  const stock = data?.stock;
+  const stockPositions = stock?.positions ?? [];
+  const stockCash = stock?.cashUsd ?? 0;
+  // Élő részvény-ár-feed még nincs a UI-on; a pozíció belépési áron értékelődik.
+  const stockValue = stockPositions.reduce((s, p) => s + p.entryPrice * p.qty, 0);
+  const stockEquity = stockCash + stockValue;
+  const stockReady = !!stock?.initialized;
+
   return (
     <div className="min-h-screen">
       {/* ── Command bar ── */}
@@ -119,6 +136,14 @@ export function Dashboard() {
       </header>
 
       <main className="mx-auto max-w-7xl space-y-4 px-5 py-6">
+        {/* ══════════ 1. SÁV — KRIPTÓ (USDT, óránkénti) ══════════ */}
+        <LaneHeader
+          tone="accent"
+          label="Kriptó"
+          sub="BTC · ETH · SOL · USDT · óránkénti tick"
+          status={hasDb ? "paper" : "offline"}
+        />
+
         {/* ── Ticker ── */}
         {prices && <TickerStrip prices={prices} />}
 
@@ -178,10 +203,85 @@ export function Dashboard() {
           <AdminPanel />
         </div>
 
-        <footer className="pt-2 text-center font-mono text-[11px] text-faint">
-          BTC · ETH · SOL (USDT) &nbsp;·&nbsp; konzervatív limitek &nbsp;·&nbsp; hibrid: ML-jel + GLM-érvelés
+        {/* ══════════ 2. SÁV — RÉSZVÉNY (USD, napi) ══════════ */}
+        <div className="pt-4">
+          <LaneHeader
+            tone="info"
+            label="Részvény"
+            sub="AAPL · MSFT · NVDA · SPY · USD · napi (zárás után)"
+            status={stockReady ? "paper" : "készenlét"}
+          />
+        </div>
+
+        {/* Részvény KPI — SAJÁT pénztárca (USD, stock-paper scope) */}
+        <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-4">
+          <Gauge label="Equity (USD)" value={stockReady ? fmtUsd(stockEquity) : "—"} />
+          <Gauge label="Készpénz (USD)" value={stockReady ? fmtUsd(stockCash) : "—"} />
+          <Gauge label="Pozíciók" value={stockReady ? String(stockPositions.length) : "—"} />
+          <Gauge label="Elszámoló" value={stock?.quote ?? "USD"} />
+        </section>
+
+        <div className="grid gap-4 lg:grid-cols-3">
+          <div className="lg:col-span-1">
+            <PortfolioPanel cashUsd={stockCash} positions={stockPositions} hasDb={stockReady} />
+          </div>
+          <div className="lg:col-span-2 rounded-xl border border-line bg-panel p-5 font-mono text-[12px] leading-relaxed text-dim">
+            <div className="mb-2 font-display text-[11px] font-medium uppercase tracking-[0.2em] text-info">
+              Részvény-motor állapota
+            </div>
+            {stockReady ? (
+              <p>
+                A részvény paper-pénztárca aktív, saját USD-elszámolással. A napi profit-ciklus
+                (stop / take-profit / trailing) az ülés zárása után fut.
+              </p>
+            ) : (
+              <p>
+                A részvény-motor kész (napi profit-ciklus, USD-pénztárca, a közös kockázati kapun),
+                de a <span className="text-ink">napi ütemező</span> még nincs élesítve — ezért ez a
+                sáv <span className="text-ink">készenléti</span> állapotban van, még nincs
+                inicializált pénztárca. Bekapcsolás után itt jelennek meg a részvény-pozíciók és a
+                saját egyenleg.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <footer className="pt-4 text-center font-mono text-[11px] text-faint">
+          <span className="text-accent">KRIPTÓ</span> BTC · ETH · SOL (USDT) &nbsp;·&nbsp;{" "}
+          <span className="text-info">RÉSZVÉNY</span> AAPL · MSFT · NVDA · SPY (USD) &nbsp;·&nbsp;
+          külön pénztárcák &nbsp;·&nbsp; konzervatív limitek
         </footer>
       </main>
+    </div>
+  );
+}
+
+/** Egy sáv (eszközosztály) fejléce — vizuálisan elválasztja a kriptó és a részvény szekciót. */
+function LaneHeader({
+  tone,
+  label,
+  sub,
+  status,
+}: {
+  tone: "accent" | "info";
+  label: string;
+  sub: string;
+  status: string;
+}) {
+  const accent = tone === "accent";
+  const dot = accent ? "bg-accent" : "bg-info";
+  const text = accent ? "text-accentBright" : "text-info";
+  const ring = accent ? "border-accent/30 bg-accent/10" : "border-info/30 bg-info/10";
+  return (
+    <div className={`flex items-center gap-3 rounded-xl border ${ring} px-4 py-2.5`}>
+      <span className={`h-2.5 w-2.5 rounded-full ${dot}`} aria-hidden />
+      <span className={`font-display text-sm font-bold tracking-[0.16em] ${text}`}>
+        {label.toUpperCase()}
+      </span>
+      <span className="hidden font-mono text-[11px] text-faint sm:inline">{sub}</span>
+      <span className={`ml-auto rounded border ${ring} px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest ${text}`}>
+        {status}
+      </span>
     </div>
   );
 }
