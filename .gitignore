@@ -46,3 +46,6 @@ src/lib/ml/model.candidate.json
 
 # intraday backteszt gyertya-gyorsítótár (Yahoo, 60 nap)
 .cache/
+
+# ideiglenes, session-szintű segédszkriptek
+scripts/_*.ts
