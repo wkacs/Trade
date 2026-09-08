@@ -31,7 +31,11 @@ amíg a runtime kifejezetten be nem kapcsolja az új instrumentumokat.
 | Eszközosztály | Adatforrás (ingyenes, kulcs nélkül) | Nyitvatartás | Timeframe | Quote |
 |---|---|---|---|---|
 | `crypto` | Binance klines/bookTicker + CoinGecko *(meglévő)* | 0/24 | `1h` | USDT |
-| `stock` | **Stooq** CSV (`stooq.com/q/d/l/`), kulcs nélkül | US szabályos ülés, H–P | `1d` | USD |
+| `stock` | **Yahoo** chart JSON (`query1.finance.yahoo.com/v8/finance/chart/`), kulcs nélkül | US szabályos ülés, H–P | `1d` | USD |
+
+**Provider-váltás 2026-09-08 délután:** a Stooq CSV-végpontja JS proof-of-work
+bot-ellenőrzés mögé került (HTML-t ad CSV helyett), ezért az élő úton **Yahoo** van. A
+`markets/stooq` modul megmarad, de nincs használatban. Az eredeti indoklás:
 
 **Miért Stooq részvényhez:** ingyenes, kulcs nélküli, CSV-ben ad megbízható **napi**
 OHLCV-t (`Date,Open,High,Low,Close,Volume`). A kulcs nélküli intraday részvényadat
@@ -45,7 +49,13 @@ pip/spread modell).
 
 ## 3. Fázisok
 
-> **Állapot (2026-09-08):** Fázis 0–4 **kész és tesztelt** (a részvény-motor
+> **Állapot (2026-09-08 este):** Fázis 0–5 **kész, élesben verifikálva** — a sáv
+> valódi paper-trade-et hajtott végre (momentum BUY NVDA 4 db). A hozzá kellett négy
+> hibajavítás (adatprovider, naptár-rács, belépő-stratégia, fill-könyvelés) leírása:
+> `docs/2026-09-08-reszveny-elesites.md`. A KRIPTO ág `runTick` logikája érintetlen, de a
+> 0008-as migráció azt is javította: eddig egyetlen fill sem tudott elkönyvelődni.
+>
+> Az eredeti (délelőtti) állapot: Fázis 0–4 **kész és tesztelt** (a részvény-motor
 > memóriában végrehajt: take-profit, trailing, USD-elszámolás). A kripto `runTick`
 > **érintetlen**. Az egyetlen hátralévő lépés a részvény-motor **DB-perzisztencia +
 > napi ütemező** bekötése (lásd „Hátralévő" lent).
