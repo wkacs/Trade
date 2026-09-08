@@ -33,7 +33,7 @@ import { DEFAULT_ORDER_RISK_PARAMS, originBudgetFor } from "@/lib/risk/risk-mana
 import { fillParamsForClass, stockSymbolFilters } from "@/lib/markets/execution";
 import { stopCandidate } from "@/lib/engine/plan-exits";
 import type { Instrument } from "@/lib/markets/registry";
-import { etParts, etDateKey, usEquitySession } from "@/lib/markets/calendar";
+import { etParts, etDateKey, usEquitySession, isUsTradingDay } from "@/lib/markets/calendar";
 import { type LedgerState, positionQty, setStop } from "@/lib/portfolio/ledger";
 import type { ExecutionIntent, Fill } from "@/lib/execution/contracts";
 import { type Dec, ZERO, dec, div, mul, add, toNumber, isPositive } from "@/lib/portfolio/money";
@@ -104,8 +104,49 @@ export interface PlanStockCycleResult {
   atrBySymbol: Record<string, number>;
 }
 
-const toSignalCandles = (candles: OhlcvCandle[]): SignalCandle[] =>
-  candles.map((c) => ({ openTime: c.openTime, high: c.high, low: c.low, close: c.close }));
+/** Egy ET-dátumkulcs „déli" ms-e — a naptár-lekérdezésekhez (EST/EDT alatt is ugyanaz a nap). */
+function noonEtMs(dateKey: string): number {
+  return Date.parse(`${dateKey}T17:00:00Z`);
+}
+
+/** Az adott ET-nap ELŐTTI legutóbbi kereskedési nap dátumkulcsa. */
+export function previousTradingDayKey(dateKey: string): string {
+  let ms = noonEtMs(dateKey) - 24 * 60 * 60 * 1000;
+  // Leghosszabb reális szünet: hosszú hétvége ünneppel — 10 nap bőven fedi.
+  for (let i = 0; i < 10; i++) {
+    if (isUsTradingDay(ms)) break;
+    ms -= 24 * 60 * 60 * 1000;
+  }
+  return etDateKey(etParts(ms));
+}
+
+/**
+ * Napi részvény-gyertyák UNIFORM rácsra vetítése a jel-számításhoz.
+ *
+ * Miért kell: a `computeSymbolSignals` a hézagot FIX ms-távolsággal méri (a kripto 1h
+ * bar pontosan 3 600 000 ms-enként jön). A napi részvény-bar naptári távolsága viszont
+ * hétvégén 3 nap, ünnepnapon 4, DST-váltáskor pedig ±1 óra — így a részvény-sor MINDIG
+ * „réses" lenne, `sufficient: false`, és a sáv soha nem lépne be.
+ *
+ * A hézagot ezért a NAPTÁR dönti el (két egymást követő kereskedési nap), az openTime
+ * pedig szintetikus rács: egymást követő ülés → +1 lépés, VALÓDI kimaradt kereskedési
+ * nap → +2 lépés, ami a `contiguousTail`-t helyesen vágja el. A szintetikus idő CSAK a
+ * jel-számításé; a végrehajtás a valódi gyertyák záróárával dolgozik.
+ */
+export function toSignalCandles(candles: OhlcvCandle[]): SignalCandle[] {
+  const out: SignalCandle[] = [];
+  let t = 0;
+  let prevKey: string | null = null;
+  for (const c of candles) {
+    const key = etDateKey(etParts(c.openTime));
+    if (prevKey !== null) {
+      t += previousTradingDayKey(key) === prevKey ? STOCK_STEP_MS : 2 * STOCK_STEP_MS;
+    }
+    out.push({ openTime: t, high: c.high, low: c.low, close: c.close });
+    prevKey = key;
+  }
+  return out;
+}
 
 /**
  * A részvény döntés-terve tisztán: napi gyertyák → jelek (computeAllSignals) →

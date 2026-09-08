@@ -6,7 +6,11 @@ import {
   STOCK_QUOTE,
   STOCK_PORTFOLIO_ID,
   STOCK_STEP_MS,
+  toSignalCandles,
+  previousTradingDayKey,
 } from "@/lib/engine/stock-tick";
+import { contiguousTail } from "@/lib/engine/profit-cycle";
+import { etParts, etDateKey, isUsTradingDay } from "@/lib/markets/calendar";
 import { emptyLedger, type LedgerState } from "@/lib/portfolio/ledger";
 import { findInstrument } from "@/lib/markets/registry";
 import { DEFAULT_STRATEGY } from "@/lib/strategy/config";
@@ -151,5 +155,69 @@ describe("stock-tick – runStockCycle (in-memory végrehajtás, DB nélkül)", 
       candlesBySymbol: {},
     });
     expect(res.actions).toEqual([]);
+  });
+});
+
+// ── Naptár-alapú jelrács (hétvége/ünnep nem hézag, kimaradt ülés igen) ───────────
+describe("engine/stock-tick – toSignalCandles (naptár-rács)", () => {
+  /** Napi gyertya egy ET-dátumra (a nyitó bélyeg 14:30Z ~ 09:30 ET télen). */
+  const barOn = (dateKey: string, close: number): OhlcvCandle => ({
+    symbol: "AAPL",
+    timeframe: "1d",
+    openTime: Date.parse(`${dateKey}T14:30:00Z`),
+    closeTime: Date.parse(`${dateKey}T21:00:00Z`),
+    open: close,
+    high: close + 1,
+    low: close - 1,
+    close,
+    baseVolume: 1000,
+    quoteVolume: 1000 * close,
+    trades: 0,
+    receivedAt: Date.parse(`${dateKey}T21:00:00Z`),
+  });
+
+  it("a hétvégét NEM tekinti hézagnak (péntek → hétfő egy lépés)", () => {
+    // 2026-01-02 péntek, 2026-01-05 hétfő, 2026-01-06 kedd.
+    const grid = toSignalCandles([barOn("2026-01-02", 100), barOn("2026-01-05", 101), barOn("2026-01-06", 102)]);
+    expect(grid.map((c) => c.openTime)).toEqual([0, STOCK_STEP_MS, 2 * STOCK_STEP_MS]);
+    expect(contiguousTail(grid, STOCK_STEP_MS)).toBe(3);
+  });
+
+  it("a tőzsdei ünnepnapot sem tekinti hézagnak (2026-01-19 MLK)", () => {
+    // 2026-01-16 péntek → 2026-01-19 hétfő ZÁRVA → 2026-01-20 kedd.
+    const grid = toSignalCandles([barOn("2026-01-16", 100), barOn("2026-01-20", 101)]);
+    expect(contiguousTail(grid, STOCK_STEP_MS)).toBe(2);
+  });
+
+  it("a VALÓDI kimaradt ülést hézagnak jelöli, és a tail ott elvágódik", () => {
+    // 2026-01-06 kedd hiányzik a sorból → a szerda előtti adat nem számít.
+    const grid = toSignalCandles([barOn("2026-01-05", 100), barOn("2026-01-07", 101), barOn("2026-01-08", 102)]);
+    expect(contiguousTail(grid, STOCK_STEP_MS)).toBe(2);
+  });
+
+  it("previousTradingDayKey átlép a hétvégén és az ünnepen", () => {
+    expect(previousTradingDayKey("2026-01-05")).toBe("2026-01-02"); // hétfő → péntek
+    expect(previousTradingDayKey("2026-01-20")).toBe("2026-01-16"); // MLK utáni kedd → péntek
+    expect(previousTradingDayKey("2026-01-07")).toBe("2026-01-06"); // szerda → kedd
+  });
+
+  it("valós, naptári gyertyasoron a jelek elégségesek (a fix ms-rács ezt megbukná)", () => {
+    // 70 egymást követő KERESKEDÉSI nap 2026-03-02-től, hétvégék/ünnepek átugorva.
+    const bars: OhlcvCandle[] = [];
+    let ms = Date.parse("2026-03-02T17:00:00Z");
+    while (bars.length < 70) {
+      const p = etParts(ms);
+      const key = etDateKey(p);
+      if (isUsTradingDay(ms)) bars.push(barOn(key, 100 + bars.length));
+      ms += 24 * 60 * 60 * 1000;
+    }
+    const { signals } = planStockCycle({
+      candlesBySymbol: { AAPL: bars },
+      positions: [],
+      totalEquityUsd: 10000,
+      weeklyBudgetRemainingUsd: 500,
+    });
+    expect(signals.AAPL.bars).toBe(70);
+    expect(signals.AAPL.sufficient).toBe(true);
   });
 });
