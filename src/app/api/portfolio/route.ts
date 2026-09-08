@@ -4,6 +4,7 @@ import { desc } from "drizzle-orm";
 import { getPerformanceSummary } from "@/lib/portfolio/evaluate";
 import { loadLedgerState, hasLedgerState } from "@/lib/execution/order-store";
 import { STOCK_PORTFOLIO_ID, STOCK_QUOTE } from "@/lib/engine/stock-tick";
+import { resolveEntryShape } from "@/lib/strategy/intraday-entries";
 import { cashOf } from "@/lib/portfolio/ledger";
 import { toNumber, div, isPositive } from "@/lib/portfolio/money";
 
@@ -24,6 +25,15 @@ export interface StockFill {
   executedAt: string;
 }
 
+/**
+ * A futó belépő-alak neve. Ismeretlen névre `built-in`, mert a ciklus is oda esik
+ * vissza — így az API nem állít mást, mint ami valójában fut.
+ */
+function activeEntryShapeName(): string {
+  const raw = (process.env.STOCK_INTRADAY_ENTRY_SHAPE ?? "").trim();
+  return resolveEntryShape(raw) ? raw : "built-in";
+}
+
 /** A részvény-sáv SAJÁT pénztárcája — a külön `stock-paper` USD-ledger scope-ból. */
 export interface StockLane {
   /** Igaz, ha a részvény-ledger már inicializált (van cash/pozíció sor). */
@@ -33,6 +43,14 @@ export interface StockLane {
   positions: { symbol: string; qty: number; entryPrice: number; stopPrice?: number }[];
   /** A legutóbbi kötések (day trading: ezek a mai nap kereskedései). */
   recentFills: StockFill[];
+  /**
+   * A ténylegesen FUTÓ belépő-alak neve (`built-in`, ha a beépített kitörés-jel dönt).
+   *
+   * Miért van itt: az alakot környezeti változó választja, amit a Vercelen kívülről nem
+   * lehet visszaolvasni (a tárolt érték titkosított). Enélkül nem lenne ellenőrizhető,
+   * hogy egy átállítás valóban hatott-e az élő futásra.
+   */
+  entryShape: string;
 }
 
 /**
@@ -78,7 +96,14 @@ async function loadStockFills(limit = 12): Promise<StockFill[]> {
 
 /** A részvény pénztárca betöltése. DB nélkül vagy hibánál nem-inicializált üres sáv. */
 async function loadStockLane(): Promise<StockLane> {
-  const empty: StockLane = { initialized: false, cashUsd: 0, quote: STOCK_QUOTE, positions: [], recentFills: [] };
+  const empty: StockLane = {
+    initialized: false,
+    cashUsd: 0,
+    quote: STOCK_QUOTE,
+    positions: [],
+    recentFills: [],
+    entryShape: activeEntryShapeName(),
+  };
   const db = getDb();
   if (!db) return empty;
   try {
@@ -99,6 +124,7 @@ async function loadStockLane(): Promise<StockLane> {
       quote: STOCK_QUOTE,
       positions,
       recentFills: await loadStockFills(),
+      entryShape: activeEntryShapeName(),
     };
   } catch (e) {
     console.error("[api/portfolio] részvény-sáv:", e);
@@ -117,7 +143,14 @@ export async function GET() {
       portfolio: null,
       positions: [],
       recentTrades: [],
-      stock: { initialized: false, cashUsd: 0, quote: STOCK_QUOTE, positions: [], recentFills: [] } satisfies StockLane,
+      stock: {
+          initialized: false,
+          cashUsd: 0,
+          quote: STOCK_QUOTE,
+          positions: [],
+          recentFills: [],
+          entryShape: activeEntryShapeName(),
+        } satisfies StockLane,
       note: "DATABASE_URL nincs beállítva — demo adatok nélkül.",
     });
   }
@@ -144,7 +177,14 @@ export async function GET() {
         portfolio: null,
         positions: [],
         recentTrades: [],
-        stock: { initialized: false, cashUsd: 0, quote: STOCK_QUOTE, positions: [], recentFills: [] } satisfies StockLane,
+        stock: {
+          initialized: false,
+          cashUsd: 0,
+          quote: STOCK_QUOTE,
+          positions: [],
+          recentFills: [],
+          entryShape: activeEntryShapeName(),
+        } satisfies StockLane,
       },
       { status: 500 },
     );

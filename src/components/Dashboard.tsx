@@ -30,6 +30,8 @@ interface StockLaneApi {
   quote: string;
   positions: { symbol: string; qty: number; entryPrice: number; stopPrice?: number }[];
   recentFills?: StockFillApi[];
+  /** A ténylegesen futó belépő-alak neve (built-in = a beépített kitörés-jel). */
+  entryShape?: string;
 }
 
 interface PortfolioApi {
@@ -243,12 +245,24 @@ export function Dashboard() {
             </div>
             {stockFills.length > 0 && <StockFillList fills={stockFills} />}
             {stockReady ? (
-              <p>
-                A részvény paper-pénztárca aktív, saját USD-elszámolással.{" "}
-                <span className="text-ink">Day trading</span>: az amerikai ülés alatt 5 percenként
-                dönt 5 perces gyertyán, az utolsó fél órában már nem nyit újat, az utolsó 10 percben
-                pedig mindent laposra zár — nincs overnight pozíció.
-              </p>
+              <>
+                <p>
+                  A részvény paper-pénztárca aktív, saját USD-elszámolással.{" "}
+                  <span className="text-ink">Day trading</span>: az amerikai ülés alatt 5 percenként
+                  dönt 5 perces gyertyán, az utolsó fél órában már nem nyit újat, az utolsó 10
+                  percben pedig mindent laposra zár — nincs overnight pozíció.
+                </p>
+                {/* A futó belépő-alak környezeti változóból jön, amit a Vercelen kívülről nem
+                    lehet visszaolvasni — ezért itt látszik, mi fut VALÓJÁBAN. */}
+                <p className="mt-2">
+                  Futó belépő-alak:{" "}
+                  <span className="text-ink">{stock?.entryShape ?? "built-in"}</span>
+                  {stock?.entryShape === "tod60+regime" &&
+                    " — belépő csak az ülés első 60 percében, és csak ha az SPY a saját trendje fölött van."}
+                  {(stock?.entryShape ?? "built-in") === "built-in" &&
+                    " — a beépített kitörés-jel dönt, napszak-szűrő nélkül."}
+                </p>
+              </>
             ) : (
               <p>
                 A részvény day-trading motor kész (5 perces ciklus, USD-pénztárca, a közös kockázati
