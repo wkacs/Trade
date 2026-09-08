@@ -45,7 +45,12 @@ pip/spread modell).
 
 ## 3. Fázisok
 
-### Fázis 0 — Alapréteg *(ez a commit)*
+> **Állapot (2026-09-08):** Fázis 0–4 **kész és tesztelt** (a részvény-motor
+> memóriában végrehajt: take-profit, trailing, USD-elszámolás). A kripto `runTick`
+> **érintetlen**. Az egyetlen hátralévő lépés a részvény-motor **DB-perzisztencia +
+> napi ütemező** bekötése (lásd „Hátralévő" lent).
+
+### Fázis 0 — Alapréteg ✅
 Additív, tiszta, tesztelt modulok. Nem módosít futó viselkedést.
 
 - `src/lib/markets/calendar.ts` — trading calendar. `crypto` mindig nyitva; US equity
@@ -58,29 +63,47 @@ Additív, tiszta, tesztelt modulok. Nem módosít futó viselkedést.
 - `src/lib/markets/stooq.ts` — Stooq napi OHLCV provider `OhlcvCandle`-re normalizálva,
   ugyanazzal a „csak lezárt gyertya" fegyelemmel, mint a Binance-út.
 
-### Fázis 1 — Adat-integráció
+*(Implementálva: `markets/calendar.ts`, `markets/registry.ts`, `markets/stooq.ts`.)*
+
+### Fázis 1 — Adat-integráció ✅
 - A `stock` instrumentumok bekötése a piaci-adat rétegbe (`market/candles` mellé egy
   provider-választó, ami asset class alapján Binance vagy Stooq).
 - Kvótázás/ár-frissesség: részvénynél a napi close az „ár", a `quotes.ts` bid/ask útját
   a calendar zárt-állapota váltja ki (zárt piacon nincs friss jegyzés → HOLD).
 
-### Fázis 2 — Végrehajtás (paper)
-- Asset-class-tudatos paper-broker: a `paper-fill` / `paper-broker` általánosítása
-  nem-USDT quote-ra és részvény tick-size/lot szabályokra (Stooq nem ad exchange-filtert,
-  ezért konzervatív alapértékek + kerekítés).
-- A `risk-manager` és `sizing` már ma is decimális, quote-agnosztikus — átvizsgálandó,
-  hogy a `maxPositionPct`, stop, TP részvényre is helyesen áll.
+*(Implementálva: `markets/data.ts` provider-választó, `markets/tradability.ts` kapu.)*
 
-### Fázis 3 — Ütemező & piac-nyitvatartás
-- A tick tudja, mely instrumentumok **kereskedhetők most**: kriptó minden órában;
-  részvény csak nyitott ülés + friss napi close után, egyszer/nap.
-- Zárt piacnál az adott instrumentum kimarad a döntésből (nem hiba, hanem `HOLD`
-  „piac zárva" indokkal).
+### Fázis 2 — Végrehajtás (paper) ✅
+- A `simulatePaperFill` MÁR quote-agnosztikus és decimális; nem újraírtuk, csak
+  asset-class paramétert adtunk: `markets/execution.ts` → részvény USD/0 jutalék/tágabb
+  spread + konzervatív szűrők (0,01 tick, egész részvény lot, 1 USD min notional).
+- A `risk-manager` és `sizing` quote-agnosztikus (`quoteAsset` paraméter) — a részvény
+  USD-scope helyesen fut rajta.
 
-### Fázis 4 — Stratégia, ML, backteszt
-- Az ML modell **per asset class** (a kripto-feature-ök nem érvényesek részvényre).
-  Külön model.json / külön karantén. Addig: LLM + kód-szabályok, ahogy most.
-- Backteszt-loader asset-class-tudatos (Stooq napi történet részvényhez).
+### Fázis 3 — Ütemező & piac-nyitvatartás ✅ *(motor kész)*
+- `markets/tradability.ts`: kriptó mindig, részvény csak ülésben.
+- `engine/stock-tick.ts` `stockDecisionDue`: a részvény NAPI ritmusban dönt, az ülés
+  zárása (after-hours) után, naponta egyszer (dedup az ET-dátumra).
+
+### Fázis 4 — Stratégia, backteszt ✅ *(motor kész)*
+- `engine/stock-tick.ts` `planStockCycle` + `runStockCycle`: a KÖZÖS stratégiai gép
+  (computeAllSignals + planProfitCycle) napi részvény-adaton, USD-elszámolással, a közös
+  risk/execute/broker úton. Memóriában végrehajt (backteszt-kompatibilis).
+- **ML:** a részvényhez külön, per-asset-class modell kell (a kripto-feature-ök nem
+  érvényesek). Egyelőre — a kriptóhoz hasonlóan — LLM/kód-szabály nélküli, tiszta
+  kód-alapú profit-ciklus fut; az LLM-belépő és a részvény-ML későbbi menet.
+
+## 3b. Hátralévő — élesíthető ütemezés (a motoron KÍVÜL)
+
+A részvény-motor kész és tesztelt, de a **napi, DB-perzisztens ütemezés** még nincs
+bekötve. Ez szándékosan külön lépés, mert a live ütemező-felületet érinti és Neon DB kell
+hozzá (a sandboxban nem verifikálható). A `runStockCycle` perzisztenciája ezért
+INJEKTÁLHATÓ — a bekötés mechanikus:
+1. `runStockTick(input)` DB-entrypoint: a `stock-paper` scope ledger betöltése/seedelése
+   (`order-store` + `ledger`), a `runStockCycle` hívása valós `reserve`/`persist`/
+   `recordIntent` hookokkal (a `runTick` mintájára), majd `tick_runs` napló.
+2. Napi ütemező: GitHub Actions (`0 21 * * 1-5`, az ET-zárás után) vagy a worker egy
+   napi ága, ami `stockDecisionDue` alapján fut.
 
 ## 4. Amit ez a bővítés NEM ígér
 
