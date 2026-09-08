@@ -300,3 +300,56 @@ describe("engine/stock-tick – STOCK_STRATEGY", () => {
     expect(buy!.amountUsd).toBeLessThanOrEqual(1000 * 1.01); // a 10%-os keret + spread
   });
 });
+
+// ── Intraday rács (day trading): az éjszaka nem hézag, a kimaradt bar igen ───────
+describe("engine/stock-tick – toSignalCandles intraday", () => {
+  const FIVE = 5 * 60 * 1000;
+  /** 5 perces bar egy adott ET-napon, a nyitástól számított n-edik slotban. */
+  const bar = (dateKey: string, slot: number, close = 100): OhlcvCandle => {
+    const openTime = Date.parse(`${dateKey}T14:30:00Z`) + slot * FIVE; // 09:30 ET (télen)
+    return {
+      symbol: "AAPL",
+      timeframe: "5m",
+      openTime,
+      closeTime: openTime + FIVE,
+      open: close,
+      high: close + 0.5,
+      low: close - 0.5,
+      close,
+      baseVolume: 100,
+      quoteVolume: 100 * close,
+      trades: 0,
+      receivedAt: openTime + FIVE,
+    };
+  };
+
+  it("ülésen belül az egymást követő barok hézagmentesek", () => {
+    const grid = toSignalCandles([bar("2026-01-05", 0), bar("2026-01-05", 1), bar("2026-01-05", 2)], "5m");
+    expect(grid.map((c) => c.openTime)).toEqual([0, FIVE, 2 * FIVE]);
+    expect(contiguousTail(grid, FIVE)).toBe(3);
+  });
+
+  it("az ÉJSZAKA (ülés-határ) nem hézag: péntek utolsó bar → hétfő első bar", () => {
+    const grid = toSignalCandles([bar("2026-01-02", 77), bar("2026-01-05", 0), bar("2026-01-05", 1)], "5m");
+    expect(contiguousTail(grid, FIVE)).toBe(3);
+  });
+
+  it("ülésen belül KIMARADT bar viszont hézag", () => {
+    const grid = toSignalCandles([bar("2026-01-05", 0), bar("2026-01-05", 2), bar("2026-01-05", 3)], "5m");
+    expect(contiguousTail(grid, FIVE)).toBe(2);
+  });
+
+  it("a jelek 5 perces baron is elégségesek lesznek (60 bar > 48 kell)", () => {
+    const bars: OhlcvCandle[] = [];
+    for (let i = 0; i < 60; i++) bars.push(bar("2026-01-05", i, 100 + i * 0.1));
+    const { signals } = planStockCycle({
+      candlesBySymbol: { AAPL: bars },
+      positions: [],
+      totalEquityUsd: 10000,
+      weeklyBudgetRemainingUsd: 500,
+      timeframe: "5m",
+    });
+    expect(signals.AAPL.bars).toBe(60);
+    expect(signals.AAPL.sufficient).toBe(true);
+  });
+});

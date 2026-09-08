@@ -12,7 +12,7 @@
  * ezért DB nélkül, memóriában is tesztelhető — pontosan úgy, ahogy a backtest teszi.
  */
 
-import type { OhlcvCandle } from "@/lib/market/candles";
+import type { OhlcvCandle, Timeframe } from "@/lib/market/candles";
 import { TIMEFRAME_MS } from "@/lib/market/candles";
 import {
   computeAllSignals,
@@ -118,6 +118,8 @@ export interface PlanStockCycleInput {
    */
   fearGreedValue?: number | null;
   strategy?: StrategyConfig;
+  /** A gyertyák időkerete. Napi swing: "1d"; day trading: "5m". */
+  timeframe?: Timeframe;
 }
 
 export interface PlanStockCycleResult {
@@ -145,29 +147,41 @@ export function previousTradingDayKey(dateKey: string): string {
 }
 
 /**
- * Napi részvény-gyertyák UNIFORM rácsra vetítése a jel-számításhoz.
+ * Részvény-gyertyák UNIFORM rácsra vetítése a jel-számításhoz (napi ÉS intraday).
  *
  * Miért kell: a `computeSymbolSignals` a hézagot FIX ms-távolsággal méri (a kripto 1h
- * bar pontosan 3 600 000 ms-enként jön). A napi részvény-bar naptári távolsága viszont
- * hétvégén 3 nap, ünnepnapon 4, DST-váltáskor pedig ±1 óra — így a részvény-sor MINDIG
- * „réses" lenne, `sufficient: false`, és a sáv soha nem lépne be.
+ * bar pontosan 3 600 000 ms-enként jön). A részvény-bar naptári távolsága viszont ugrik:
+ * napi baron hétvégén 3 nap, ünnepnapon 4, DST-váltáskor ±1 óra; intraday baron pedig a
+ * 16:00 ET zárás és a másnap 09:30 ET nyitás között 17,5 óra telik el. Rács nélkül a
+ * részvény-sor MINDIG „réses" lenne, `sufficient: false`, és a sáv soha nem lépne be.
  *
- * A hézagot ezért a NAPTÁR dönti el (két egymást követő kereskedési nap), az openTime
- * pedig szintetikus rács: egymást követő ülés → +1 lépés, VALÓDI kimaradt kereskedési
- * nap → +2 lépés, ami a `contiguousTail`-t helyesen vágja el. A szintetikus idő CSAK a
- * jel-számításé; a végrehajtás a valódi gyertyák záróárával dolgozik.
+ * A hézagot ezért a NAPTÁR dönti el, nem a nyers óra:
+ *  - napi bar: egymást követő KERESKEDÉSI nap → +1 lépés,
+ *  - intraday bar: ugyanazon a napon pontos időkeret-távolság → +1 lépés; ülés-határon
+ *    (előző kereskedési nap utolsó bara → mai első bar) szintén +1 lépés,
+ *  - minden más (VALÓDI kimaradt bar/ülés) → +2 lépés, amit a `contiguousTail` elvág.
+ *
+ * A szintetikus idő CSAK a jel-számításé; a végrehajtás a valódi gyertyák záróárával
+ * dolgozik.
  */
-export function toSignalCandles(candles: OhlcvCandle[]): SignalCandle[] {
+export function toSignalCandles(candles: OhlcvCandle[], timeframe: Timeframe = "1d"): SignalCandle[] {
+  const step = TIMEFRAME_MS[timeframe];
   const out: SignalCandle[] = [];
   let t = 0;
-  let prevKey: string | null = null;
+  let prev: { key: string; openTime: number } | null = null;
   for (const c of candles) {
     const key = etDateKey(etParts(c.openTime));
-    if (prevKey !== null) {
-      t += previousTradingDayKey(key) === prevKey ? STOCK_STEP_MS : 2 * STOCK_STEP_MS;
+    if (prev !== null) {
+      const contiguous =
+        timeframe === "1d"
+          ? previousTradingDayKey(key) === prev.key
+          : key === prev.key
+            ? c.openTime - prev.openTime === step
+            : previousTradingDayKey(key) === prev.key; // ülés-határ: az éjszaka nem hézag
+      t += contiguous ? step : 2 * step;
     }
     out.push({ openTime: t, high: c.high, low: c.low, close: c.close });
-    prevKey = key;
+    prev = { key, openTime: c.openTime };
   }
   return out;
 }
@@ -179,6 +193,8 @@ export function toSignalCandles(candles: OhlcvCandle[]): SignalCandle[] {
  */
 export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult {
   const strategy = input.strategy ?? STOCK_STRATEGY;
+  const timeframe = input.timeframe ?? "1d";
+  const stepMs = TIMEFRAME_MS[timeframe];
 
   const signalCandles: Record<string, SignalCandle[]> = {};
   const lastClose: Record<string, number> = {};
@@ -187,7 +203,7 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
 
   for (const [symbol, candles] of Object.entries(input.candlesBySymbol)) {
     if (candles.length === 0) continue;
-    signalCandles[symbol] = toSignalCandles(candles);
+    signalCandles[symbol] = toSignalCandles(candles, timeframe);
     const last = candles[candles.length - 1];
     lastClose[symbol] = last.close;
     latestBand[symbol] = { low: last.low, high: last.high, close: last.close };
@@ -197,7 +213,7 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
     }
   }
 
-  const signals = computeAllSignals(signalCandles, strategy, STOCK_STEP_MS);
+  const signals = computeAllSignals(signalCandles, strategy, stepMs);
   const atrBySymbol: Record<string, number> = {};
   const trendOkBySymbol: Record<string, boolean> = {};
   const momentumOkBySymbol: Record<string, boolean> = {};
@@ -251,6 +267,8 @@ export interface RunStockCycleDeps {
   /** Az aktív, kereskedhető részvény-instrumentumok. */
   instruments: Instrument[];
   candlesBySymbol: Record<string, OhlcvCandle[]>;
+  /** A gyertyák időkerete. Napi swing: "1d"; day trading: "5m". */
+  timeframe?: Timeframe;
   weeklyBudgetRemainingUsd?: number;
   fearGreedValue?: number | null;
   positionIdBySymbol?: Record<string, string>;
@@ -382,6 +400,7 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
     weeklyBudgetRemainingUsd: deps.weeklyBudgetRemainingUsd ?? 0,
     fearGreedValue: deps.fearGreedValue ?? null,
     strategy,
+    timeframe: deps.timeframe,
   });
 
   // Trailing ratchet: a stop CSAK felfelé kúszik.

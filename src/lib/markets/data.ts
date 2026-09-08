@@ -15,10 +15,13 @@
 import type { OhlcvCandle, Timeframe } from "@/lib/market/candles";
 import { fetchClosedCandles } from "@/lib/market/candles";
 import { fetchStooqDailyCandles } from "./stooq";
-import { fetchYahooDailyCandles } from "./yahoo";
+import { fetchYahooCandles } from "./yahoo";
 import { activeInstruments, type Instrument, type MarketEnv, type AssetClass } from "./registry";
 
-/** Az eszközosztály natív időkerete. */
+/**
+ * Az eszközosztály NATÍV időkerete. Ez az alapértelmezés; aki intraday-en dolgozik
+ * (a day-trading részvény-ciklus), explicit `timeframe`-et ad a lekéréshez.
+ */
 export function timeframeFor(assetClass: AssetClass): Timeframe {
   return assetClass === "stock" ? "1d" : "1h";
 }
@@ -34,6 +37,8 @@ export interface InstrumentCandles {
 export interface FetchOptions {
   now?: () => number;
   fetchImpl?: typeof fetch;
+  /** Felülírja az eszközosztály natív időkeretét (pl. részvény intraday: "5m"). */
+  timeframe?: Timeframe;
 }
 
 /**
@@ -45,10 +50,10 @@ export async function fetchInstrumentCandles(
   bars: number,
   opts: FetchOptions = {},
 ): Promise<InstrumentCandles> {
-  const timeframe = timeframeFor(instrument.assetClass);
+  const timeframe = opts.timeframe ?? timeframeFor(instrument.assetClass);
 
   if (instrument.dataProvider === "yahoo") {
-    const res = await fetchYahooDailyCandles(instrument.providerSymbol, instrument.symbol, bars, opts);
+    const res = await fetchYahooCandles(instrument.providerSymbol, instrument.symbol, bars, timeframe, opts);
     return { instrument, timeframe, candles: res.candles, error: res.error };
   }
 

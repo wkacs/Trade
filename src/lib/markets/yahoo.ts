@@ -16,11 +16,31 @@
  */
 
 import type { OhlcvCandle, Timeframe } from "@/lib/market/candles";
+import { TIMEFRAME_MS } from "@/lib/market/candles";
 import { etParts, etDateKey, isDailyBarClosed } from "./calendar";
 
-const YAHOO_TF: Timeframe = "1d";
 /** A szabályos ülés hossza (09:30–16:00 ET) — a napi bar záró bélyege az openTime-ból. */
 const SESSION_LENGTH_MS = 6.5 * 60 * 60 * 1000;
+
+/** A Yahoo `interval` paramétere időkeretenként. */
+const YAHOO_INTERVAL: Partial<Record<Timeframe, string>> = {
+  "1m": "1m",
+  "5m": "5m",
+  "15m": "15m",
+  "1h": "1h",
+  "1d": "1d",
+};
+
+/**
+ * Lezárt-e a gyertya. NAPI baron a naptár dönt (a napi bar a 16:00 ET záráskor végleges);
+ * INTRADAY baron az eltelt idő: a bar akkor kész, ha az egész intervalluma a múltban van.
+ * Így a Yahoo utolsó, MÉG FORMÁLÓDÓ intraday gyertyája sosem kerül be.
+ */
+function barState(openTime: number, timeframe: Timeframe, nowMs: number): "closed" | "unclosed" | "future" {
+  if (timeframe === "1d") return isDailyBarClosed(etDateKey(etParts(openTime)), nowMs);
+  if (openTime > nowMs) return "future";
+  return openTime + TIMEFRAME_MS[timeframe] <= nowMs ? "closed" : "unclosed";
+}
 
 export interface YahooNormalizeResult {
   candles: OhlcvCandle[];
@@ -55,9 +75,10 @@ export interface YahooChartPayload {
  * @param nowMs    az aktuális idő (lezártság-döntéshez)
  * @param receivedAt adatfrissesség-bélyeg (alap: nowMs)
  */
-export function normalizeYahooDaily(
+export function normalizeYahooCandles(
   payload: YahooChartPayload,
   symbol: string,
+  timeframe: Timeframe,
   nowMs: number,
   receivedAt: number = nowMs,
 ): YahooNormalizeResult {
@@ -77,10 +98,10 @@ export function normalizeYahooDaily(
       continue;
     }
     const openTime = ts * 1000;
-    // A napi bar ET-dátuma a nyitó pillanatból (09:30 ET) — a naptár DST-t is kezel.
+    // A bar ET-dátuma a nyitó pillanatból — a naptár DST-t is kezel. (Diagnosztikai kulcs.)
     const dateKey = etDateKey(etParts(openTime));
 
-    const closed = isDailyBarClosed(dateKey, nowMs);
+    const closed = barState(openTime, timeframe, nowMs);
     if (closed === "future") {
       dropped.push({ reason: "future", dateKey });
       continue;
@@ -113,17 +134,19 @@ export function normalizeYahooDaily(
       dropped.push({ reason: "invalid_ohlc", dateKey });
       continue;
     }
-    if (seen.has(dateKey)) {
+    // Duplikátum-kulcs: napi baron a dátum, intraday-en a pontos nyitó bélyeg.
+    const dedupKey = timeframe === "1d" ? dateKey : String(openTime);
+    if (seen.has(dedupKey)) {
       dropped.push({ reason: "duplicate", dateKey });
       continue;
     }
-    seen.add(dateKey);
+    seen.add(dedupKey);
 
     candles.push({
       symbol,
-      timeframe: YAHOO_TF,
+      timeframe,
       openTime,
-      closeTime: openTime + SESSION_LENGTH_MS,
+      closeTime: openTime + (timeframe === "1d" ? SESSION_LENGTH_MS : TIMEFRAME_MS[timeframe]),
       open,
       high,
       low,
@@ -151,8 +174,20 @@ const YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/";
 const YAHOO_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
-/** A kért bar-számhoz elegendő, de nem pazarló `range` paraméter. */
-export function rangeForBars(bars: number): string {
+/**
+ * A kért bar-számhoz elegendő, de nem pazarló `range` paraméter.
+ *
+ * Intraday-nél a Yahoo KEMÉNY korlátja 60 nap (`5m`/`15m`) — ennél régebbi kérés
+ * `Unprocessable Entity`. Egy ülés 78 db 5 perces bar, ezért a napokra váltás onnan jön.
+ */
+export function rangeForBars(bars: number, timeframe: Timeframe = "1d"): string {
+  if (timeframe !== "1d") {
+    const barsPerSession = Math.max(1, Math.floor((6.5 * 60 * 60 * 1000) / TIMEFRAME_MS[timeframe]));
+    const sessions = Math.ceil(bars / barsPerSession) + 1;
+    if (sessions <= 5) return "5d";
+    if (sessions <= 20) return "1mo";
+    return "60d"; // a maximum, amit a Yahoo intraday-re ad
+  }
   if (bars <= 20) return "1mo";
   if (bars <= 60) return "3mo";
   if (bars <= 120) return "6mo";
@@ -161,18 +196,25 @@ export function rangeForBars(bars: number): string {
 }
 
 /**
- * Napi lezárt gyertyák lekérése a Yahoo-ról egy providerSymbol-ra (pl. "AAPL").
- * A hibát STRUKTURÁLTAN adja vissza — a hálózati hiba nem lesz csendben üres sorozat.
+ * Lezárt gyertyák lekérése a Yahoo-ról egy providerSymbol-ra (pl. "AAPL"), tetszőleges
+ * időkeretben (napi VAGY intraday). A hibát STRUKTURÁLTAN adja vissza — a hálózati hiba
+ * nem lesz csendben üres sorozat.
  */
-export async function fetchYahooDailyCandles(
+export async function fetchYahooCandles(
   providerSymbol: string,
   symbol: string,
   bars: number,
-  opts: { now?: () => number; fetchImpl?: typeof fetch } = {},
+  timeframe: Timeframe = "1d",
+  opts: { now?: () => number; fetchImpl?: typeof fetch; range?: string } = {},
 ): Promise<YahooFetchResult> {
   const now = opts.now ?? (() => Date.now());
   const doFetch = opts.fetchImpl ?? fetch;
-  const url = `${YAHOO_BASE}${encodeURIComponent(providerSymbol)}?range=${rangeForBars(bars)}&interval=1d`;
+  const interval = YAHOO_INTERVAL[timeframe];
+  if (!interval) {
+    return { candles: [], error: { code: "bad_payload", message: `A Yahoo nem ad ${timeframe} gyertyát` } };
+  }
+  const range = opts.range ?? rangeForBars(bars, timeframe);
+  const url = `${YAHOO_BASE}${encodeURIComponent(providerSymbol)}?range=${range}&interval=${interval}`;
 
   try {
     const res = await doFetch(url, { headers: { "User-Agent": YAHOO_UA, Accept: "application/json" } });
@@ -195,7 +237,7 @@ export async function fetchYahooDailyCandles(
     if (!payload.chart?.result?.[0]?.indicators?.quote?.[0]) {
       return { candles: [], error: { code: "bad_payload", message: `Yahoo üres chart-eredmény (${providerSymbol})` } };
     }
-    const { candles } = normalizeYahooDaily(payload, symbol, now());
+    const { candles } = normalizeYahooCandles(payload, symbol, timeframe, now());
     return { candles: candles.slice(-bars), error: null };
   } catch (e) {
     return { candles: [], error: { code: "network", message: `Yahoo hálózati hiba (${providerSymbol}): ${String(e)}` } };
