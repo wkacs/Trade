@@ -150,7 +150,12 @@ export async function allFractionable(
       asset = hit.asset;
     } else {
       asset = await fetchAlpacaAsset(symbol, opts);
-      assetCache.set(symbol, { asset, at: now() });
+      // Csak SIKERES lekérés kerül a gyorsítótárba (audit 3. pont). Egy átmeneti 500-as
+      // válasz különben a TTL végéig „nem fractionable" állapotba fagyasztaná a papírt,
+      // és a hiba forrása (a hálózat) láthatatlan maradna. Ha van korábbi hiteles adat,
+      // az marad érvényben; ha nincs, a mostani kör konzervatívan egész lotot használ.
+      if (asset) assetCache.set(symbol, { asset, at: now() });
+      else if (hit) asset = hit.asset;
     }
     if (!asset || !asset.tradable || !asset.fractionable) return false;
   }

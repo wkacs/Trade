@@ -448,7 +448,13 @@ export async function runTick(input: TickInput): Promise<TickResult> {
     // Hiba esetén DOB — nincs log-és-továbbmegy hamis siker (audit A. szakasz).
     persist: async (intent, fill, deltas) => {
       if (!dbState) return;
-      await persistFill(intent, fill, input.fence ? { ...deltas, fence: input.fence } : deltas);
+      // Az eredményt VISSZAADJUK (audit 7. pont): egy fencing-elutasítás nem lehet néma —
+      // az executeIntent ilyenkor megállítja a ciklust, hogy ne költsünk tovább egy
+      // DB-ben nem könyvelt kötés után.
+      const outcome = await persistFill(intent, fill, input.fence ? { ...deltas, fence: input.fence } : deltas);
+      // Nem könyvelt kötés a régi vetületbe SEM mehet: a dashboard nem mutathat olyan
+      // kereskedést, ami a hiteles táblákban nincs benne.
+      if (!outcome.applied && outcome.reason !== "duplicate_fill") return outcome;
       // A v1 táblák innentől CSAK VETÜLET a régi dashboard-olvasóknak (a T23 vezeti ki).
       // A hibája nem buktatja a ticket, mert nem igazságforrás — de hangosan látszik.
       try {
@@ -464,6 +470,7 @@ export async function runTick(input: TickInput): Promise<TickResult> {
       } catch (e) {
         console.error("[tick] a v1 vetület írása nem sikerült (a v2 ledger már commitolt):", e);
       }
+      return outcome;
     },
   });
 
@@ -527,7 +534,14 @@ export async function runTick(input: TickInput): Promise<TickResult> {
   const cycleActions: CycleAction[] = [];
 
   if (tradingEnabled) {
-    weeklyRemaining = await remainingWeeklyBudget(equityNow(), { portfolioId, mode }, now());
+    // A FUTÓ stratégia kerete megy tovább (audit 5.) — a sáv 20%-a nem eshet vissza 5%-ra.
+    weeklyRemaining = await remainingWeeklyBudget(
+      equityNow(),
+      { portfolioId, mode },
+      now(),
+      undefined,
+      strategy.dcaWeeklyBudgetPct,
+    );
 
     const fgEvent = events.find((e) => e.kind === "sentiment" && e.sentiment);
     const fearGreedValue = fgEvent?.sentiment?.value ?? null;

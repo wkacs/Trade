@@ -6,6 +6,7 @@ import {
   computeRemainingBudget,
 } from "@/lib/strategy/weekly-budget";
 import type { Db } from "@/db/client";
+import { PROFIT_CYCLE } from "@/lib/config";
 
 const SCOPE = { portfolioId: "pf-1", mode: "paper" as const };
 
@@ -99,5 +100,18 @@ describe("weekly-budget — görgő 7 napos DCA-keret", () => {
   it("computeRemainingBudget tiszta függvényként is ugyanazt adja", () => {
     expect(computeRemainingBudget("1000", "30", "5", "0.05")).toBe("15");
     expect(computeRemainingBudget("1000", "80", "0", "0.05")).toBe("0");
+  });
+});
+
+describe("remainingWeeklyBudget – a FUTÓ stratégia kerete (audit 5.)", () => {
+  it("megadott százalék nélkül a globális alapérték (5%) marad", async () => {
+    const budget = await remainingWeeklyBudget("320", { portfolioId: "pf", mode: "paper" }, Date.now(), null);
+    // DB nélkül nincs költés és foglalás → a keret a teljes százalék.
+    expect(Number(budget)).toBeCloseTo(320 * PROFIT_CYCLE.dcaWeeklyBudgetPct, 6);
+  });
+
+  it("a sáv saját 20%-os keretét használja, ha megkapja", async () => {
+    const budget = await remainingWeeklyBudget("320", { portfolioId: "pf", mode: "paper" }, Date.now(), null, 0.2);
+    expect(Number(budget)).toBeCloseTo(64, 6);
   });
 });

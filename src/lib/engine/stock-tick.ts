@@ -30,10 +30,11 @@ import {
   type ExecuteIntentDeps,
 } from "@/lib/engine/execute-intent";
 import { DEFAULT_ORDER_RISK_PARAMS, originBudgetFor } from "@/lib/risk/risk-manager";
-import { fillParamsForClass, stockSymbolFilters } from "@/lib/markets/execution";
+import { fillParamsForClass, stockSymbolFilters, stockClosingFilters } from "@/lib/markets/execution";
 import { stopCandidate } from "@/lib/engine/plan-exits";
 import type { Instrument } from "@/lib/markets/registry";
 import type { EntryShape } from "@/lib/strategy/intraday-entries";
+import type { MomentumRanker } from "@/lib/strategy/momentum-ranking";
 import { etParts, etDateKey, usEquitySession, isUsTradingDay, minutesToSessionClose } from "@/lib/markets/calendar";
 import { type LedgerState, positionQty, setStop } from "@/lib/portfolio/ledger";
 import type { ExecutionIntent, Fill } from "@/lib/execution/contracts";
@@ -68,6 +69,38 @@ export const STOCK_QUOTE = "USD";
 export const STOCK_STEP_MS = TIMEFRAME_MS["1d"];
 /** A részvény paper-portfólió külön hatóköre (nem keveredik a kripto ledgerrel). */
 export const STOCK_PORTFOLIO_ID = "stock-paper";
+/**
+ * A relatív-erő rangsor referencia-papírja. Ugyanaz, amit a rezsim-szűrő is néz: a
+ * piac állapotát az S&P 500 ETF képviseli. Ha nincs az aktív univerzumban, a relatív
+ * erő nyers változásra esik vissza (a rangsor ezt kezeli).
+ */
+export const MOMENTUM_BENCHMARK = "SPY";
+
+/**
+ * A napi veszteségkapu ÁLLAPOTA a ciklus szempontjából. Szándékosan minimális: a
+ * `runStockCycle` nem tud (és nem is akar) DB-t olvasni — a hívó dönti el, honnan jön.
+ */
+/**
+ * Meddig számít FRISSNEK a legutolsó lezárt gyertya (audit 2. pont).
+ *
+ * Miért kell: a jel és a végrehajtás UGYANABBÓL a lezárt gyertyából dolgozik, és a bar
+ * lezártsága önmagában nem bizonyítja, hogy az ár MOST is érvényes. Ha a betöltés hibázik
+ * vagy a cron kimarad, a sorozat belsőleg folytonos marad, csak épp RÉGI — enélkül a
+ * rendszer egy tegnapi árra adna ki mai market ordert.
+ *
+ * Intraday: három bar (5 percen 15 perc) — egy kimaradt ciklus még belefér, kettő nem.
+ * Napi: 36 óra, vagyis a tegnapi zárásnál régebbi adatból nincs új belépő.
+ */
+export function defaultMaxBarAgeMs(timeframe: Timeframe): number {
+  return timeframe === "1d" ? 36 * 60 * 60 * 1000 : 3 * TIMEFRAME_MS[timeframe];
+}
+
+export interface StockDayGateState {
+  /** Igaz, ha a napi veszteség-latch ma bekapcsolt → nincs ÚJ vétel a nap végéig. */
+  latched: boolean;
+  /** Igaz, ha nincs hiteles napkezdő equity-referencia → nincs ÚJ vétel. */
+  baselineMissing: boolean;
+}
 
 // ── Cadence: a részvény NAPI ritmusban dönt, a lezárt napi gyertya után ──────────
 
@@ -205,6 +238,19 @@ export interface PlanStockCycleInput {
    * Élesben alapból üres — a scripts/stock-intraday-backtest.ts --sweep shape méri.
    */
   entryShape?: EntryShape;
+  /**
+   * Cserélhető MOMENTUM-RANGSOR: több jogosult papír közül melyik nyer. Üresen a nyers
+   * százalék-maximum dönt (mai viselkedés). A széles univerzumon ez a kérdés dönti el,
+   * hogy a kitörést vagy a legnagyobb zajt vásároljuk meg — lásd `momentum-ranking.ts`.
+   */
+  momentumRanking?: MomentumRanker;
+  /**
+   * A döntés ideje. Ha megadod, a rendszer ELLENŐRZI a legutolsó lezárt gyertya korát, és
+   * az elavult sorozatú papírba nem enged ÚJ belépőt (a kilépés nem tiltott).
+   */
+  nowMs?: number;
+  /** Az életkor-küszöb felülírása. Üresen `defaultMaxBarAgeMs(timeframe)`. */
+  maxBarAgeMs?: number;
 }
 
 export interface PlanStockCycleResult {
@@ -213,6 +259,8 @@ export interface PlanStockCycleResult {
   /** A legutolsó napi záróár symbolonként (a végrehajtási referencia). */
   lastClose: Record<string, number>;
   atrBySymbol: Record<string, number>;
+  /** Papírok, amiknek a legutolsó gyertyája ELAVULT — ezekbe nincs új belépő. */
+  staleSymbols: string[];
 }
 
 /** Egy ET-dátumkulcs „déli" ms-e — a naptár-lekérdezésekhez (EST/EDT alatt is ugyanaz a nap). */
@@ -283,7 +331,7 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
 
   const signalCandles: Record<string, SignalCandle[]> = {};
   const lastClose: Record<string, number> = {};
-  const changePct: { symbol: string; change24hPct: number }[] = [];
+  const changePct: { symbol: string; change24hPct: number; atrPct?: number; benchmarkChangePct?: number }[] = [];
   const latestBand: Record<string, { low: number; high: number; close: number }> = {};
 
   for (const [symbol, candles] of Object.entries(input.candlesBySymbol)) {
@@ -298,6 +346,21 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
     }
   }
 
+  // ADAT-FRISSESSÉG (audit 2. pont): a lezárt bar kora a döntés idejéhez mérve. A
+  // `closeTime` a valódi zárás; ahol nincs, a nyitás + időkeret a konzervatív becslés.
+  const maxBarAge = input.maxBarAgeMs ?? defaultMaxBarAgeMs(timeframe);
+  const staleSymbols: string[] = [];
+  if (input.nowMs !== undefined) {
+    for (const [symbol, candles] of Object.entries(input.candlesBySymbol)) {
+      if (candles.length === 0) continue;
+      const last = candles[candles.length - 1];
+      const closedAt = last.closeTime ?? last.openTime + stepMs;
+      if (input.nowMs - closedAt > maxBarAge) staleSymbols.push(symbol);
+    }
+    staleSymbols.sort();
+  }
+  const stale = new Set(staleSymbols);
+
   const signals = computeAllSignals(signalCandles, strategy, stepMs);
   const atrBySymbol: Record<string, number> = {};
   const trendOkBySymbol: Record<string, boolean> = {};
@@ -305,7 +368,9 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
   for (const [sym, sig] of Object.entries(signals)) {
     atrBySymbol[sym] = sig.atr;
     trendOkBySymbol[sym] = sig.trendOk;
-    momentumOkBySymbol[sym] = input.entryShape
+    momentumOkBySymbol[sym] = stale.has(sym)
+      ? false
+      : input.entryShape
       ? sig.sufficient &&
         input.entryShape({
           symbol: sym,
@@ -314,6 +379,17 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
           strategy,
         })
       : sig.momentumOk;
+  }
+
+  // A rangsor bemenete. Az ATR az ÁRHOZ mérten megy tovább (különben a drágább papír
+  // pusztán a nagyobb abszolút ingásától tűnne volatilisebbnek), a benchmark-változás
+  // pedig a piac sodrásának levonásához kell.
+  const benchChange = changePct.find((c) => c.symbol === MOMENTUM_BENCHMARK)?.change24hPct;
+  for (const c of changePct) {
+    const atr = atrBySymbol[c.symbol] ?? 0;
+    const close = lastClose[c.symbol] ?? 0;
+    if (atr > 0 && close > 0) c.atrPct = (atr / close) * 100;
+    if (benchChange !== undefined) c.benchmarkChangePct = benchChange;
   }
 
   // A birtokolt pozíciók gyertyája kell a stop/TP-hez; ha nincs friss gyertya, kimarad.
@@ -333,11 +409,12 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
       atrBySymbol,
       trendOkBySymbol,
       momentumOkBySymbol,
+      momentumRanker: input.momentumRanking,
     },
     strategy,
   );
 
-  return { plan, signals, lastClose, atrBySymbol };
+  return { plan, signals, lastClose, atrBySymbol, staleSymbols };
 }
 
 // ── Végrehajtás (INJEKTÁLHATÓ) ───────────────────────────────────────────────────
@@ -389,6 +466,29 @@ export interface RunStockCycleDeps {
   fractional?: boolean;
   /** Cserélhető belépő-alak (mérés). Üresen a beépített kitörés-jel dönt. */
   entryShape?: EntryShape;
+  /** Cserélhető momentum-rangsor (mérés). Üresen a nyers százalék-maximum dönt. */
+  momentumRanking?: MomentumRanker;
+  /**
+   * NAPI VESZTESÉGKAPU (audit 1. pont). A hívó adja, mert perzisztenciát igényel: az éles
+   * runner a DB-s `resolveDayGate`-et köti be ülés-napra, a backteszt ugyanazt a TISZTA
+   * `evaluateDayGate`-et memóriában. Hiányában nincs kapu — ezért az éles utakon KÖTELEZŐ
+   * megadni; a hiányát a runner-tesztek őrzik.
+   *
+   * A kapu KIZÁRÓLAG új vételt tilthat: a stop, a take-profit és a nap végi laposra zárás
+   * a risk-manager SELL-ágán fut, amit a latch nem érint.
+   */
+  resolveDayGate?: (equityUsd: Dec, nowMs: number) => Promise<StockDayGateState> | StockDayGateState;
+  /** Az adat-életkor küszöbének felülírása. Üresen `defaultMaxBarAgeMs(timeframe)`. */
+  maxBarAgeMs?: number;
+  /**
+   * VÉGREHAJTÁSI ár felülírása symbolonként — CSAK mérésre (audit 2. pont).
+   *
+   * A jel és a fill ma ugyanabból a lezárt gyertyából dolgozik, vagyis a backteszt abban a
+   * pillanatban köt, amikor a jel elkészül. Élesben a kötés ennél KÉSŐBB történik, más
+   * áron. Ezzel a hurokkal a késleltetés HATÁSA mérhető (pl. a következő bar nyitóján
+   * fillelve), anélkül hogy a jel megváltozna. Élesben soha nincs megadva.
+   */
+  executionPrices?: Record<string, Dec>;
   /**
    * Fill-költség felülírás — CSAK mérésre. Ezzel dönthető el, hogy egy variáns előnye a
    * jelből jön-e, vagy pusztán abból, hogy kevesebbet kereskedik (és így kevesebb
@@ -405,6 +505,14 @@ export interface RunStockCycleResult {
   signals: Record<string, SymbolSignals>;
   plan: ProfitCyclePlan;
   lastClose: Record<string, number>;
+  /**
+   * `flatten` fázis után NYITVA maradt papírok (audit 3. pont). Üres tömb = a sáv
+   * igazoltan lapos. Bármi más TARTÓS INCIDENS: a hívó nem jelentheti sikeres zárásnak,
+   * mert éjszakai kitettség maradt — tipikusan hiányzó gyertya vagy elutasított fill miatt.
+   */
+  unflattened: string[];
+  /** Papírok elavult gyertyasorral — ezekbe a ciklus nem nyitott új pozíciót. */
+  staleSymbols: string[];
 }
 
 /**
@@ -426,7 +534,12 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
   }
 
   // A napi close a végrehajtási ár (a backteszt konvenciója). A broker ezt kapja `last`-ként.
-  const market = (symbol: string) => (pricesDec[symbol] ? { last: pricesDec[symbol] } : null);
+  // A `executionPrices` felülírás CSAK a fill árát mozdítja — a jel, a stop/TP kiértékelés
+  // és az equity a lezárt gyertyából marad.
+  const market = (symbol: string) => {
+    const px = deps.executionPrices?.[symbol] ?? pricesDec[symbol];
+    return px ? { last: px } : null;
+  };
 
   const pendingTrigger = new Map<string, { kind: "stop-loss" | "take-profit"; triggerPrice: Dec }>();
   const broker: ExecutionBroker =
@@ -442,6 +555,17 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
         filters: stockSymbolFilters("STOCK", STOCK_QUOTE, now(), { fractional: deps.fractional === true }),
         nowMs: now(),
       },
+      // A ZÁRÁS nem a belépő metaadat-kapuján megy (audit 3. pont): egy meglévő pozíciót
+      // a tényleges készlet szerint kell tudni zárni, különben tört maradvány ragad bent.
+      paramsFor: (intent) => ({
+        ...fillParamsForClass("stock"),
+        ...(deps.costOverride ?? {}),
+        filters:
+          intent.order.side === "SELL"
+            ? stockClosingFilters("STOCK", STOCK_QUOTE, now())
+            : stockSymbolFilters("STOCK", STOCK_QUOTE, now(), { fractional: deps.fractional === true }),
+        nowMs: now(),
+      }),
     });
 
   const equityUsd = (): Dec => {
@@ -452,6 +576,12 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
     }
     return total;
   };
+
+  // A kaput a döntés ELŐTT oldjuk fel, a ciklus előtti equityvel — a saját kötéseink
+  // ne mozdítsák el a napi referenciát menet közben.
+  const dayGate: StockDayGateState = deps.resolveDayGate
+    ? await deps.resolveDayGate(equityUsd(), now())
+    : { latched: false, baselineMissing: false };
 
   let seq = 0;
   const makeDeps = (origin: IntentRequest["origin"]): ExecuteIntentDeps => ({
@@ -466,8 +596,8 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
       reservedQuoteBySymbol: {},
       reservedQuoteTotal: ZERO,
       originBudgetQuote: originBudgetFor(origin, { weeklyDcaRemaining: weeklyRemaining }),
-      dailyLossLatched: false,
-      dayBaselineMissing: false,
+      dailyLossLatched: dayGate.latched,
+      dayBaselineMissing: dayGate.baselineMissing,
       allowedSymbols,
       quoteAsset: STOCK_QUOTE,
     }),
@@ -519,6 +649,9 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
     strategy,
     timeframe: deps.timeframe,
     entryShape: deps.entryShape,
+    momentumRanking: deps.momentumRanking,
+    nowMs: now(),
+    maxBarAgeMs: deps.maxBarAgeMs,
   });
 
   // Trailing ratchet: a stop CSAK felfelé kúszik.
@@ -603,5 +736,22 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
     }
   }
 
-  return { ledger, actions, signals: planned.signals, plan: planned.plan, lastClose: planned.lastClose };
+  // A zárás UTÁNI tényleges maradék — nem a szándékot, hanem az eredményt nézzük.
+  const unflattened =
+    phase === "flatten"
+      ? Object.values(ledger.positions)
+          .filter((p) => isPositive(p.qty))
+          .map((p) => p.symbol)
+          .sort()
+      : [];
+
+  return {
+    ledger,
+    actions,
+    signals: planned.signals,
+    plan: planned.plan,
+    lastClose: planned.lastClose,
+    unflattened,
+    staleSymbols: planned.staleSymbols,
+  };
 }

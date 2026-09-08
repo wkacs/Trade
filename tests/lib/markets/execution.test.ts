@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   fillParamsForClass,
+  stockClosingFilters,
   fillParamsForInstrument,
   stockSymbolFilters,
 } from "@/lib/markets/execution";
@@ -71,5 +72,23 @@ describe("markets/execution – valós paper fill részvényre", () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.reason).toBe("exchange_rule");
+  });
+});
+
+describe("stockClosingFilters – a MEGLÉVŐ pozíció zárása", () => {
+  const NOW = Date.parse("2026-02-02T21:00:00Z");
+
+  it("tört mennyiséget enged, hogy ne maradjon zárhatatlan maradvány", () => {
+    const f = stockClosingFilters("AAPL", "USD", NOW);
+    expect(Number(f.stepSize)).toBeLessThanOrEqual(0.001);
+    expect(Number(f.minQty)).toBeLessThanOrEqual(0.001);
+  });
+
+  it("nincs minimális kötésérték: egy 0,20 USD-s maradék is zárható", () => {
+    expect(Number(stockClosingFilters("AAPL", "USD", NOW).minNotional)).toBe(0);
+  });
+
+  it("az ár-lépésköz marad a centes tick", () => {
+    expect(stockClosingFilters("AAPL", "USD", NOW).tickSize).toBe("0.01");
   });
 });

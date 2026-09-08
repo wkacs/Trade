@@ -94,6 +94,13 @@ export interface PaperBrokerDeps {
   /** A trigger-fajta és -ár, ha az intent stop/TP eredetű. */
   getTrigger?: (intent: ExecutionIntent) => { kind: PaperFillKind; triggerPrice?: Dec } | null;
   params?: PaperFillParams;
+  /**
+   * Intentenkénti paraméter-felülírás. Azért kell, mert a VÉTEL és az ELADÁS nem ugyanazt
+   * a lot-szabályt kapja: az új belépő konzervatív egész lotot, egy meglévő pozíció zárása
+   * viszont a tényleges készletet követi (különben tört maradvány ragadna bent). Üresen a
+   * `params` érvényes minden intentre — a régi viselkedés.
+   */
+  paramsFor?: (intent: ExecutionIntent) => PaperFillParams;
 }
 
 /**
@@ -171,7 +178,7 @@ export class PaperExecutionBroker implements ExecutionBroker {
         triggerPrice: trigger?.triggerPrice,
         market,
       },
-      this.deps.params ?? DEFAULT_PAPER_FILL_PARAMS,
+      this.deps.paramsFor?.(intent) ?? this.deps.params ?? DEFAULT_PAPER_FILL_PARAMS,
     );
     if (!sim.ok) return reject(sim.reason, sim.message);
 

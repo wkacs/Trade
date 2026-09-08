@@ -107,3 +107,28 @@ describe("markets/alpaca – számla", () => {
     expect(acc).toMatchObject({ status: "ACTIVE", cash: 100000, equity: 100000, patternDayTrader: false, daytradeCount: 2 });
   });
 });
+
+describe("allFractionable – az átmeneti hiba nem ragadhat be a cache-be (audit 3.)", () => {
+  it("sikertelen lekérés NEM kerül a gyorsítótárba: a következő hívás újra próbálkozik", async () => {
+    let call = 0;
+    const fetchImpl = vi.fn(async () => {
+      call++;
+      if (call === 1) return { ok: false, status: 500, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => assetJson({ symbol: "AAPL" }) };
+    }) as unknown as typeof fetch;
+
+    expect(await allFractionable(["AAPL"], { env, fetchImpl })).toBe(false);
+    // Második hívás: a hibás választ nem cache-eltük, tehát újra kérdez és most igaz.
+    expect(await allFractionable(["AAPL"], { env, fetchImpl })).toBe(true);
+    expect(call).toBe(2);
+  });
+
+  it("egyetlen hibás papír miatt is false — a BELÉPŐ marad konzervatív", async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      String(url).includes("MSFT")
+        ? { ok: true, status: 200, json: async () => assetJson({ symbol: "MSFT", fractionable: false }) }
+        : { ok: true, status: 200, json: async () => assetJson({ symbol: "AAPL" }) },
+    ) as unknown as typeof fetch;
+    expect(await allFractionable(["AAPL", "MSFT"], { env, fetchImpl })).toBe(false);
+  });
+});

@@ -36,12 +36,14 @@ import {
   STOCK_QUOTE,
 } from "@/lib/engine/stock-tick";
 import { previousTradingDayKey } from "@/lib/engine/stock-tick";
-import { etParts, etDateKey, minutesFromSessionOpen } from "@/lib/markets/calendar";
+import { etParts, etDateKey, minutesFromSessionOpen, sessionOpenMs } from "@/lib/markets/calendar";
+import { evaluateDayGate, type DayEquityRow } from "@/lib/portfolio/day-equity";
 import { fetchEarningsCalendar } from "@/lib/markets/earnings";
 import { emptyLedger, cashOf, type LedgerState } from "@/lib/portfolio/ledger";
 import { toNumber } from "@/lib/portfolio/money";
 import type { StrategyConfig } from "@/lib/strategy/config";
 import { ENTRY_SHAPES, type EntryShape } from "@/lib/strategy/intraday-entries";
+import { MOMENTUM_RANKINGS, type MomentumRanker } from "@/lib/strategy/momentum-ranking";
 
 const CACHE_DIR = ".cache";
 const CAPITAL = 10000;
@@ -51,6 +53,14 @@ const CAPITAL = 10000;
  * variáns előnye a JELBŐL jön-e, vagy csak abból, hogy kevesebbet kereskedik.
  */
 const NO_COST = process.argv.includes("--nocost");
+
+/**
+ * `--fill next-open`: a jel a lezárt gyertyából születik, a KÖTÉS viszont a KÖVETKEZŐ bar
+ * NYITÓJÁN történik (audit 2. pont). A mai konvenció ugyanannak a barnak a záróján fillel,
+ * vagyis abban a pillanatban köt, amikor a jel elkészül — élesben ez sosem igaz. Ez a
+ * kapcsoló méri, mennyit ér a stratégia, ha a végrehajtás egy barral késik.
+ */
+const NEXT_OPEN_FILL = process.argv.includes("--fill") && arg("fill", "") === "next-open";
 
 /**
  * Széles, likvid univerzum a szélesség-méréshez. Csupa nagy forgalmú, Alpacán
@@ -183,6 +193,7 @@ async function simulate(
   fractional = false,
   earningsByDate?: Map<string, Set<string>>,
   entryShape?: EntryShape,
+  momentumRanking?: MomentumRanker,
 ): Promise<RunMetrics> {
   const symbols = Object.keys(bars);
   const step = TIMEFRAME_MS[tf];
@@ -192,6 +203,10 @@ async function simulate(
   const n = range ? Math.floor(total * range.toPct) : total;
 
   let ledger: LedgerState = emptyLedger(STOCK_PORTFOLIO_ID, "paper", String(CAPITAL), STOCK_QUOTE);
+  // NAPI VESZTESÉGKAPU — ugyanaz a TISZTA szabály, amit az éles runner a DB-vel futtat
+  // (audit 1. pont). Enélkül a backteszt olyan kötéseket számolna hozamnak, amiket az
+  // éles rendszer meg sem kötne.
+  let dayRow: DayEquityRow | null = null;
   let peak = CAPITAL;
   let maxDd = 0;
   let buys = 0;
@@ -227,6 +242,26 @@ async function simulate(
       fractional,
       entryBlocked,
       entryShape,
+      momentumRanking,
+      ...(NEXT_OPEN_FILL && i + 1 < n
+        ? {
+            executionPrices: Object.fromEntries(
+              symbols.filter((sy) => bars[sy][i + 1]).map((sy) => [sy, String(bars[sy][i + 1].open)]),
+            ),
+          }
+        : {}),
+      resolveDayGate: (equityUsd, nowMs) => {
+        const gate = evaluateDayGate({
+          nowMs,
+          row: dayRow,
+          currentEquity: equityUsd,
+          thresholdPct: String(strategy.dailyLossCircuitBreakerPct),
+          dayKey: etDateKey(etParts(nowMs)),
+          dayStartMs: sessionOpenMs(nowMs),
+        });
+        dayRow = gate.row;
+        return { latched: gate.latched, baselineMissing: gate.dayPnlPct === null };
+      },
       ...(NO_COST ? { costOverride: { slippageBps: 0, spreadBps: 0, feePct: "0" } } : {}),
       weeklyBudgetRemainingUsd: equityNow * 0.05,
     });
@@ -436,6 +471,69 @@ async function main() {
       const robust = r.a > 0 && r.b > 0 ? "IGEN" : "nem";
       console.log(
         `${r.label.padEnd(14)}${fmt(r.a)}${fmt(r.b)}${fmt(r.full.returnPct)}` +
+          `${String(r.full.trades).padStart(8)}${r.full.winRatePct.toFixed(0).padStart(6)}%` +
+          `${r.full.maxDrawdownPct.toFixed(2).padStart(8)}%${r.full.avgTradePct.toFixed(3).padStart(11)}%` +
+          `${r.full.tStat.toFixed(2).padStart(7)}   ${robust}`,
+      );
+    }
+    return;
+  } else if (sweep === "ranking") {
+    // MOMENTUM-RANGSOR: ha több papír is kitörésben van, melyiket vesszük meg. A mai
+    // rangsor a nyers százalék-maximum; széles univerzumon ez SZISZTEMATIKUSAN a
+    // legvolatilisebb nevet hozza (a legnagyobb kilengés mindig egy zajos papíré), ami a
+    // 2026-09-08-i szélesség-mérés bukását is magyarázhatja. Ugyanaz a jel, ugyanaz a
+    // kockázati keret, ugyanaz a végrehajtás — CSAK a kiválasztás más.
+    const only = arg("ranking", "");
+    const names = only ? only.split(",") : Object.keys(MOMENTUM_RANKINGS);
+    const shapeName = arg("shape", "");
+    const shape = shapeName ? ENTRY_SHAPES[shapeName] : undefined;
+    if (shapeName !== "" && !shape) {
+      console.error(`ismeretlen alak: ${shapeName}`);
+      process.exit(1);
+    }
+    // A szélesség-mérés rácsa (tétel-méret / egyidejű pozíció), hogy a számok az ottani
+    // sorokkal összevethetők legyenek. Tört lottal, különben a kis tétel nullára kerekül.
+    const grid: [number, number][] = [
+      [0.1, 3],
+      [0.05, 6],
+      [0.03, 10],
+    ];
+    const rows: { label: string; a: number; b: number; full: RunMetrics }[] = [];
+    for (const name of names) {
+      const rank = MOMENTUM_RANKINGS[name];
+      if (!rank) {
+        console.error(`  ismeretlen rangsor: ${name}`);
+        continue;
+      }
+      for (const [pct, conc] of grid) {
+        const st: StrategyConfig = {
+          ...STOCK_INTRADAY_STRATEGY,
+          momentumBuyPct: pct,
+          maxConcurrentPositions: conc,
+        };
+        const label = `${name} · ${(pct * 100).toFixed(0)}% · ${conc} poz`;
+        const a = await simulate(label, bars, instruments, st, tf, { fromPct: 0, toPct: 0.5 }, true, undefined, shape, rank);
+        const b = await simulate(label, bars, instruments, st, tf, { fromPct: 0.5, toPct: 1 }, true, undefined, shape, rank);
+        const full = await simulate(label, bars, instruments, st, tf, undefined, true, undefined, shape, rank);
+        rows.push({ label, a: a.returnPct, b: b.returnPct, full });
+        console.error(
+          `  ${label.padEnd(28)} teljes ${full.returnPct >= 0 ? "+" : ""}${full.returnPct.toFixed(2)}%  ` +
+            `trade ${String(full.trades).padStart(4)}  win ${full.winRatePct.toFixed(0)}%  maxDD ${full.maxDrawdownPct.toFixed(2)}%`,
+        );
+      }
+    }
+    rows.sort((x, y) => y.full.returnPct - x.full.returnPct);
+    const fmt = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`.padStart(9);
+    console.log(
+      `
+=== ${tf} · momentum-rangsor · 60 nap · ${symbols.length} papír${NEXT_OPEN_FILL ? " · KÖVETKEZŐ NYITÓN FILLELVE" : ""}` +
+        `${shapeName ? ` · alak: ${shapeName}` : " · alak: built-in"}${NO_COST ? " · KÖLTSÉG NÉLKÜL" : ""} ===`,
+    );
+    console.log("rangsor · tétel · poz         1. fél    2. fél    teljes   trade  win%   maxDD%   átlag/trade      t  robusztus");
+    for (const r of rows) {
+      const robust = r.a > 0 && r.b > 0 ? "IGEN" : "nem";
+      console.log(
+        `${r.label.padEnd(28)}${fmt(r.a)}${fmt(r.b)}${fmt(r.full.returnPct)}` +
           `${String(r.full.trades).padStart(8)}${r.full.winRatePct.toFixed(0).padStart(6)}%` +
           `${r.full.maxDrawdownPct.toFixed(2).padStart(8)}%${r.full.avgTradePct.toFixed(3).padStart(11)}%` +
           `${r.full.tStat.toFixed(2).padStart(7)}   ${robust}`,

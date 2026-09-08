@@ -46,6 +46,18 @@ export interface DayGateInput {
    * első mérés csak résznapos referencia (`partial-day`), és a napi hozam is így értendő.
    */
   dayOpenToleranceMs?: number;
+  /**
+   * A nap AZONOSÍTÓJA. Üresen az UTC nap (kripto, 24/7). A részvény-sáv a tőzsdei ülés
+   * ET-dátumát adja: ott a „nap" a kereskedési nap, nem az UTC naptári nap, különben a
+   * 09:30 ET nyitás már a következő UTC napra esne a nyári időszámítás alatt.
+   */
+  dayKey?: string;
+  /**
+   * A nap KEZDETE ms-ban — ehhez méri a rendszer a napnyitás-toleranciát. Üresen az UTC
+   * éjfél. A részvény-sáv az ülés nyitását (09:30 ET) adja, különben a nyitáskori első
+   * mérés mindig „résznapos" referenciának látszana.
+   */
+  dayStartMs?: number;
 }
 
 export interface DayGateResult {
@@ -82,7 +94,7 @@ export function utcDayStart(ms: number): number {
  * Egy 10 USD befizetés így nem látszik napi nyereségnek.
  */
 export function evaluateDayGate(input: DayGateInput): DayGateResult {
-  const dayUtc = utcDayKey(input.nowMs);
+  const dayUtc = input.dayKey ?? utcDayKey(input.nowMs);
   const tolerance = input.dayOpenToleranceMs ?? DEFAULT_DAY_OPEN_TOLERANCE_MS;
 
   // 1) Nem mérhető equity → nincs kitalált hozam, új vétel szünetel.
@@ -108,8 +120,8 @@ export function evaluateDayGate(input: DayGateInput): DayGateResult {
 
   // 2) Új nap (vagy legelső futás): baseline felvétele.
   if (!input.row || input.row.dayUtc !== dayUtc) {
-    const sinceMidnight = input.nowMs - utcDayStart(input.nowMs);
-    const source: DayBaselineSource = sinceMidnight <= tolerance ? "day-open" : "partial-day";
+    const sinceDayStart = input.nowMs - (input.dayStartMs ?? utcDayStart(input.nowMs));
+    const source: DayBaselineSource = sinceDayStart <= tolerance ? "day-open" : "partial-day";
     const row: DayEquityRow = {
       dayUtc,
       baselineEquity: input.currentEquity,
@@ -126,7 +138,7 @@ export function evaluateDayGate(input: DayGateInput): DayGateResult {
       blockNewBuys: false,
       reason:
         source === "day-open"
-          ? "Új UTC nap — napkezdő equity-referencia rögzítve."
+          ? "Új kereskedési nap — napkezdő equity-referencia rögzítve."
           : "Nap közbeni indulás — RÉSZNAPOS referencia; a napi hozam ettől a ponttól értendő.",
       needsPersist: true,
     };
@@ -269,16 +281,19 @@ export async function resolveDayGate(
   thresholdPct: Dec,
   nowMs: number,
   dbOverride?: Db | null,
+  /** Nap-definíció. Üresen UTC nap/éjfél (kripto); a részvény-sáv ülés-napot ad. */
+  day?: { dayKey?: string; dayStartMs?: number },
 ): Promise<DayGateResult> {
-  const dayUtc = utcDayKey(nowMs);
+  const dayUtc = day?.dayKey ?? utcDayKey(nowMs);
   const existing = await loadDayEquityRow(portfolioId, mode, dayUtc, dbOverride);
-  const result = evaluateDayGate({ nowMs, row: existing, currentEquity, thresholdPct });
+  const evalInput = { nowMs, currentEquity, thresholdPct, dayKey: dayUtc, dayStartMs: day?.dayStartMs };
+  const result = evaluateDayGate({ ...evalInput, row: existing });
   if (result.needsPersist) {
     await saveDayEquityRow(portfolioId, mode, result.row, dbOverride);
     // Verseny esetén a másik futó baseline-ja nyert: olvassuk vissza és számoljunk azzal.
     const persisted = await loadDayEquityRow(portfolioId, mode, dayUtc, dbOverride);
     if (persisted && persisted.baselineEquity !== result.row.baselineEquity) {
-      return evaluateDayGate({ nowMs, row: persisted, currentEquity, thresholdPct });
+      return evaluateDayGate({ ...evalInput, row: persisted });
     }
   }
   return result;

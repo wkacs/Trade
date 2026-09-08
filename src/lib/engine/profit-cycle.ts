@@ -5,6 +5,7 @@ import { evaluateMomentum, passesMomentum } from "@/lib/strategy/momentum";
 import { ratchetStop } from "@/lib/strategy/trailing-stop";
 import { passesTrendFilter } from "@/lib/strategy/entry-filter";
 import { computeAtr } from "@/lib/strategy/atr";
+import type { MomentumRanker } from "@/lib/strategy/momentum-ranking";
 
 /**
  * Egy symbolhoz tartozó stratégiai jelek (T15) — a TICK és a BACKTEST UGYANEZT hívja,
@@ -117,7 +118,7 @@ export interface ProfitCycleInput {
   positions: { id: string; symbol: string; qty: number; entryPrice: number; stopPrice: number }[];
   candles: Record<string, { low: number; high: number; close: number }>;
   fearGreedValue: number | null;
-  coinChanges: { symbol: string; change24hPct: number }[];
+  coinChanges: { symbol: string; change24hPct: number; atrPct?: number; benchmarkChangePct?: number }[];
   weeklyBudgetRemainingUsd: number;
   totalEquity: number;
   /** Per-symbol ATR (a hívó számolja). atr módban a stop-távolsághoz; fixed módban ignorált. */
@@ -126,6 +127,12 @@ export interface ProfitCycleInput {
   trendOkBySymbol: Record<string, boolean>;
   /** Per-symbol momentum-flag (breakout a trend fölött). A hívó számolja; momentumEnabled ki → ignorált. */
   momentumOkBySymbol?: Record<string, boolean>;
+  /**
+   * Melyik jogosult jelölt nyer, ha több is kitörésben van. Üresen a nyers
+   * százalék-maximum (mai viselkedés). A `coinChanges` `atrPct`/`benchmarkChangePct`
+   * mezőit ez a rangsor használja. Lásd `strategy/momentum-ranking.ts`.
+   */
+  momentumRanker?: MomentumRanker;
 }
 
 /**
@@ -226,6 +233,7 @@ export function planProfitCycle(input: ProfitCycleInput, config: StrategyConfig)
       stopLossPct: config.stopLossPct,
       stopMode: config.stopMode,
       maxPositionPct: config.maxPositionPct,
+      rankBy: input.momentumRanker,
     },
   );
   if (mom.shouldEnter && mom.symbol) {

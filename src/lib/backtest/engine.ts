@@ -12,6 +12,7 @@ import { planProfitCycle, computeAllSignals } from "@/lib/engine/profit-cycle";
 import { simulateFill, protectionTriggers } from "./fill-sim";
 import { computeMetrics } from "./metrics";
 import { DEFAULT_STRATEGY, type StrategyConfig } from "@/lib/strategy/config";
+import { evaluateDayGate, type DayEquityRow } from "@/lib/portfolio/day-equity";
 import {
   emptyLedger,
   applyFill,
@@ -96,33 +97,75 @@ export function runBacktest(
   const entries: EntryEvent[] = [];
   const closedTrades: ClosedTradePnl[] = [];
   const rejections: Record<string, number> = {};
-  const buyLog: { ts: number; amountUsd: number }[] = []; // gördülő heti keret
+  // Gördülő heti keret. Az `origin` és a BRUTTÓ érték azért kell külön, mert a heti
+  // DCA-keretet a futó rendszer csak a dca-eredetű vételek bruttó értékéből számolja.
+  const buyLog: { ts: number; amountUsd: number; grossUsd: number; origin: PendingOrder["kind"] }[] = [];
   const buffers: Record<string, { openTime: number; high: number; low: number; close: number }[]> = {};
   /** Az előző keretben megtervezett, MOST végrehajtandó orderek. */
   let pending: PendingOrder[] = [];
   let hoursInMarket = 0;
   let fillSeq = 0;
 
-  const priceMap = (frame: HistoryFrame): Record<string, Dec> => {
+  /**
+   * Ár-térkép a keretből. Az `at` dönti el, MELYIK árat ismerjük már (audit 4. pont): a
+   * bar nyitóján végrehajtott order idején a záróár MÉG NEM LÉTEZIK, tehát vele sem
+   * értékelni, sem keretet számolni nem szabad.
+   */
+  const priceMap = (frame: HistoryFrame, at: "open" | "close" = "close"): Record<string, Dec> => {
     const out: Record<string, Dec> = {};
     for (const sym of config.symbols) {
       const k = frame.candles[sym];
-      if (k) out[sym] = decFloat(k.close);
+      if (k) out[sym] = decFloat(at === "open" ? k.open : k.close);
     }
     return out;
   };
 
-  const riskContext = (frame: HistoryFrame, originBudget?: Dec): OrderRiskContext => ({
-    ledger,
-    prices: priceMap(frame),
-    reservedQuoteBySymbol: {},
-    reservedQuoteTotal: "0",
-    originBudgetQuote: originBudget,
-    dailyLossLatched: false,
-    dayBaselineMissing: false,
-    allowedSymbols: config.symbols,
-    quoteAsset: QUOTE,
-  });
+  /**
+   * NAPI VESZTESÉGKAPU a backtesztben — ugyanaz a tiszta szabály, amit a futó tick a
+   * DB-vel futtat (audit 6. pont). Enélkül a backteszt olyan vételeket számolna hozamnak,
+   * amiket az éles rendszer a napi latch miatt meg sem kötne.
+   */
+  let dayRow: DayEquityRow | null = null;
+  const dayGateAt = (nowMs: number, equity: Dec): { latched: boolean; baselineMissing: boolean } => {
+    const gate = evaluateDayGate({
+      nowMs,
+      row: dayRow,
+      currentEquity: equity,
+      thresholdPct: dec(strategy.dailyLossCircuitBreakerPct),
+    });
+    dayRow = gate.row;
+    return { latched: gate.latched, baselineMissing: gate.dayPnlPct === null };
+  };
+
+  /**
+   * A DCA heti költése — CSAK a `dca` eredetű vétel, BRUTTÓ fill-értéken, pontosan úgy,
+   * ahogy a futó rendszer `spentThisWeekUsd`-je számol (audit 6. pont). A momentum-vétel
+   * nem fogyaszthatja a DCA keretét.
+   */
+  const dcaSpent7d = (nowTs: number): number =>
+    buyLog
+      .filter((b) => b.origin === "dca" && b.ts > nowTs - 7 * 24 * HOUR)
+      .reduce((sum, b) => sum + b.grossUsd, 0);
+
+  const riskContext = (
+    frame: HistoryFrame,
+    originBudget?: Dec,
+    at: "open" | "close" = "close",
+  ): OrderRiskContext => {
+    const prices = priceMap(frame, at);
+    const gate = dayGateAt(frame.ts, equityAt(ledger, prices, QUOTE));
+    return {
+      ledger,
+      prices,
+      reservedQuoteBySymbol: {},
+      reservedQuoteTotal: "0",
+      originBudgetQuote: originBudget,
+      dailyLossLatched: gate.latched,
+      dayBaselineMissing: gate.baselineMissing,
+      allowedSymbols: config.symbols,
+      quoteAsset: QUOTE,
+    };
+  };
 
   /** Egy szimulált fill elkönyvelése a KÖZÖS ledgerrel. */
   const book = (
@@ -189,7 +232,7 @@ export function runBacktest(
         });
       }
     } else {
-      buyLog.push({ ts: frame.ts, amountUsd: sim.amountUsd + sim.feeUsd });
+      buyLog.push({ ts: frame.ts, amountUsd: sim.amountUsd + sim.feeUsd, grossUsd: sim.amountUsd, origin: kind });
       entries.push({
         ts: frame.ts,
         symbol,
@@ -247,7 +290,7 @@ export function runBacktest(
       if (order.side === "SELL") {
         const verdict = evaluateOrder(
           { side: "SELL", symbol: order.symbol, baseQty: decFloat(order.qty ?? 0) },
-          riskContext(frame),
+          riskContext(frame, undefined, "open"),
           riskParams,
         );
         if (!verdict.allowed) {
@@ -270,16 +313,16 @@ export function runBacktest(
         );
         if (sim) book(frame, order.symbol, "SELL", sim, order.kind, null);
       } else {
-        const weekAgo = frame.ts - 7 * 24 * HOUR;
-        const spent7d = buyLog.filter((b) => b.ts > weekAgo).reduce((s, b) => s + b.amountUsd, 0);
+        // A keret és a kockázat a NYITÓ árakból (audit 4.), a költés csak dca-ból (audit 6.).
         const weeklyRemaining = Math.max(
           0,
-          strategy.dcaWeeklyBudgetPct * toNumber(equityAt(ledger, priceMap(frame), QUOTE)) - spent7d,
+          strategy.dcaWeeklyBudgetPct * toNumber(equityAt(ledger, priceMap(frame, "open"), QUOTE)) -
+            dcaSpent7d(frame.ts),
         );
         const originBudget = order.kind === "dca" ? decFloat(weeklyRemaining) : undefined;
         const verdict = evaluateOrder(
           { side: "BUY", symbol: order.symbol, desiredQuote: decFloat(order.amountUsd ?? 0) },
-          riskContext(frame, originBudget),
+          riskContext(frame, originBudget, "open"),
           riskParams,
         );
         if (!verdict.allowed) {
@@ -330,9 +373,7 @@ export function runBacktest(
     const totalEquity = toNumber(equityAt(ledger, prices, QUOTE));
     if (Object.keys(ledger.positions).length > 0) hoursInMarket++;
 
-    const weekAgo = frame.ts - 7 * 24 * HOUR;
-    const spent7d = buyLog.filter((b) => b.ts > weekAgo).reduce((s, b) => s + b.amountUsd, 0);
-    const weeklyRemaining = Math.max(0, strategy.dcaWeeklyBudgetPct * totalEquity - spent7d);
+    const weeklyRemaining = Math.max(0, strategy.dcaWeeklyBudgetPct * totalEquity - dcaSpent7d(frame.ts));
 
     const prevFrame = frames[fi - 24];
     const coinChanges = config.symbols.map((sym) => {

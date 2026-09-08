@@ -122,14 +122,20 @@ export async function activeDcaReservationsUsd(
 /**
  * Hátralévő heti keret quote-ban: `equity * dcaWeeklyBudgetPct − elköltött − foglalt`.
  * Sosem negatív. Lekérdezési hiba esetén konzervatívan 0 (mintha elfogyott volna).
+ *
+ * A `weeklyBudgetPct` a TÉNYLEGESEN futó stratégia paramétere (audit 5. pont). Enélkül a
+ * függvény mindig a globális `PROFIT_CYCLE.dcaWeeklyBudgetPct`-et használta, így egy 20%-os
+ * keretre konfigurált sáv (L2/L3) valójában 5%-kal futott: 320 USD equityn 16 USD keret a
+ * szándékolt 64 helyett. Az alapérték változatlan, hogy a régi hívók viselkedése ne mozduljon.
  */
 export async function remainingWeeklyBudget(
   totalEquity: Dec,
   scope: BudgetScope,
   nowMs: number = Date.now(),
   dbOverride?: Db | null,
+  weeklyBudgetPct: number = PROFIT_CYCLE.dcaWeeklyBudgetPct,
 ): Promise<Dec> {
-  const budget = mul(totalEquity, dec(PROFIT_CYCLE.dcaWeeklyBudgetPct));
+  const budget = mul(totalEquity, dec(weeklyBudgetPct));
   try {
     const spent = await spentThisWeekUsd(scope, nowMs, dbOverride);
     const reserved = await activeDcaReservationsUsd(scope, dbOverride);

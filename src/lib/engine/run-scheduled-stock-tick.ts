@@ -8,9 +8,11 @@ import {
   stockDecisionDue,
   STOCK_PORTFOLIO_ID,
   STOCK_QUOTE,
+  STOCK_STRATEGY,
   type StockCycleAction,
 } from "@/lib/engine/stock-tick";
-import { etParts, etDateKey } from "@/lib/markets/calendar";
+import { etParts, etDateKey, sessionOpenMs } from "@/lib/markets/calendar";
+import { resolveDayGate } from "@/lib/portfolio/day-equity";
 import {
   hasLedgerState,
   loadLedgerState,
@@ -52,6 +54,17 @@ export function persistWarning(
 ): string | null {
   if (outcome.applied) return null;
   return `nem könyvelt fill (${intentId}): ${outcome.reason ?? "ismeretlen ok"} — a DB nem mozdult`;
+}
+
+/**
+ * A nap végi zárás UTÁN nyitva maradt papírok figyelmeztetése (audit 3. pont).
+ *
+ * Miért nem elég a log: a zárás kimaradása éjszakai gap-kockázatot hagy bent. A hívó
+ * ebből állítja `ok: false`-ra a ciklust — a „lefutott" nem ugyanaz, mint a „lapos".
+ */
+export function unflattenedWarning(symbols: string[]): string | null {
+  if (symbols.length === 0) return null;
+  return `NYITVA MARADT kitettség a nap végi zárás után: ${symbols.join(", ")} — éjszakai gap-kockázat, kézi ellenőrzés kell`;
 }
 
 /** Napi lezárás után annyi bar, hogy a leghosszabb visszatekintés (momentum 48) is elférjen. */
@@ -149,6 +162,23 @@ export async function executeScheduledStockTick(
       instruments,
       candlesBySymbol,
       weeklyBudgetRemainingUsd: Number(cashOf(ledger, STOCK_QUOTE)) * 0.05,
+      // NAPI VESZTESÉGKAPU (audit 1. pont) — ülés-nap, közös sor az intraday sávval
+      // (ugyanaz a stock-paper pénztárca), a kriptótól elkülönítve.
+      resolveDayGate: async (equityUsd, nowMs) => {
+        const gate = await resolveDayGate(
+          scope.portfolioId,
+          scope.mode,
+          equityUsd,
+          dec(STOCK_STRATEGY.dailyLossCircuitBreakerPct),
+          nowMs,
+          undefined,
+          { dayKey: etDateKey(etParts(nowMs)), dayStartMs: sessionOpenMs(nowMs) },
+        );
+        if (gate.latched || gate.dayPnlPct === null) {
+          console.warn(`[stock-tick] napi kapu: ${gate.reason}`);
+        }
+        return { latched: gate.latched, baselineMissing: gate.dayPnlPct === null };
+      },
       reserve: async (intent, quote) => reserveBudget(intent, quote, cashOf(ledger, STOCK_QUOTE), undefined, fence),
       releaseReservation: async (intent) => {
         await releaseReservation(intent.intentId);
@@ -163,6 +193,7 @@ export async function executeScheduledStockTick(
           console.warn(`[stock-tick] ${warning}`);
           warnings.push(warning);
         }
+        return outcome;
       },
       persistStop: async (symbol, stopPrice) => {
         await persistStopPrice(scope, symbol, stopPrice);

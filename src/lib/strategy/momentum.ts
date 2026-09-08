@@ -4,6 +4,7 @@
  * (evaluatePosition + ratchetStop). Nincs DB / hálózat / Date.now.
  */
 import { sizeEntry } from "@/lib/strategy/sizing";
+import { rawRank, type MomentumRanker } from "@/lib/strategy/momentum-ranking";
 
 export interface MomentumSignal {
   shouldEnter: boolean;
@@ -14,7 +15,13 @@ export interface MomentumSignal {
 
 export interface MomentumContext {
   momentumOkBySymbol: Record<string, boolean>;
-  coinChanges: { symbol: string; change24hPct: number }[];
+  /**
+   * A jelöltek periódus-változása. Az `atrPct` (ATR az árhoz mérten) és a
+   * `benchmarkChangePct` (a piac ugyanezen periódusú elmozdulása) OPCIONÁLIS: a nyers
+   * rangsornak nem kell, a kockázat-korrigált és a relatív-erő rangsornak igen. A hívó
+   * tölti ki (részvény-ág); a kripto-út változatlanul csak a változást adja.
+   */
+  coinChanges: { symbol: string; change24hPct: number; atrPct?: number; benchmarkChangePct?: number }[];
   heldSymbols: string[];
   openPositionCount: number;
   totalEquity: number;
@@ -28,6 +35,11 @@ export interface MomentumParams {
   stopLossPct: number;
   stopMode: "fixed" | "atr";
   maxPositionPct: number;
+  /**
+   * Melyik jogosult papír nyer, ha több is kitörésben van. Alap: `rawRank` (a legnagyobb
+   * nyers változás) — pontosan a mai viselkedés. Lásd `momentum-ranking.ts`.
+   */
+  rankBy?: MomentumRanker;
 }
 
 /** Breakout a trend fölött: utolsó close > SMA ÉS = az utolsó `lookback` close maximuma. */
@@ -53,7 +65,17 @@ export function evaluateMomentum(ctx: MomentumContext, params: MomentumParams): 
   );
   if (eligible.length === 0) return none("Nincs jogosult momentum-coin.");
 
-  const pick = eligible.reduce((best, c) => (c.change24hPct > best.change24hPct ? c : best));
+  // A rangsor a KIVÁLASZTÁS (nem a jogosultság). A `-Infinity` pontszám azt jelenti,
+  // hogy a jelöltet ez a rangsor nem tudja megítélni (pl. hiányzó ATR) — ilyenkor NEM
+  // lépünk be vaktában, hanem a jelölt kiesik.
+  const rank = params.rankBy ?? rawRank;
+  const scored = eligible
+    .map((c) => ({ candidate: c, score: rank(c) }))
+    .filter((s) => Number.isFinite(s.score));
+  if (scored.length === 0) return none("Nincs rangsorolható momentum-jelölt.");
+
+  const best = scored.reduce((top, s) => (s.score > top.score ? s : top));
+  const pick = best.candidate;
   const amountUsd = sizeEntry(ctx.totalEquity, {
     riskPerTradePct: params.riskPerTradePct,
     stopLossPct: params.stopLossPct,

@@ -77,8 +77,22 @@ export interface ExecuteIntentDeps {
   reserve?: (intent: ExecutionIntent, quote: Dec) => Promise<boolean>;
   /** A foglalás elengedése, ha nem lett (teljes) fill. */
   releaseReservation?: (intent: ExecutionIntent) => Promise<void>;
-  /** A fill(ek) tartós könyvelése. Hiba esetén DOBNI kell — nem néma siker. */
-  persist?: (intent: ExecutionIntent, fill: Fill, deltas: SqlDeltas) => Promise<void>;
+  /**
+   * A fill(ek) TARTÓS könyvelése. Hiba esetén DOBNI kell — nem néma siker.
+   *
+   * A visszatérési érték a szerződés része (audit 7. pont): az SQL-út lejárt vagy
+   * érvénytelen lease esetén nem dob, hanem `{applied:false, reason:"fenced"}`-et ad. Ha
+   * ezt a hívó eldobja, a memóriabeli ledger tovább él egy DB-ben NEM KÖNYVELT kötéssel,
+   * és a ciklus tovább költene. Ezért a nem-alkalmazott eredmény MEGÁLLÍTJA a
+   * végrehajtást — kivéve a `duplicate_fill`-t, ami idempotens (a sor már bent van).
+   *
+   * A `void` visszatérés a régi (memóriában futó) hívókat hagyja változatlanul.
+   */
+  persist?: (
+    intent: ExecutionIntent,
+    fill: Fill,
+    deltas: SqlDeltas,
+  ) => Promise<{ applied: boolean; reason?: string } | void>;
   /** Az intent állapotának naplózása (beküldés, elutasítás, ismeretlen). */
   recordIntent?: (intent: ExecutionIntent, receipt: ExecutionReceipt | null) => Promise<void>;
 }
@@ -185,7 +199,15 @@ export async function executeIntent(
         intent.order.side === "BUY"
           ? withReservation(result.deltas!, intent.intentId, fill.grossQuoteAmount)
           : result.deltas!;
-      await deps.persist(intent, fill, deltas);
+      const outcome = await deps.persist(intent, fill, deltas);
+      // A DB nem könyvelt: a memóriabeli állapotot NEM vezetjük tovább, és a ciklus áll.
+      // A `duplicate_fill` a kivétel: ott a sor már bent van, tehát nincs eltérés.
+      if (outcome && outcome.applied === false && outcome.reason !== "duplicate_fill") {
+        throw new Error(
+          `[execute-intent] a tartós könyvelés elutasítva (${outcome.reason ?? "ismeretlen ok"}) — ` +
+            `a ciklus megáll, állapot-egyeztetés kell: ${intent.intentId}`,
+        );
+      }
     }
     ledger = result.state;
     booked.push(fill);

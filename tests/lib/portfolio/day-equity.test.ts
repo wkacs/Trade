@@ -147,3 +147,61 @@ describe("day-equity — az indulás óta mért hozam KÜLÖN mutató", () => {
     expect(sinceInceptionPnlPct("100", "0")).toBeNull();
   });
 });
+
+// ── Saját nap-definíció (a részvény-sáv ülés-napja, nem UTC nap) ─────────────────
+
+describe("evaluateDayGate – injektált nap-definíció", () => {
+  const THRESHOLD = "0.03";
+  // 2026-02-02 09:35 ET — 5 perccel az ülés nyitása (14:30Z) után, de 14,5 órával
+  // az UTC éjfél után.
+  const NOW = Date.parse("2026-02-02T14:35:00Z");
+  const SESSION_OPEN = Date.parse("2026-02-02T14:30:00Z");
+
+  it("UTC nap szerint ez már RÉSZNAPOS referencia", () => {
+    const res = evaluateDayGate({ nowMs: NOW, row: null, currentEquity: "10000", thresholdPct: THRESHOLD });
+    expect(res.row.source).toBe("partial-day");
+  });
+
+  it("ülés-nyitáshoz mérve viszont hiteles NAPNYITÁS", () => {
+    const res = evaluateDayGate({
+      nowMs: NOW,
+      row: null,
+      currentEquity: "10000",
+      thresholdPct: THRESHOLD,
+      dayStartMs: SESSION_OPEN,
+    });
+    expect(res.row.source).toBe("day-open");
+  });
+
+  it("a megadott nap-kulcsot használja a sor azonosításához", () => {
+    const res = evaluateDayGate({
+      nowMs: NOW,
+      row: null,
+      currentEquity: "10000",
+      thresholdPct: THRESHOLD,
+      dayKey: "2026-02-02-et",
+    });
+    expect(res.dayUtc).toBe("2026-02-02-et");
+    expect(res.row.dayUtc).toBe("2026-02-02-et");
+  });
+
+  it("a saját kulcsú mai sorral tovább számol (nem vesz fel új baseline-t)", () => {
+    const row = {
+      dayUtc: "2026-02-02-et",
+      baselineEquity: "10000",
+      cashFlowQuote: "0",
+      source: "day-open" as const,
+      lossLatched: false,
+      latchedAt: null,
+    };
+    const res = evaluateDayGate({
+      nowMs: NOW,
+      row,
+      currentEquity: "9600", // −4% → küszöb alatt
+      thresholdPct: THRESHOLD,
+      dayKey: "2026-02-02-et",
+    });
+    expect(res.latched).toBe(true);
+    expect(res.blockNewBuys).toBe(true);
+  });
+});

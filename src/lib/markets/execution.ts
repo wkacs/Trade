@@ -53,6 +53,29 @@ export function stockSymbolFilters(
   };
 }
 
+/**
+ * ZÁRÁSI szűrők — egy MÁR MEGLÉVŐ pozíció eladásához (audit 3. pont).
+ *
+ * Miért külön a belépőtől: a `stockSymbolFilters` konzervatív egész-lot szabálya egy ÚJ
+ * kockázat felvételére való. Egy már birtokolt készletre alkalmazva viszont csapda: egy
+ * 1,5 darabos pozícióból csak 1 darabot engedne eladni, a maradék 0,5 pedig bent ragadna
+ * éjszakára — pontosan az a kitettség, amit a nap végi zárás megszüntetni hivatott. Egy
+ * 0,5 darabos pozíció így egyáltalán nem lenne zárható.
+ *
+ * Ezért a zárás a készlet TÉNYLEGES mennyiségét követi: apró lépésköz, és nincs minimális
+ * kötésérték (egy 20 centes maradékot is le kell tudni zárni). Ez NEM lazítás: eladásról
+ * van szó, ami csökkenti a kitettséget, és amit a risk-manager SELL-ága sosem tilt.
+ */
+export function stockClosingFilters(symbol: string, quote: string, nowMs: number): SymbolFilters {
+  return {
+    ...stockSymbolFilters(symbol, quote, nowMs, { fractional: true }),
+    stepSize: "0.000000001",
+    minQty: "0.000000001",
+    minNotional: "0",
+    applyMinToMarket: false,
+  };
+}
+
 /** Az eszközosztály paper-fill költségparaméterei (szűrők nélkül). */
 export function fillParamsForClass(assetClass: AssetClass): PaperFillParams {
   if (assetClass === "stock") {

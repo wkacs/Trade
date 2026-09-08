@@ -101,6 +101,14 @@ gyorsítanak vagy profitot hoznak-e. A válasz **mérve**, nem elvben:
 | **Gyorsjelentés-tiltás (Finnhub)** | +0,81% vs +1,08% tiltás nélkül, ugyanannyi trade | **env-kapcsolóra** (`STOCK_EARNINGS_BLACKOUT=1`), alapból KI |
 | **Hír/szentiment (Alpha Vantage)** | nem mértük; ingyenes szint napi 25 hívás | **nincs használatban** |
 
+
+**Utómérés (ugyanaznap, `docs/2026-09-08-momentum-rangsor.md`):** a szélesség bukását
+megvizsgáltuk KIVÁLASZTÁSI hibaként is — a nyers százalék-maximum széles univerzumon
+mindig a legvolatilisebb nevet hozza. A kockázat-korrigált rangsor (`change% / ATR%`)
+mérve NEM javított: az éles belépő-alakkal mindkét univerzumon rosszabb a nyersnél, és a
+30 papíros sorok az első félidőben mind negatívak (`t ≈ 0,9`). A szélesség marad
+elutasítva, az alapértelmezett rangsor marad `raw`.
+
 Ezen felül bekerült egy **adat-integritás kapu** (`detectPriceAnomaly`): ha két egymást
 követő gyertya záróára között hihetetlen ugrás van (intraday >20%, napi >45%), az egész
 sorozat gyanús → az instrumentum kimarad a ciklusból. A korábbi „split = hamis −75%"

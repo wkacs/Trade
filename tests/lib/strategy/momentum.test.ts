@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { passesMomentum, evaluateMomentum } from "@/lib/strategy/momentum";
+import { riskAdjustedRank } from "@/lib/strategy/momentum-ranking";
 
 describe("passesMomentum", () => {
   it("breakout trend fölött → true", () => {
@@ -55,5 +56,59 @@ describe("evaluateMomentum", () => {
       params,
     );
     expect(sig.shouldEnter).toBe(false);
+  });
+});
+
+// ── Cserélhető rangsor (a szélesebb univerzum kiválasztási kérdése) ──────────────
+
+describe("evaluateMomentum – cserélhető rangsor", () => {
+  const ctx = {
+    momentumOkBySymbol: { AAPL: true, COIN: true },
+    coinChanges: [
+      { symbol: "AAPL", change24hPct: 3, atrPct: 1 },
+      { symbol: "COIN", change24hPct: 6, atrPct: 8 },
+    ],
+    heldSymbols: [],
+    openPositionCount: 0,
+    totalEquity: 1000,
+  };
+
+  it("rangsor nélkül a nyers százalék-maximum nyer (változatlan viselkedés)", () => {
+    expect(evaluateMomentum(ctx, params).symbol).toBe("COIN");
+  });
+
+  it("kockázat-korrigált rangsorral a nyugodtabb papír nyer", () => {
+    const sig = evaluateMomentum(ctx, { ...params, rankBy: riskAdjustedRank });
+    expect(sig.shouldEnter).toBe(true);
+    expect(sig.symbol).toBe("AAPL");
+  });
+
+  it("ha EGYIK jelölt sem rangsorolható, NINCS belépő (nem választ vaktában)", () => {
+    const sig = evaluateMomentum(
+      {
+        ...ctx,
+        coinChanges: [
+          { symbol: "AAPL", change24hPct: 3 },
+          { symbol: "COIN", change24hPct: 6 },
+        ],
+      },
+      { ...params, rankBy: riskAdjustedRank },
+    );
+    expect(sig.shouldEnter).toBe(false);
+    expect(sig.symbol).toBeNull();
+  });
+
+  it("a rangsorolhatatlan jelölt kiesik, a rangsorolható marad", () => {
+    const sig = evaluateMomentum(
+      {
+        ...ctx,
+        coinChanges: [
+          { symbol: "AAPL", change24hPct: 3 },
+          { symbol: "COIN", change24hPct: 6, atrPct: 8 },
+        ],
+      },
+      { ...params, rankBy: riskAdjustedRank },
+    );
+    expect(sig.symbol).toBe("COIN");
   });
 });

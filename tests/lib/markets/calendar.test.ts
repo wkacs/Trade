@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   etParts,
+  sessionOpenMs,
   isUsTradingDay,
   usEquitySession,
   marketSession,
@@ -90,5 +91,22 @@ describe("markets/calendar – korai zárású (fél-napos) ülések", () => {
   it("a nyitás 09:30 marad fél-napon is", () => {
     expect(minutesFromSessionOpen(halfDay(10, 0))).toBe(30);
     expect(minutesFromSessionOpen(halfDay(14, 0))).toBeNull();
+  });
+});
+
+describe("sessionOpenMs", () => {
+  it("az aznapi 09:30 ET-t adja vissza (téli időszámítás)", () => {
+    const midSession = Date.parse("2026-02-02T15:47:30Z"); // 10:47 ET
+    expect(new Date(sessionOpenMs(midSession)).toISOString()).toBe("2026-02-02T14:30:00.000Z");
+  });
+
+  it("nyári időszámításban is a 09:30 ET-t adja (más UTC-eltolás)", () => {
+    const midSession = Date.parse("2026-06-02T16:00:00Z"); // 12:00 ET (EDT)
+    expect(new Date(sessionOpenMs(midSession)).toISOString()).toBe("2026-06-02T13:30:00.000Z");
+  });
+
+  it("nyitás előtt is az aznapi nyitást adja (a jövőben)", () => {
+    const preMarket = Date.parse("2026-02-02T14:00:00Z"); // 09:00 ET
+    expect(sessionOpenMs(preMarket)).toBe(Date.parse("2026-02-02T14:30:00Z"));
   });
 });

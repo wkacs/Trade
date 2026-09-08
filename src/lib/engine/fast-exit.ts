@@ -248,9 +248,9 @@ export async function runFastExit(input: FastExitInput): Promise<FastExitResult>
       },
       now,
       newIntentId: () => `${input.cycleId}-${exit.kind}-${++seq}`,
-      persist: async (intent, fill, deltas) => {
-        await deps.persistFill(intent, fill, input.fence ? { ...deltas, fence: input.fence } : deltas);
-      },
+      persist: async (intent, fill, deltas) =>
+        // Az eredmény a szerződés része (audit 7. pont): elutasított könyvelés megállít.
+        deps.persistFill(intent, fill, input.fence ? { ...deltas, fence: input.fence } : deltas),
     };
 
     const outcome = await executeIntent(

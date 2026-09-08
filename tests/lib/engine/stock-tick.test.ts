@@ -16,6 +16,7 @@ import { etParts, etDateKey, isUsTradingDay } from "@/lib/markets/calendar";
 import { emptyLedger, type LedgerState } from "@/lib/portfolio/ledger";
 import { findInstrument } from "@/lib/markets/registry";
 import { DEFAULT_STRATEGY } from "@/lib/strategy/config";
+import { riskAdjustedRank } from "@/lib/strategy/momentum-ranking";
 import type { OhlcvCandle } from "@/lib/market/candles";
 
 const AAPL = findInstrument("AAPL")!;
@@ -225,36 +226,6 @@ describe("engine/stock-tick – toSignalCandles (naptár-rács)", () => {
 });
 
 // ── A részvény-sáv belépő útja (a DEFAULT_STRATEGY-vel nem lenne egy sem) ────────
-/**
- * Emelkedő napi sor VALÓDI kereskedési napokon (hétvége/ünnep kihagyva) — a naptár-rács
- * csak így ad hézagmentes tailt, és a valós Yahoo-adat is pontosan így néz ki.
- */
-function risingTradingDays(count: number, startDateKey: string): OhlcvCandle[] {
-  const out: OhlcvCandle[] = [];
-  let ms = Date.parse(`${startDateKey}T17:00:00Z`);
-  while (out.length < count) {
-    if (isUsTradingDay(ms)) {
-      const key = etDateKey(etParts(ms));
-      const c = 100 + out.length;
-      out.push({
-        symbol: "AAPL",
-        timeframe: "1d",
-        openTime: Date.parse(`${key}T14:30:00Z`),
-        closeTime: Date.parse(`${key}T21:00:00Z`),
-        open: c,
-        high: c + 1,
-        low: c - 1,
-        close: c,
-        baseVolume: 1000,
-        quoteVolume: 1000 * c,
-        trades: 0,
-        receivedAt: Date.parse(`${key}T21:00:00Z`),
-      });
-    }
-    ms += 24 * 60 * 60 * 1000;
-  }
-  return out;
-}
 describe("engine/stock-tick – STOCK_STRATEGY", () => {
   it("a momentum-belépő BE van kapcsolva, a tétel 10% (egész részvény miatt)", () => {
     expect(STOCK_STRATEGY.momentumEnabled).toBe(true);
@@ -267,7 +238,7 @@ describe("engine/stock-tick – STOCK_STRATEGY", () => {
 
   it("breakout-soron VESZ (a DEFAULT_STRATEGY ugyanezen a soron nem venne)", async () => {
     // 60 emelkedő ÜLÉS → az utolsó close a 48-as ablak maximuma ÉS az SMA fölött.
-    const candles = risingTradingDays(60, "2025-11-03");
+    const candles = risingTradingDaysEnding(60, "2026-02-02");
     const base = {
       candlesBySymbol: { AAPL: candles },
       positions: [],
@@ -291,7 +262,7 @@ describe("engine/stock-tick – STOCK_STRATEGY", () => {
       now: () => NOW,
       ledger,
       instruments: [AAPL],
-      candlesBySymbol: { AAPL: risingTradingDays(60, "2025-11-03") },
+      candlesBySymbol: { AAPL: risingTradingDaysEnding(60, "2026-02-02") },
       weeklyBudgetRemainingUsd: 500,
     });
     const buy = res.actions.find((a) => a.kind === "momentum");
@@ -409,7 +380,7 @@ describe("engine/stock-tick – nap végi laposra zárás", () => {
   });
 
   it("no-new-entries fázisban breakout-soron sem VESZ", async () => {
-    const bars = risingTradingDays(60, "2025-11-03");
+    const bars = risingTradingDaysEnding(60, "2026-02-02");
     const res = await runStockCycle({
       tickId: "cutoff",
       now: () => NOW,
@@ -423,7 +394,7 @@ describe("engine/stock-tick – nap végi laposra zárás", () => {
 });
 
 describe("engine/stock-tick – belépő-tiltás és tört lot", () => {
-  const bars = () => risingTradingDays(60, "2025-11-03");
+  const bars = () => risingTradingDaysEnding(60, "2026-02-02");
 
   it("a tiltott papírba NEM lép be, de a meglévő pozíciót kezeli", async () => {
     const res = await runStockCycle({
@@ -490,5 +461,335 @@ describe("intradayPhaseAt – korai zárású (fél-napos) ülés", () => {
 
   it("13:30-kor már zárva (korábban 16:00-ig kereskedett volna)", () => {
     expect(intradayPhaseAt(half(13, 30))).toMatchObject({ due: false, phase: "closed" });
+  });
+});
+
+// ── Momentum-rangsor a döntés-agyban (a szélesség kiválasztási kérdése) ──────────
+/**
+ * Emelkedő sor VALÓDI kereskedési napokon, állítható gyertya-szélességgel (ez adja az
+ * ATR-t) és opcionális záró-ugrással (ez adja a nyers periódus-változást).
+ */
+function volSeries(
+  symbol: string,
+  count: number,
+  startDateKey: string,
+  opts: { halfRange: number; lastClose?: number },
+): OhlcvCandle[] {
+  const out: OhlcvCandle[] = [];
+  let ms = Date.parse(`${startDateKey}T17:00:00Z`);
+  while (out.length < count) {
+    if (isUsTradingDay(ms)) {
+      const key = etDateKey(etParts(ms));
+      const isLast = out.length === count - 1;
+      const c = isLast && opts.lastClose !== undefined ? opts.lastClose : 100 + out.length;
+      out.push({
+        symbol,
+        timeframe: "1d",
+        openTime: Date.parse(`${key}T14:30:00Z`),
+        closeTime: Date.parse(`${key}T21:00:00Z`),
+        open: c,
+        high: c + opts.halfRange,
+        low: c - opts.halfRange,
+        close: c,
+        baseVolume: 1000,
+        quoteVolume: 1000 * c,
+        trades: 0,
+        receivedAt: Date.parse(`${key}T21:00:00Z`),
+      });
+    }
+    ms += 24 * 60 * 60 * 1000;
+  }
+  return out;
+}
+
+describe("engine/stock-tick – momentum-rangsor", () => {
+  // CALM: apró gyertyák, apró záró-lépés. WILD: széles gyertyák, nagy záró-ugrás.
+  const base = {
+    candlesBySymbol: {
+      CALM: volSeries("CALM", 60, "2025-11-03", { halfRange: 0.25, lastClose: 162 }),
+      WILD: volSeries("WILD", 60, "2025-11-03", { halfRange: 5, lastClose: 168 }),
+    },
+    positions: [],
+    totalEquityUsd: 10000,
+    weeklyBudgetRemainingUsd: 500,
+  };
+
+  it("mindkét papír kitörésben van (a rangsor dönt, nem a jogosultság)", () => {
+    const { signals } = planStockCycle(base);
+    expect(signals.CALM.momentumOk).toBe(true);
+    expect(signals.WILD.momentumOk).toBe(true);
+  });
+
+  it("alap rangsorral a nagyobb nyers ugrás nyer (a volatilisebb papír)", () => {
+    const { plan } = planStockCycle(base);
+    const buy = plan.orders.find((o) => o.kind === "momentum");
+    expect(buy?.symbol).toBe("WILD");
+  });
+
+  it("kockázat-korrigált rangsorral a nyugodtabb papír nyer", () => {
+    const { plan } = planStockCycle({ ...base, momentumRanking: riskAdjustedRank });
+    const buy = plan.orders.find((o) => o.kind === "momentum");
+    expect(buy?.symbol).toBe("CALM");
+  });
+
+  it("a rangsor az ATR-t az ÁRHOZ mérten kapja (a drágább papír nem kap előnyt)", () => {
+    // Ugyanaz az alak tízszeres árszinten: az arányok, tehát a sorrend sem változhat.
+    const scaled = {
+      ...base,
+      candlesBySymbol: {
+        CALM: base.candlesBySymbol.CALM.map((c) => ({ ...c, open: c.open * 10, high: c.high * 10, low: c.low * 10, close: c.close * 10 })),
+        WILD: base.candlesBySymbol.WILD.map((c) => ({ ...c, open: c.open * 10, high: c.high * 10, low: c.low * 10, close: c.close * 10 })),
+      },
+    };
+    const { plan } = planStockCycle({ ...scaled, momentumRanking: riskAdjustedRank });
+    expect(plan.orders.find((o) => o.kind === "momentum")?.symbol).toBe("CALM");
+  });
+});
+
+// ── Napi veszteségkapu a részvény-sávon (audit 1. pont) ─────────────────────────
+
+describe("engine/stock-tick – napi veszteségkapu", () => {
+  const breakout = { AAPL: risingTradingDaysEnding(60, "2026-02-02") };
+
+  it("kapu nélkül (mai állapot) a breakout VESZ — ez a kontroll", async () => {
+    const res = await runStockCycle({
+      tickId: "gate-control",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: breakout,
+      weeklyBudgetRemainingUsd: 500,
+    });
+    expect(res.actions.find((a) => a.kind === "momentum")).toBeDefined();
+  });
+
+  it("latch-elt napi veszteség mellett NINCS új belépő", async () => {
+    const res = await runStockCycle({
+      tickId: "gate-latched",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: breakout,
+      weeklyBudgetRemainingUsd: 500,
+      resolveDayGate: () => ({ latched: true, baselineMissing: false }),
+    });
+    expect(res.actions.find((a) => a.kind === "momentum")).toBeUndefined();
+  });
+
+  it("hiányzó napkezdő referencia mellett sincs új belépő", async () => {
+    const res = await runStockCycle({
+      tickId: "gate-missing",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: breakout,
+      weeklyBudgetRemainingUsd: 500,
+      resolveDayGate: () => ({ latched: false, baselineMissing: true }),
+    });
+    expect(res.actions.find((a) => a.kind === "momentum")).toBeUndefined();
+  });
+
+  it("a kapu a VÉDELMI kilépést nem blokkolja: a nap végi zárás latch mellett is lefut", async () => {
+    const res = await runStockCycle({
+      tickId: "gate-flatten",
+      now: () => NOW,
+      ledger: ledgerWithPosition("3", "290", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: daily([{ o: 100, h: 101, l: 99, c: 100 }]) },
+      phase: "flatten",
+      resolveDayGate: () => ({ latched: true, baselineMissing: true }),
+    });
+    expect(res.actions.find((a) => a.kind === "eod-flat")).toBeDefined();
+    expect(res.ledger.positions.AAPL).toBeUndefined();
+  });
+
+  it("a kapu az AKTUÁLIS equityt kapja meg (a döntés előtti állapotot)", async () => {
+    let seen: number | null = null;
+    await runStockCycle({
+      tickId: "gate-equity",
+      now: () => NOW,
+      ledger: ledgerWithPosition("3", "290", "80"), // 10 000 készpénz + 3 × 100 USD
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: daily([{ o: 100, h: 101, l: 99, c: 100 }]) },
+      resolveDayGate: (equityUsd) => {
+        seen = Number(equityUsd);
+        return { latched: false, baselineMissing: false };
+      },
+    });
+    expect(seen).toBe(10300);
+  });
+});
+
+// ── Zárhatóság: a nap végi zárás nem függhet a BELÉPŐ metaadat-kapujától (audit 3.) ──
+
+describe("engine/stock-tick – a zárás mindig a teljes készletet zárja", () => {
+  const flatCandles = { AAPL: daily([{ o: 100, h: 101, l: 99, c: 100 }]) };
+
+  it("TÖRT pozíciót is teljesen zár, akkor is, ha a tört-belépő kapu ZÁRVA van", async () => {
+    const res = await runStockCycle({
+      tickId: "flat-fraction",
+      now: () => NOW,
+      ledger: ledgerWithPosition("1.5", "150", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: flatCandles,
+      phase: "flatten",
+      fractional: false, // az Alpaca metaadat nem igazolta vissza → új belépő egész lot
+    });
+    const flat = res.actions.find((a) => a.kind === "eod-flat");
+    expect(flat?.qty).toBe(1.5);
+    expect(res.ledger.positions.AAPL).toBeUndefined();
+    expect(res.unflattened).toEqual([]);
+  });
+
+  it("egy darab alatti pozíciót is zár (ez korábban egyáltalán nem volt zárható)", async () => {
+    const res = await runStockCycle({
+      tickId: "flat-small",
+      now: () => NOW,
+      ledger: ledgerWithPosition("0.5", "50", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: flatCandles,
+      phase: "flatten",
+      fractional: false,
+    });
+    expect(res.actions.find((a) => a.kind === "eod-flat")?.qty).toBe(0.5);
+    expect(res.ledger.positions.AAPL).toBeUndefined();
+  });
+
+  it("a BELÉPŐ viszont marad egész lot, ha a metaadat nem igazolta a törtet", async () => {
+    const res = await runStockCycle({
+      tickId: "entry-whole",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: risingTradingDaysEnding(60, "2026-02-02") },
+      weeklyBudgetRemainingUsd: 500,
+      fractional: false,
+    });
+    const buy = res.actions.find((a) => a.kind === "momentum");
+    expect(buy).toBeDefined();
+    expect(Number.isInteger(buy!.qty)).toBe(true);
+  });
+
+  it("adathiány miatt NYITVA maradt pozíciót megnevezve jelenti (nem néma siker)", async () => {
+    const res = await runStockCycle({
+      tickId: "flat-nodata",
+      now: () => NOW,
+      ledger: ledgerWithPosition("2", "200", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: {}, // nincs gyertya egyetlen papírra sem
+      phase: "flatten",
+    });
+    expect(res.actions.find((a) => a.kind === "eod-flat")).toBeUndefined();
+    expect(res.unflattened).toEqual(["AAPL"]);
+    expect(res.ledger.positions.AAPL).toBeDefined();
+  });
+});
+
+// ── Adat-frissesség kapu (audit 2. pont, rész) ──────────────────────────────────
+
+/** Emelkedő sor, ami a megadott ET-napon ÉR VÉGET (a „ma lezárult bar" esete). */
+function risingTradingDaysEnding(count: number, endDateKey: string): OhlcvCandle[] {
+  const days: string[] = [];
+  let ms = Date.parse(`${endDateKey}T17:00:00Z`);
+  while (days.length < count) {
+    if (isUsTradingDay(ms)) days.unshift(etDateKey(etParts(ms)));
+    ms -= 24 * 60 * 60 * 1000;
+  }
+  return days.map((key, i) => {
+    const c = 100 + i;
+    return {
+      symbol: "AAPL",
+      timeframe: "1d" as const,
+      openTime: Date.parse(`${key}T14:30:00Z`),
+      closeTime: Date.parse(`${key}T21:00:00Z`),
+      open: c,
+      high: c + 1,
+      low: c - 1,
+      close: c,
+      baseVolume: 1000,
+      quoteVolume: 1000 * c,
+      trades: 0,
+      receivedAt: Date.parse(`${key}T21:00:00Z`),
+    };
+  });
+}
+
+describe("engine/stock-tick – elavult gyertyából nincs ÚJ belépő", () => {
+  const fresh = risingTradingDaysEnding(60, "2026-02-02"); // a mai ülés lezárt bara
+
+  it("friss adaton a breakout VESZ — ez a kontroll", async () => {
+    const res = await runStockCycle({
+      tickId: "fresh",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: fresh },
+      weeklyBudgetRemainingUsd: 500,
+    });
+    expect(res.actions.find((a) => a.kind === "momentum")).toBeDefined();
+    expect(res.staleSymbols).toEqual([]);
+  });
+
+  it("ELAVULT sorozatból nincs belépő, és a papír megnevezve látszik", async () => {
+    const res = await runStockCycle({
+      tickId: "stale",
+      now: () => NOW + 5 * 24 * 60 * 60 * 1000, // 5 nappal az utolsó bar után
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: fresh },
+      weeklyBudgetRemainingUsd: 500,
+    });
+    expect(res.actions.find((a) => a.kind === "momentum")).toBeUndefined();
+    expect(res.staleSymbols).toEqual(["AAPL"]);
+  });
+
+  it("elavult adat mellett a VÉDELMI kilépés megmarad (a zárás nem tiltott)", async () => {
+    const res = await runStockCycle({
+      tickId: "stale-flat",
+      now: () => NOW + 5 * 24 * 60 * 60 * 1000,
+      ledger: ledgerWithPosition("3", "290", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: fresh },
+      phase: "flatten",
+    });
+    const closing = res.actions.find((a) => a.side === "SELL");
+    expect(closing).toBeDefined();
+    expect(res.ledger.positions.AAPL).toBeUndefined();
+    expect(res.unflattened).toEqual([]);
+  });
+
+  it("a küszöb felülírható (a backteszt és a demó saját idővonalon fut)", async () => {
+    const res = await runStockCycle({
+      tickId: "stale-override",
+      now: () => NOW + 5 * 24 * 60 * 60 * 1000,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: fresh },
+      weeklyBudgetRemainingUsd: 500,
+      maxBarAgeMs: 10 * 24 * 60 * 60 * 1000,
+    });
+    expect(res.actions.find((a) => a.kind === "momentum")).toBeDefined();
+  });
+});
+
+describe("engine/stock-tick – végrehajtási ár felülírás (mérés)", () => {
+  const fresh = risingTradingDaysEnding(60, "2026-02-02");
+
+  it("a JEL a lezárt gyertyából jön, a FILL a megadott végrehajtási árból", async () => {
+    const res = await runStockCycle({
+      tickId: "exec-px",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: fresh },
+      weeklyBudgetRemainingUsd: 500,
+      // A jel a 159-es záróból született; a következő elérhető ár viszont 200.
+      executionPrices: { AAPL: "200" },
+    });
+    const buy = res.actions.find((a) => a.kind === "momentum");
+    expect(buy).toBeDefined();
+    // 10% tétel = 1000 USD. A 159-es záróból 6 darab jönne; a 200-as végrehajtási áron
+    // spreaddel/slippage-dzsel együtt 1000/200,2 = 4,99 → 4 egész darab.
+    expect(buy!.qty).toBe(4);
   });
 });

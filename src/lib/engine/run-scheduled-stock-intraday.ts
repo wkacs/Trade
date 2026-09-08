@@ -29,11 +29,13 @@ import {
   type LedgerScope,
 } from "@/lib/execution/order-store";
 import { acquireLease, releaseLease, newOwnerId, slotId, type Lease } from "@/lib/engine/run-lease";
-import { persistWarning } from "@/lib/engine/run-scheduled-stock-tick";
-import { etParts, etDateKey } from "@/lib/markets/calendar";
+import { persistWarning, unflattenedWarning } from "@/lib/engine/run-scheduled-stock-tick";
+import { etParts, etDateKey, sessionOpenMs } from "@/lib/markets/calendar";
+import { resolveDayGate } from "@/lib/portfolio/day-equity";
 import { allFractionable } from "@/lib/markets/alpaca";
 import { symbolsWithEarningsOn } from "@/lib/markets/earnings";
 import { resolveEntryShape } from "@/lib/strategy/intraday-entries";
+import { resolveMomentumRanking } from "@/lib/strategy/momentum-ranking";
 
 /**
  * DAY TRADING részvény-ciklus — 5 percenként, az amerikai ülés alatt.
@@ -65,6 +67,15 @@ export interface ScheduledStockIntradayResult {
   entryBlocked?: string[];
   /** A használt belépő-alak neve (`built-in`, ha a beépített kitörés-jel dönt). */
   entryShape?: string;
+  /** A használt momentum-rangsor neve (`raw`, ha a nyers százalék-maximum dönt). */
+  momentumRanking?: string;
+  /**
+   * A nap végi zárás után NYITVA maradt papírok. Jelenléte incidens: a ciklus ilyenkor
+   * `ok: false`, mert éjszakai kitettség maradt (audit 3. pont).
+   */
+  unflattened?: string[];
+  /** Papírok elavult gyertyasorral — ezekbe a ciklus nem nyitott új pozíciót (audit 2.). */
+  staleSymbols?: string[];
   /** Nem végzetes, de NEM elhallgatható figyelmeztetések (pl. duplikált fill). */
   warnings?: string[];
   lease?: { key: string; owner: string; fencingToken: number };
@@ -196,6 +207,18 @@ export async function executeScheduledStockIntraday(
       warnings.push(warning);
     }
 
+    // Cserélhető MOMENTUM-RANGSOR: több jogosult papír közül melyik nyer. Alapból nincs
+    // beállítva → a nyers százalék-maximum dönt (mai viselkedés). A széles univerzumon ez
+    // dönti el, hogy a kitörést vagy a legnagyobb zajt vásároljuk; a névtár a
+    // src/lib/strategy/momentum-ranking.ts-ben van.
+    const rankingName = (process.env.STOCK_MOMENTUM_RANKING ?? "").trim();
+    const momentumRanking = resolveMomentumRanking(rankingName) ?? undefined;
+    if (rankingName !== "" && !momentumRanking) {
+      const warning = `ismeretlen STOCK_MOMENTUM_RANKING: "${rankingName}" — a nyers rangsor marad`;
+      console.warn(`[stock-intraday] ${warning}`);
+      warnings.push(warning);
+    }
+
     const result = await runStockCycle({
       tickId: slot,
       now,
@@ -207,6 +230,26 @@ export async function executeScheduledStockIntraday(
       fractional,
       entryBlocked,
       entryShape,
+      momentumRanking,
+      // NAPI VESZTESÉGKAPU (audit 1. pont). A nap itt a tőzsdei ÜLÉS napja (ET), a
+      // referencia-pont az aznapi 09:30 ET nyitás — nem az UTC éjfél. A sor a
+      // stock-paper hatókörben él, tehát a kripto napi kapujától elkülönül.
+      resolveDayGate: async (equityUsd, nowMs) => {
+        const gate = await resolveDayGate(
+          scope.portfolioId,
+          scope.mode,
+          equityUsd,
+          dec(STOCK_INTRADAY_STRATEGY.dailyLossCircuitBreakerPct),
+          nowMs,
+          undefined,
+          { dayKey: etDateKey(etParts(nowMs)), dayStartMs: sessionOpenMs(nowMs) },
+        );
+        if (gate.latched || gate.dayPnlPct === null) {
+          console.warn(`[stock-intraday] napi kapu: ${gate.reason}`);
+          warnings.push(`napi kapu: ${gate.reason}`);
+        }
+        return { latched: gate.latched, baselineMissing: gate.dayPnlPct === null };
+      },
       strategy: STOCK_INTRADAY_STRATEGY,
       strategyVersion: STOCK_INTRADAY_STRATEGY_VERSION,
       weeklyBudgetRemainingUsd: Number(cashOf(ledger, STOCK_QUOTE)) * 0.05,
@@ -224,6 +267,7 @@ export async function executeScheduledStockIntraday(
           console.warn(`[stock-intraday] ${warning}`);
           warnings.push(warning);
         }
+        return outcome;
       },
       persistStop: async (symbol, stopPrice) => {
         await persistStopPrice(scope, symbol, stopPrice);
@@ -234,14 +278,33 @@ export async function executeScheduledStockIntraday(
     if (result.actions.length > 0) {
       console.log(`[stock-intraday] ${slot} (${phase}): ${result.actions.length} akció`);
     }
+
+    if (result.staleSymbols.length > 0) {
+      const warning = `elavult gyertyasor, nincs új belépő: ${result.staleSymbols.join(", ")}`;
+      console.warn(`[stock-intraday] ${warning}`);
+      warnings.push(warning);
+    }
+
+    // A zárás EREDMÉNYE dönt, nem a szándéka: ami nyitva maradt, az incidens.
+    const flattenWarning = unflattenedWarning(result.unflattened);
+    if (flattenWarning) {
+      console.error(`[stock-intraday] ${flattenWarning}`);
+      warnings.push(flattenWarning);
+    }
+
     return {
-      ok: true,
+      ok: flattenWarning === null,
+      ...(result.unflattened.length > 0
+        ? { unflattened: result.unflattened, reason: "flatten_incomplete" }
+        : {}),
+      ...(result.staleSymbols.length > 0 ? { staleSymbols: result.staleSymbols } : {}),
       slot,
       phase,
       actions: result.actions,
       seeded,
       fractional,
       entryShape: entryShape ? shapeName : "built-in",
+      momentumRanking: momentumRanking ? rankingName : "raw",
       ...(entryBlocked.size > 0 ? { entryBlocked: [...entryBlocked] } : {}),
       lease: leaseInfo,
       ...(warnings.length > 0 ? { warnings } : {}),

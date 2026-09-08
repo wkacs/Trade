@@ -278,3 +278,41 @@ describe("executeIntent — tranzakciós perzisztencia (T09)", () => {
     expect(receipt).toBeNull();
   });
 });
+
+// ── A TARTÓS könyvelés eredménye az execution szerződés része (audit 7.) ─────────
+
+describe("executeIntent — elutasított tartós könyvelés", () => {
+  it("fencing-elutasítás MEGÁLLÍTJA a végrehajtást (nincs hamis siker)", async () => {
+    const h = harness("100");
+    h.deps.persist = async () => ({ applied: false, reason: "fenced" });
+    await expect(
+      h.run({ side: "BUY", symbol: "BTC", desiredQuote: "10", origin: "ai", referencePrice: "60000" }),
+    ).rejects.toThrow(/fenced/);
+  });
+
+  it("a memóriabeli ledger sem költ tovább egy elutasított könyvelés után", async () => {
+    const h = harness("100");
+    h.deps.persist = async () => ({ applied: false, reason: "fenced" });
+    await h
+      .run({ side: "BUY", symbol: "BTC", desiredQuote: "10", origin: "ai", referencePrice: "60000" })
+      .catch(() => undefined);
+    // A hívó ledgere érintetlen: a dobás előtt nem vezettük tovább az állapotot.
+    expect(Number(cashOf(h.ledger, "USDT"))).toBe(100);
+    expect(Number(positionQty(h.ledger, "BTC"))).toBe(0);
+  });
+
+  it("duplikátum: idempotens ág, nem hiba (a DB már könyvelte)", async () => {
+    const h = harness("100");
+    h.deps.persist = async () => ({ applied: false, reason: "duplicate_fill" });
+    const r = await h.run({ side: "BUY", symbol: "BTC", desiredQuote: "10", origin: "ai", referencePrice: "60000" });
+    expect(r.status).toBe("executed");
+  });
+
+  it("a régi, void-ot adó persist változatlanul működik", async () => {
+    const h = harness("100");
+    h.deps.persist = async () => undefined;
+    const r = await h.run({ side: "BUY", symbol: "BTC", desiredQuote: "10", origin: "ai", referencePrice: "60000" });
+    expect(r.status).toBe("executed");
+    expect(Number(cashOf(h.ledger, "USDT"))).toBeCloseTo(90, 9);
+  });
+});

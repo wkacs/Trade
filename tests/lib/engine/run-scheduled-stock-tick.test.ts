@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { executeScheduledStockTick, persistWarning } from "@/lib/engine/run-scheduled-stock-tick";
+import { executeScheduledStockTick, persistWarning, unflattenedWarning } from "@/lib/engine/run-scheduled-stock-tick";
 
 // A teszt-környezetben nincs DATABASE_URL → getDb() null. Így a cadence- és a no-db-kaput
 // determinisztikusan ellenőrizhetjük, valós DB nélkül.
@@ -48,5 +48,17 @@ describe("persistWarning – a duplikált fill nem hallgatható el", () => {
 
   it("ok nélküli elutasításra is figyelmeztet", () => {
     expect(persistWarning("t-2", { applied: false })).toContain("ismeretlen ok");
+  });
+});
+
+describe("unflattenedWarning – a nyitva maradt kitettség nem hallgatható el (audit 3.)", () => {
+  it("üres listára nincs figyelmeztetés", () => {
+    expect(unflattenedWarning([])).toBeNull();
+  });
+
+  it("maradék pozícióra megnevezi a papírokat", () => {
+    const w = unflattenedWarning(["AAPL", "SPY"]);
+    expect(w).toContain("AAPL");
+    expect(w).toContain("SPY");
   });
 });

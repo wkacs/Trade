@@ -237,6 +237,21 @@ export function minutesFromSessionOpen(nowMs: number): number | null {
   return p.hour * 60 + p.minute - SESSION_OPEN_MIN;
 }
 
+/**
+ * Az adott ET-nap ÜLÉS-NYITÁSA (09:30 ET) epoch ms-ban — a napi veszteségkapu
+ * referencia-pontja a részvény-sávon. Perces pontosságú.
+ *
+ * Miért nem naptárból építjük: az ET eltolás évszakfüggő (EST/EDT), és a
+ * `Date.parse("...T14:30:00Z")` csak télen esne 09:30 ET-re. A mostani időpontból
+ * VISSZAFELÉ számolva viszont az eltolás kiesik. A nap 2:00 ET DST-váltása a nyitás
+ * előtt van, tehát a nyitás és a `nowMs` közé nem eshet váltás.
+ */
+export function sessionOpenMs(nowMs: number): number {
+  const p = etParts(nowMs);
+  const minutesOfDay = p.hour * 60 + p.minute;
+  return Math.floor(nowMs / 60_000) * 60_000 - (minutesOfDay - SESSION_OPEN_MIN) * 60_000;
+}
+
 /** A piac állapota eszközosztály szerint. */
 export function marketSession(assetClass: AssetClass, nowMs: number): MarketSession {
   if (assetClass === "crypto") return { open: true, reason: "crypto-always-open" };

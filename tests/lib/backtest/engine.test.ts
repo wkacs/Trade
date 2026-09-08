@@ -98,3 +98,81 @@ describe("runBacktest", () => {
     expect(on.metrics.totalReturnPct).toBeGreaterThan(0);
   });
 });
+
+// ── Audit 4. és 6. pont: nyitáskori értékelés és backteszt↔élő paritás ──────────
+
+describe("runBacktest – a nyitáskori kötés nem láthatja a bar záróárát (audit 4.)", () => {
+  /**
+   * Azonos MÚLT, azonos következő NYITÓ, eltérő következő ZÁRÓ. A nyitón végrehajtott
+   * order méretének azonosnak kell lennie: a záróár akkor még nem létezik.
+   *
+   * Hogy a hiba látszódjon, a pozíciókeret SZOROSAN fog: 20% DCA-tétel 20%-os
+   * pozíciókorlát mellett, meglévő készlettel — így a keret tényleg vág, és a vágás
+   * mértéke az értékeléshez használt ártól függ.
+   */
+  const strategy = { ...DEFAULT_STRATEGY, dcaBuyPct: 0.2, dcaWeeklyBudgetPct: 0.5, entryFilter: "off" as const };
+
+  const scenario = (lastClose: number) =>
+    after(warmup(), [
+      (i) => frame(i, { o: 100, h: 100, l: 100, c: 100 }, 20), // DCA-t tervez
+      (i) => frame(i, { o: 100, h: 100, l: 100, c: 100 }, 20), // itt teljesül + újat tervez
+      (i) => frame(i, { o: 100, h: Math.max(100, lastClose), l: 100, c: lastClose }, 50),
+    ]);
+
+  it("a második vétel mérete független a végrehajtási bar záróárától", () => {
+    const flat = runBacktest(scenario(100), cfg, strategy);
+    const spike = runBacktest(scenario(300), cfg, strategy);
+    const buys = (r: ReturnType<typeof runBacktest>) => r.entries.map((e) => e.amountUsd);
+    expect(buys(spike)).toEqual(buys(flat));
+  });
+});
+
+describe("runBacktest – a futó rendszerrel közös szabályok (audit 6.)", () => {
+  it("a momentum-vétel NEM fogyasztja a DCA heti keretét", () => {
+    // Szűk heti keret: egyetlen DCA fér bele. Ha a momentum is beleszámítana, a
+    // következő DCA elmaradna.
+    const strategy = {
+      ...DEFAULT_STRATEGY,
+      momentumEnabled: true,
+      entryFilter: "off" as const,
+      dcaBuyPct: 0.02,
+      dcaWeeklyBudgetPct: 0.03,
+    };
+    const history = after(warmup(), [
+      // Kitörés: emelkedő sor, hogy a momentum belépjen.
+      ...Array.from({ length: 4 }, (_, k) => (i: number) => frame(i, { o: 100 + k, h: 101 + k, l: 99 + k, c: 101 + k }, 50)),
+      (i) => frame(i, { o: 105, h: 105, l: 105, c: 105 }, 20), // DCA-jel
+      (i) => frame(i, { o: 105, h: 105, l: 105, c: 105 }, 20),
+      (i) => frame(i, { o: 105, h: 105, l: 105, c: 105 }, 50),
+    ]);
+    const result = runBacktest(history, cfg, strategy);
+    const kinds = result.entries.map((e) => e.kind);
+    expect(kinds).toContain("momentum");
+    expect(kinds).toContain("dca");
+
+    // A LÉNYEG: a DCA a TELJES 2%-ot költhette (~200 USD). Ha a momentum 200 USD-je is a
+    // heti 3%-os (300 USD) DCA-keretből ment volna, a DCA ~100 USD-re vágódna.
+    const dca = result.entries.find((e) => e.kind === "dca")!;
+    expect(dca.amountUsd).toBeGreaterThan(150);
+  });
+
+  it("a napi veszteségkapu a backtesztben is tilt (nem csak az éles ágon)", () => {
+    // NAGY pozíció (20%), majd 40%-os zuhanás → a napi veszteség −8%, a 3%-os latch
+    // bekapcsol, és aznap már NINCS új vétel.
+    const strategy = {
+      ...DEFAULT_STRATEGY,
+      entryFilter: "off" as const,
+      dcaBuyPct: 0.2,
+      dcaWeeklyBudgetPct: 0.5,
+    };
+    const history = after(warmup(), [
+      (i) => frame(i, { o: 100, h: 100, l: 100, c: 100 }, 20), // DCA-t tervez
+      (i) => frame(i, { o: 100, h: 100, l: 100, c: 100 }, 20), // teljesül, újat tervez
+      (i) => frame(i, { o: 60, h: 60, l: 60, c: 60 }, 20), // −40% → napi latch
+      (i) => frame(i, { o: 60, h: 60, l: 60, c: 60 }, 20), // itt már nem vehet
+      (i) => frame(i, { o: 60, h: 60, l: 60, c: 60 }, 20),
+    ]);
+    const result = runBacktest(history, cfg, strategy);
+    expect(result.rejections.daily_loss_latched ?? 0).toBeGreaterThan(0);
+  });
+});
