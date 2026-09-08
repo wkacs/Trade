@@ -34,6 +34,35 @@ export interface InstrumentCandles {
   error: { code: string; message: string } | null;
 }
 
+/**
+ * Hihetetlen ár-ugrás két EGYMÁST KÖVETŐ gyertya záróárai között.
+ *
+ * Miért kell: a szolgáltató hibája, egy rossz tick, vagy egy még nem korrigált vállalati
+ * esemény (split) olyan sorozatot adhat, amin a stratégia „kitörést" vagy „összeomlást"
+ * lát ott, ahol csak adathiba van. A Yahoo a splitet visszamenőleg korrigálja, de erre
+ * NEM támaszkodunk vakon: a fail-closed viselkedés az, hogy a gyanús sorozatot NEM
+ * használjuk (a hívó kihagyja az instrumentumot), nem az, hogy kereskedünk rajta.
+ *
+ * A küszöb időkeret-függő: 5 perces baron a 20%-os ugrás gyakorlatilag lehetetlen, napi
+ * baron viszont egy gyorsjelentés utáni 30% valós lehet.
+ */
+export function detectPriceAnomaly(
+  candles: OhlcvCandle[],
+  timeframe: Timeframe,
+): { index: number; from: number; to: number; changePct: number } | null {
+  const limit = timeframe === "1d" ? 0.45 : 0.2;
+  for (let i = 1; i < candles.length; i++) {
+    const prev = candles[i - 1].close;
+    const cur = candles[i].close;
+    if (!(prev > 0) || !(cur > 0)) continue;
+    const change = Math.abs(cur / prev - 1);
+    if (change > limit) {
+      return { index: i, from: prev, to: cur, changePct: change * 100 };
+    }
+  }
+  return null;
+}
+
 export interface FetchOptions {
   now?: () => number;
   fetchImpl?: typeof fetch;
@@ -54,6 +83,20 @@ export async function fetchInstrumentCandles(
 
   if (instrument.dataProvider === "yahoo") {
     const res = await fetchYahooCandles(instrument.providerSymbol, instrument.symbol, bars, timeframe, opts);
+    const anomaly = res.error ? null : detectPriceAnomaly(res.candles, timeframe);
+    if (anomaly) {
+      return {
+        instrument,
+        timeframe,
+        candles: [],
+        error: {
+          code: "suspect_series",
+          message:
+            `Hihetetlen ár-ugrás (${instrument.symbol}): ${anomaly.from} → ${anomaly.to} ` +
+            `(${anomaly.changePct.toFixed(1)}%) a ${anomaly.index}. gyertyánál — a sorozat nem használható.`,
+        },
+      };
+    }
     return { instrument, timeframe, candles: res.candles, error: res.error };
   }
 

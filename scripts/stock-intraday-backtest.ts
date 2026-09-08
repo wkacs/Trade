@@ -31,9 +31,13 @@ import {
   runStockCycle,
   intradayPhaseAt,
   STOCK_STRATEGY,
+  STOCK_INTRADAY_STRATEGY,
   STOCK_PORTFOLIO_ID,
   STOCK_QUOTE,
 } from "@/lib/engine/stock-tick";
+import { previousTradingDayKey } from "@/lib/engine/stock-tick";
+import { etParts, etDateKey } from "@/lib/markets/calendar";
+import { fetchEarningsCalendar } from "@/lib/markets/earnings";
 import { emptyLedger, cashOf, type LedgerState } from "@/lib/portfolio/ledger";
 import { toNumber } from "@/lib/portfolio/money";
 import type { StrategyConfig } from "@/lib/strategy/config";
@@ -41,13 +45,36 @@ import type { StrategyConfig } from "@/lib/strategy/config";
 const CACHE_DIR = ".cache";
 const CAPITAL = 10000;
 
+/**
+ * Széles, likvid univerzum a szélesség-méréshez. Csupa nagy forgalmú, Alpacán
+ * `fractionable` amerikai papír és ETF — a momentum-belépő annál több valódi kitörést lát,
+ * minél több nevet figyel.
+ */
+const WIDE_UNIVERSE = [
+  "AAPL", "MSFT", "NVDA", "SPY", "QQQ", "AMZN", "GOOGL", "META", "TSLA", "AMD",
+  "AVGO", "NFLX", "COST", "JPM", "XOM", "UNH", "LLY", "V", "MA", "HD",
+  "INTC", "MU", "PLTR", "COIN", "ORCL", "CRM", "ADBE", "IWM", "SMH", "XLE",
+];
+
+/** Instrumentum-leíró egy tetszőleges tickerhez (a backteszt saját univerzumához). */
+function stockInstrument(symbol: string): Instrument {
+  return {
+    symbol,
+    assetClass: "stock",
+    quote: "USD",
+    dataProvider: "yahoo",
+    displayName: symbol,
+    providerSymbol: symbol,
+  };
+}
+
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 
-async function loadBars(instruments: Instrument[], tf: Timeframe): Promise<Record<string, OhlcvCandle[]>> {
-  const file = path.join(CACHE_DIR, `intraday-${tf}.json`);
+async function loadBars(instruments: Instrument[], tf: Timeframe, tag = "core"): Promise<Record<string, OhlcvCandle[]>> {
+  const file = path.join(CACHE_DIR, `intraday-${tag}-${tf}.json`);
   if (fs.existsSync(file)) {
     return JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, OhlcvCandle[]>;
   }
@@ -85,6 +112,8 @@ async function simulate(
   strategy: StrategyConfig,
   tf: Timeframe,
   range?: { fromPct: number; toPct: number },
+  fractional = false,
+  earningsByDate?: Map<string, Set<string>>,
 ): Promise<RunMetrics> {
   const symbols = Object.keys(bars);
   const step = TIMEFRAME_MS[tf];
@@ -109,6 +138,7 @@ async function simulate(
 
     const slice: Record<string, OhlcvCandle[]> = {};
     for (const s of symbols) slice[s] = bars[s].slice(i - window, i + 1);
+    const entryBlocked = earningsByDate?.get(etDateKey(etParts(barOpen)));
 
     const equityNow = symbols.reduce((total, s) => {
       const pos = ledger.positions[s];
@@ -124,6 +154,8 @@ async function simulate(
       timeframe: tf,
       phase: gate.phase,
       strategy,
+      fractional,
+      entryBlocked,
       weeklyBudgetRemainingUsd: equityNow * 0.05,
     });
     ledger = res.ledger;
@@ -161,12 +193,54 @@ async function simulate(
   };
 }
 
+/**
+ * ET-dátum → az aznap belépő-tiltott szimbólumok. Tiltott, aki AZNAP jelent (bármikor),
+ * vagy az ELŐZŐ kereskedési nap ZÁRÁSA UTÁN (amc) jelentett — a reakció ilyenkor a
+ * következő napra esik. A naptárat lemezre cache-eljük, hogy a rács ne hívja újra.
+ */
+async function loadEarnings(symbols: string[], from: string, to: string): Promise<Map<string, Set<string>>> {
+  const file = path.join(CACHE_DIR, `earnings-${from}-${to}.json`);
+  let entries: { symbol: string; date: string; hour: string }[];
+  if (fs.existsSync(file)) {
+    entries = JSON.parse(fs.readFileSync(file, "utf8"));
+  } else {
+    entries = await fetchEarningsCalendar(from, to);
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(entries));
+  }
+  const watched = new Set(symbols.map((s) => s.toUpperCase()));
+  const byDate = new Map<string, Set<string>>();
+  const add = (date: string, symbol: string) => {
+    const set = byDate.get(date) ?? new Set<string>();
+    set.add(symbol);
+    byDate.set(date, set);
+  };
+  for (const e of entries) {
+    const symbol = e.symbol.toUpperCase();
+    if (!watched.has(symbol)) continue;
+    add(e.date, symbol);
+    if (e.hour === "amc") {
+      // A reakció-nap a KÖVETKEZŐ kereskedési nap; a naptárból ezt visszafelé keressük.
+      for (let d = 1; d <= 5; d++) {
+        const next = new Date(Date.parse(`${e.date}T17:00:00Z`) + d * 86400000);
+        const key = etDateKey(etParts(next.getTime()));
+        if (previousTradingDayKey(key) === e.date) {
+          add(key, symbol);
+          break;
+        }
+      }
+    }
+  }
+  return byDate;
+}
+
 async function main() {
   const tf = arg("tf", "5m") as Timeframe;
   const sweep = arg("sweep", "stop-tp");
-  const instruments = activeByClass("stock");
+  const wide = process.argv.includes("--wide");
+  const instruments = wide ? WIDE_UNIVERSE.map(stockInstrument) : activeByClass("stock");
   console.error(`Adat betöltése (${tf}, 60 nap, ${instruments.length} instrumentum)…`);
-  const bars = await loadBars(instruments, tf);
+  const bars = await loadBars(instruments, tf, wide ? "wide" : "core");
   const symbols = Object.keys(bars);
   if (symbols.length === 0) {
     console.error("Nincs adat.");
@@ -177,7 +251,7 @@ async function main() {
   const to = new Date(first[first.length - 1].openTime).toISOString().slice(0, 10);
   console.error(`${symbols.join(", ")} — ${first.length} bar, ${from} → ${to}\n`);
 
-  const variants: { label: string; strategy: StrategyConfig }[] = [];
+  const variants: { label: string; strategy: StrategyConfig; fractional?: boolean; earnings?: boolean }[] = [];
   if (sweep === "stop-tp") {
     for (const stop of [0.003, 0.005, 0.0075, 0.01]) {
       for (const tp of [0.005, 0.0075, 0.01, 0.015]) {
@@ -233,6 +307,45 @@ async function main() {
       console.log(`${label.padEnd(30)}${fmt(a.returnPct)}${fmt(b.returnPct)}${fmt(full.returnPct)}${String(full.trades).padStart(8)}`);
     }
     return;
+  } else if (sweep === "earnings") {
+    // Gyorsjelentés-tiltás hatása: ugyanaz a stratégia, csak a jelentő papírba aznap
+    // nincs ÚJ belépő. A naptár a Finnhubról jön, a mért ablakra.
+    variants.push({ label: "tiltás NÉLKÜL", strategy: STOCK_INTRADAY_STRATEGY });
+    variants.push({ label: "earnings-napon nincs belépő", strategy: STOCK_INTRADAY_STRATEGY, earnings: true });
+  } else if (sweep === "breadth") {
+    // Szélesség: ugyanaz a jel, több papíron. Tört lottal, hogy a kis tétel se
+    // kerekedjen nullára a drága neveken.
+    for (const [pct, conc] of [
+      [0.1, 3],
+      [0.1, 6],
+      [0.05, 6],
+      [0.05, 10],
+      [0.03, 10],
+    ] as [number, number][]) {
+      variants.push({
+        label: `tört · ${(pct * 100).toFixed(0)}% · ${conc} poz`,
+        strategy: { ...STOCK_INTRADAY_STRATEGY, momentumBuyPct: pct, maxConcurrentPositions: conc },
+        fractional: true,
+      });
+    }
+  } else if (sweep === "sizing") {
+    // Tört részvény (Alpaca `fractionable`) vs egész lot, és a tétel-méret hatása.
+    // Egész lotnál a kis tétel a drága papírokon 0 darabra kerekül — ezt méri a rács.
+    variants.push({ label: "egész lot · 10% · 3 poz", strategy: STOCK_INTRADAY_STRATEGY });
+    for (const [pct, conc] of [
+      [0.02, 4],
+      [0.05, 4],
+      [0.1, 3],
+      [0.1, 4],
+      [0.15, 4],
+      [0.2, 4],
+    ] as [number, number][]) {
+      variants.push({
+        label: `tört · ${(pct * 100).toFixed(0)}% · ${conc} poz`,
+        strategy: { ...STOCK_INTRADAY_STRATEGY, momentumBuyPct: pct, maxConcurrentPositions: conc },
+        fractional: true,
+      });
+    }
   } else if (sweep === "stopmode") {
     // A kilépés ALAKJA: fix széles stop (gyakorlatilag csak EOD-zárás) vs ATR-trailing,
     // ami a napon belül utánahúz és a nyereséget be is zárhatja.
@@ -251,9 +364,26 @@ async function main() {
     variants.push({ label: "napi swing default (5%/10%)", strategy: STOCK_STRATEGY });
   }
 
+  // Gyorsjelentés-naptár, ha valamelyik variáns kéri (ET-dátum → tiltott szimbólumok).
+  let earningsByDate: Map<string, Set<string>> | undefined;
+  if (variants.some((v) => v.earnings)) {
+    earningsByDate = await loadEarnings(symbols, from, to);
+    console.error(`gyorsjelentés-napok az ablakban: ${earningsByDate.size}
+`);
+  }
+
   const results: RunMetrics[] = [];
   for (const v of variants) {
-    const m = await simulate(v.label, bars, instruments, v.strategy, tf);
+    const m = await simulate(
+      v.label,
+      bars,
+      instruments,
+      v.strategy,
+      tf,
+      undefined,
+      v.fractional === true,
+      v.earnings ? earningsByDate : undefined,
+    );
     results.push(m);
     console.error(
       `  ${m.label.padEnd(30)} ${m.returnPct >= 0 ? "+" : ""}${m.returnPct.toFixed(2)}%  ` +

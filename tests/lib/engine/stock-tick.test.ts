@@ -421,3 +421,52 @@ describe("engine/stock-tick – nap végi laposra zárás", () => {
     expect(res.actions.filter((a) => a.side === "BUY")).toEqual([]);
   });
 });
+
+describe("engine/stock-tick – belépő-tiltás és tört lot", () => {
+  const bars = () => risingTradingDays(60, "2025-11-03");
+
+  it("a tiltott papírba NEM lép be, de a meglévő pozíciót kezeli", async () => {
+    const res = await runStockCycle({
+      tickId: "blocked",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: bars() },
+      entryBlocked: new Set(["AAPL"]),
+    });
+    expect(res.actions).toEqual([]);
+
+    const allowed = await runStockCycle({
+      tickId: "allowed",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: bars() },
+    });
+    expect(allowed.actions.find((a) => a.side === "BUY")).toBeDefined();
+  });
+
+  it("tört lottal a mennyiség NEM egész, és pontosabban használja a keretet", async () => {
+    const whole = await runStockCycle({
+      tickId: "whole",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: bars() },
+    });
+    const frac = await runStockCycle({
+      tickId: "frac",
+      now: () => NOW,
+      ledger: emptyLedger(STOCK_PORTFOLIO_ID, "paper", "10000", STOCK_QUOTE),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: bars() },
+      fractional: true,
+    });
+    const w = whole.actions.find((a) => a.side === "BUY")!;
+    const f = frac.actions.find((a) => a.side === "BUY")!;
+    expect(Number.isInteger(w.qty)).toBe(true);
+    expect(Number.isInteger(f.qty)).toBe(false);
+    // A tört lot közelebb visz a 10%-os kerethez (1000 USD), mint az egészre kerekítés.
+    expect(Math.abs(1000 - f.amountUsd)).toBeLessThan(Math.abs(1000 - w.amountUsd));
+  });
+});

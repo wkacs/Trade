@@ -87,6 +87,29 @@ külső cron (5 perc) → POST /api/cron/exit
 - A napi swing workflow (`daily-stock-tick`) **ütemezése kikapcsolva**, mert ugyanabba a
   pénztárcába könyvelne. Kézzel (`workflow_dispatch`) továbbra is indítható.
 
+## 3b. API-k: mit mértünk, és mi maradt bent (2026-09-08 este)
+
+Három kulcs került be (Alpaca paper, Finnhub, Alpha Vantage). A kérdés az volt, hogy
+gyorsítanak vagy profitot hoznak-e. A válasz **mérve**, nem elvben:
+
+| irány | mérés | döntés |
+|---|---|---|
+| **Yahoo késleltetés** | ülés alatt mérve **28-35 másodperc** (`regularMarketTime` vs. óra) | fizetős real-time adat FELESLEGES |
+| **Alpaca ingyenes adat** | csak **IEX**-tape: nyitás előtt hiányzó barok, a bar-alak nem konszolidált | a gyertya marad a Yahoo-nál |
+| **Tört részvény (Alpaca `fractionable`)** | 60 nap: tört 10%/3 poz **+1,04%** vs egész lot 10%/3 **+1,08%** → zaj. A tétel-méret viszont lineárisan skáláz (2% → +0,18%, 20% → +1,83%, a maxDD ugyanígy) — tehát ez **tőkeáttétel, nem edge** | **BE**: a kerekítés egy adat-korlát maradványa volt, a pontos méretezés hűbb a stratégiához |
+| **Szélesebb univerzum (4 → 30 papír)** | 10%/3 poz: **+0,83%** (maxDD 3,36%) a 4 papíros +1,08% (maxDD 0,81%) helyett; több egyidejű pozícióval **negatív** (−0,52% … −3,05%) | **NEM adoptálva** — a szélesség itt rontott. A 30-as lista a backteszt-szkriptben marad (`--wide`) |
+| **Gyorsjelentés-tiltás (Finnhub)** | +0,81% vs +1,08% tiltás nélkül, ugyanannyi trade | **env-kapcsolóra** (`STOCK_EARNINGS_BLACKOUT=1`), alapból KI |
+| **Hír/szentiment (Alpha Vantage)** | nem mértük; ingyenes szint napi 25 hívás | **nincs használatban** |
+
+Ezen felül bekerült egy **adat-integritás kapu** (`detectPriceAnomaly`): ha két egymást
+követő gyertya záróára között hihetetlen ugrás van (intraday >20%, napi >45%), az egész
+sorozat gyanús → az instrumentum kimarad a ciklusból. A korábbi „split = hamis −75%"
+félelem egyébként **alaptalan volt**: ellenőrizve, a Yahoo visszamenőleg split-korrigál
+(NVDA 2024-06-03 záró 115, nem 1150).
+
+**A tanulság ugyanaz, mint a stop/TP rácsnál:** ennek a stratégiának a szűk keresztmetszete
+nem az adat sebessége és nem a papírok száma. Egyik megvásárolható API sem javított rajta.
+
 ## 4. Ami nyitva maradt
 
 - **A mérés 60 napja rövid és emelkedő piac.** Eső vagy oldalazó rezsimben más lehet;
@@ -94,6 +117,6 @@ külső cron (5 perc) → POST /api/cron/exit
   ezen a forráson nem lehetséges.
 - **PDT-szabály:** valódi (nem paper) számlán az amerikai day trading 25 000 USD alatt
   heti 3 kör-kereskedésre korlátozott. A paper sáv ezt nem modellezi.
-- **Adat-késleltetés:** a Yahoo intraday nem garantáltan valós idejű. Paperben ez a
-  belépő árát tolhatja; élesben mérni kellene.
+- **Adat-késleltetés: MÉRVE, rendben.** Ülés alatt a Yahoo `regularMarketTime` 28-35
+  másodperccel van a jelen mögött, tehát az 5 perces ciklushoz bőven friss.
 - **A napi swing ág kódja megmaradt** (tesztelt, kézzel indítható), de nem fut.

@@ -362,6 +362,16 @@ export interface RunStockCycleDeps {
   persist?: ExecuteIntentDeps["persist"];
   /** Opcionális stop-perzisztálás (trailing ratchet). */
   persistStop?: (symbol: string, stopPrice: Dec) => Promise<void>;
+  /**
+   * Papírok, amikre MA nem nyitunk új pozíciót (pl. gyorsjelentés napja). A meglévő
+   * pozíció kezelése (stop / take-profit / nap végi zárás) NEM tiltott — csak a belépő.
+   */
+  entryBlocked?: ReadonlySet<string>;
+  /**
+   * Köthető-e TÖRT részvény. Csak akkor igaz, ha az Alpaca MINDEN aktív papírra
+   * visszaigazolta a `fractionable` jelzőt; enélkül a fill egész darabra kerekít.
+   */
+  fractional?: boolean;
   /** Broker felülírás (teszt). Alap: PaperExecutionBroker USD/stock-paraméterekkel. */
   broker?: ExecutionBroker;
 }
@@ -405,7 +415,7 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
       getTrigger: (intent: ExecutionIntent) => pendingTrigger.get(intent.intentId) ?? null,
       params: {
         ...fillParamsForClass("stock"),
-        filters: stockSymbolFilters("STOCK", STOCK_QUOTE, now()),
+        filters: stockSymbolFilters("STOCK", STOCK_QUOTE, now(), { fractional: deps.fractional === true }),
         nowMs: now(),
       },
     });
@@ -499,9 +509,12 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
 
   // A SELL-ek előbb (a felszabaduló cash a belépőnek hasznosul). Belépő CSAK `trading`
   // fázisban van: zárás előtt (`no-new-entries`, `flatten`) már nem nyitunk újat.
+  const blocked = deps.entryBlocked;
   const ordered = [
     ...planned.plan.orders.filter((o) => o.side === "SELL"),
-    ...(phase === "trading" ? planned.plan.orders.filter((o) => o.side === "BUY") : []),
+    ...(phase === "trading"
+      ? planned.plan.orders.filter((o) => o.side === "BUY" && !(blocked?.has(o.symbol) ?? false))
+      : []),
   ];
   for (const o of ordered) {
     const px = pricesDec[o.symbol];

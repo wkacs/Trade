@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { fetchInstrumentCandles, fetchActiveCandles, timeframeFor } from "@/lib/markets/data";
+import { fetchInstrumentCandles, fetchActiveCandles, timeframeFor, detectPriceAnomaly } from "@/lib/markets/data";
+import type { OhlcvCandle } from "@/lib/market/candles";
 import { findInstrument } from "@/lib/markets/registry";
 
 const BTC = findInstrument("BTC")!;
@@ -94,5 +95,56 @@ describe("markets/data", () => {
     expect(symbols).toContain("AAPL");
     const aapl = results.find((r) => r.instrument.symbol === "AAPL")!;
     expect(aapl.timeframe).toBe("1d");
+  });
+});
+
+describe("markets/data – gyanús ár-sorozat (fail-closed)", () => {
+  const bar = (openTime: number, close: number): OhlcvCandle => ({
+    symbol: "AAPL",
+    timeframe: "5m",
+    openTime,
+    closeTime: openTime + 300000,
+    open: close,
+    high: close,
+    low: close,
+    close,
+    baseVolume: 1,
+    quoteVolume: close,
+    trades: 1,
+    receivedAt: openTime,
+  });
+
+  it("normál sorozaton nincs riasztás", () => {
+    const c = [bar(0, 100), bar(300000, 101), bar(600000, 99.5)];
+    expect(detectPriceAnomaly(c, "5m")).toBeNull();
+  });
+
+  it("intraday 20% fölötti ugrást megjelöl", () => {
+    const c = [bar(0, 100), bar(300000, 130)];
+    expect(detectPriceAnomaly(c, "5m")).toMatchObject({ index: 1, from: 100, to: 130 });
+  });
+
+  it("napi baron a 30% még belefér (gyorsjelentés), a 60% nem", () => {
+    const c = [bar(0, 100), bar(300000, 70)];
+    expect(detectPriceAnomaly(c, "1d")).toBeNull();
+    expect(detectPriceAnomaly([bar(0, 100), bar(300000, 40)], "1d")).not.toBeNull();
+  });
+
+  it("gyanús sorozatnál a lekérés ÜRES gyertyákat és strukturált hibát ad", async () => {
+    const split = {
+      chart: {
+        result: [
+          {
+            timestamp: [Date.parse("2026-01-02T14:30:00Z") / 1000, Date.parse("2026-01-02T14:35:00Z") / 1000],
+            indicators: { quote: [{ open: [1000, 100], high: [1000, 100], low: [1000, 100], close: [1000, 100], volume: [1, 1] }] },
+          },
+        ],
+        error: null,
+      },
+    };
+    const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => split })) as unknown as typeof fetch;
+    const res = await fetchInstrumentCandles(AAPL, 5, { now: () => AFTER, fetchImpl, timeframe: "5m" });
+    expect(res.candles).toEqual([]);
+    expect(res.error?.code).toBe("suspect_series");
   });
 });

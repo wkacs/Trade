@@ -6,6 +6,7 @@ import { fetchInstrumentCandles } from "@/lib/markets/data";
 import {
   runStockCycle,
   intradayPhaseAt,
+  previousTradingDayKey,
   STOCK_PORTFOLIO_ID,
   STOCK_QUOTE,
   STOCK_INTRADAY_TF,
@@ -29,6 +30,9 @@ import {
 } from "@/lib/execution/order-store";
 import { acquireLease, releaseLease, newOwnerId, slotId, type Lease } from "@/lib/engine/run-lease";
 import { persistWarning } from "@/lib/engine/run-scheduled-stock-tick";
+import { etParts, etDateKey } from "@/lib/markets/calendar";
+import { allFractionable } from "@/lib/markets/alpaca";
+import { symbolsWithEarningsOn } from "@/lib/markets/earnings";
 
 /**
  * DAY TRADING részvény-ciklus — 5 percenként, az amerikai ülés alatt.
@@ -54,6 +58,10 @@ export interface ScheduledStockIntradayResult {
   error?: string;
   actions?: StockCycleAction[];
   seeded?: boolean;
+  /** Tört részvény engedélyezve (az Alpaca minden aktív papírra visszaigazolta). */
+  fractional?: boolean;
+  /** Papírok, amikre ma nem nyitunk (gyorsjelentés napja). */
+  entryBlocked?: string[];
   /** Nem végzetes, de NEM elhallgatható figyelmeztetések (pl. duplikált fill). */
   warnings?: string[];
   lease?: { key: string; owner: string; fencingToken: number };
@@ -152,6 +160,27 @@ export async function executeScheduledStockIntraday(
       return { ok: false, slot, phase, reason: "no_candles", error: "Egyetlen instrumentumra sincs gyertya.", lease: leaseInfo };
     }
 
+    // Tört részvény CSAK akkor, ha az Alpaca minden aktív papírra visszaigazolta.
+    const symbols = instruments.map((i) => i.symbol);
+    const fractional = await allFractionable(symbols, { now });
+
+    // Gyorsjelentés-nap: aznap nincs ÚJ belépő az érintett papírba (a meglévőt a stop /
+    // take-profit / nap végi zárás kezeli).
+    //
+    // ALAPBÓL KI. A 60 napos méréssel NEM javított (+0,81% vs +1,08% tiltás nélkül,
+    // ugyanannyi trade — az ablakban csak néhány jelentés esett a kosárra, tehát az
+    // eltérés zaj). A kapcsoló azért van, mert szélesebb univerzumon vagy jelentés-
+    // szezonban a fat-tail kockázat nőhet; bekapcsolás előtt MÉRD ÚJRA
+    // (`pnpm tsx scripts/stock-intraday-backtest.ts --sweep earnings`).
+    const blackoutOn = (process.env.STOCK_EARNINGS_BLACKOUT ?? "").trim() === "1";
+    const today = etDateKey(etParts(nowMs));
+    const entryBlocked = blackoutOn
+      ? await symbolsWithEarningsOn(today, previousTradingDayKey(today), symbols, { now })
+      : new Set<string>();
+    if (entryBlocked.size > 0) {
+      console.log(`[stock-intraday] gyorsjelentés miatt nincs belépő: ${[...entryBlocked].join(", ")}`);
+    }
+
     const result = await runStockCycle({
       tickId: slot,
       now,
@@ -160,6 +189,8 @@ export async function executeScheduledStockIntraday(
       candlesBySymbol,
       timeframe: STOCK_INTRADAY_TF,
       phase,
+      fractional,
+      entryBlocked,
       strategy: STOCK_INTRADAY_STRATEGY,
       strategyVersion: STOCK_INTRADAY_STRATEGY_VERSION,
       weeklyBudgetRemainingUsd: Number(cashOf(ledger, STOCK_QUOTE)) * 0.05,
@@ -193,6 +224,8 @@ export async function executeScheduledStockIntraday(
       phase,
       actions: result.actions,
       seeded,
+      fractional,
+      ...(entryBlocked.size > 0 ? { entryBlocked: [...entryBlocked] } : {}),
       lease: leaseInfo,
       ...(warnings.length > 0 ? { warnings } : {}),
     };

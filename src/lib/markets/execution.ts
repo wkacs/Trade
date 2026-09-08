@@ -17,8 +17,19 @@ import { DEFAULT_PAPER_FILL_PARAMS } from "@/lib/execution/paper-fill";
 import type { SymbolFilters } from "@/lib/execution/exchange-rules";
 import type { Instrument, AssetClass } from "./registry";
 
-/** Konzervatív részvény-szűrők (a Stooq nem ad tőzsdei filtert). */
-export function stockSymbolFilters(symbol: string, quote: string, nowMs: number): SymbolFilters {
+/**
+ * Részvény-szűrők. Alapból KONZERVATÍV: egész darab, mert a gyertya-forrás (Yahoo) nem ad
+ * tőzsdei szabályokat. Ha az Alpaca visszaigazolta, hogy MINDEN aktív papír `fractionable`,
+ * a hívó `fractional: true`-val kéri — ekkor tört mennyiség is köthető, és a tétel-méret
+ * nem kerekítődik nullára a drága papírokon (SPY ~770 USD).
+ */
+export function stockSymbolFilters(
+  symbol: string,
+  quote: string,
+  nowMs: number,
+  opts: { fractional?: boolean } = {},
+): SymbolFilters {
+  const fractional = opts.fractional === true;
   return {
     symbol,
     baseAsset: symbol,
@@ -28,9 +39,9 @@ export function stockSymbolFilters(symbol: string, quote: string, nowMs: number)
     tickSize: "0.01",
     minPrice: "0.01",
     maxPrice: null,
-    // Mennyiség: egész részvény (paper — konzervatív, nincs tört pozíció).
-    stepSize: "1",
-    minQty: "1",
+    // Mennyiség: egész részvény, vagy tört, ha az Alpaca szerint minden papír fractionable.
+    stepSize: fractional ? "0.001" : "1",
+    minQty: fractional ? "0.001" : "1",
     maxQty: null,
     marketStepSize: null,
     marketMinQty: null,
