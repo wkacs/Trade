@@ -14,9 +14,15 @@ Három hely tudna tickelni. **Egyszerre csak egy lehet aktív.**
 
 | Szerep | Mit tud | Mit NEM tud | Költség |
 |---|---|---|---|
-| `worker` | 5 perces kilépés-ciklus **és** órás belépés | állandóan futó gépet igényel | a gép ára (otthoni PC / NAS: 0 Ft többlet) |
-| `github-actions` | órás belépés (`scripts/tick.ts`) | **nincs 5 perces kilépés** — a stop csak óránként nézi meg magát | ingyenes (a repó Actions-kvótáján belül) |
+| `worker` | 5 perces kilépés-ciklus, **részvény day-trading ciklus** és órás belépés | állandóan futó gépet igényel | a gép ára (otthoni PC / NAS: 0 Ft többlet) |
+| `github-actions` | órás belépés (`scripts/tick.ts`) | **nincs 5 perces kilépés** — a stop csak óránként nézi meg magát; **a részvény-sáv egyáltalán nem fut** | ingyenes (a repó Actions-kvótáján belül) |
 | `vercel-cron` | órás belépés az éles `/api/cron/tick` Vercel Functionben | **nincs 5 perces kilépés**; Hobby saját cron csak napi egyszer futhat, ezért külső HTTP-időzítő kell | Vercel Hobby + külső időzítő free tierben is megoldható |
+
+> **A RÉSZVÉNY-SÁVNAK KÜLÖN ÜTEMEZŐ KELL.** A day-trading ciklus csak akkor él, ha
+> valami 5 percenként meghívja: vagy a `worker` (2026-09-10 óta ő is indítja), vagy egy
+> külső HTTP-időzítő a `POST /api/cron/exit` végponton (lásd 4. szakasz). GitHub Actions
+> alatt **nincs** 5 perces trigger, tehát a részvény-sáv néma: nem nyit, és — ami
+> veszélyesebb — **nem is zárja le a nap végén**, amit korábban nyitott.
 
 A választást **egy env változó** rögzíti:
 
@@ -163,9 +169,35 @@ függetlenül 30 másodperc.
 Vercel Pro esetén ugyanez külső szolgáltatás nélkül, natív Vercel Cronnal is óránként
 futtatható. Hobby csomagban az órás cron kifejezés deployment hibát okozna.
 
+### Az 5 perces időzítő (kilépés + részvény day trading) — KÜLÖN kell beállítani
+
+- URL: `https://<a te deploymentod>/api/cron/exit`
+- metódus: `POST`
+- ütemezés: `*/5 * * * *`
+- fejléc: `Authorization: Bearer <CRON_SECRET>`
+
+Ez a **második** időzítő, az órás `/api/cron/tick` MELLETT. A `vercel.json` `crons` tömbje
+szándékosan üres (Hobby csomagban a sűrű cron deployment-hibát okozna), tehát ha ez a
+külső időzítő nincs beállítva **és** nem fut `worker`, akkor:
+
+- a kripto stop / take-profit / trailing legfeljebb **óránként** néz magára, és
+- a részvény day-trading sáv **egyáltalán nem fut** — se belépő, se nap végi zárás.
+
+**A nap végi zárás miért érzékeny erre:** a laposra zárás az ülés **utolsó 10 perce**
+(15:50–16:00 ET), vagyis mindössze KÉT 5 perces ciklus. Ha ez a kettő kimarad (nincs
+időzítő, hidegindítás, adat-hiba, elutasított fill), a pozíció bent ragad éjszakára.
+
+**Pótló zárás (2026-09-10):** a ciklus a következő ülésen felismeri a bent ragadt
+pozíciót (`carriedOverSymbols`: az utolsó fill a mai 09:30 ET nyitás előtt volt), és az
+ülés ELSŐ ciklusában lezárja. A kötés eredete `carry-flat`, tehát a dashboardon és a
+fill-naplóban megkülönböztethető a rendben lefutott `eod-flat`-tól. Ez **javítás, nem
+mentesítés**: a `carry-flat` jelenléte azt bizonyítja, hogy egy nap végi zárás kimaradt,
+és a sáv éjszakán át kitett volt — az időzítőt ilyenkor ellenőrizni kell.
+
 | Endpoint | Auth | Megjegyzés |
 |---|---|---|
 | `POST /api/cron/tick` | `Authorization: Bearer $CRON_SECRET` | **kötelező** — beállított titok nélkül a route elutasít (T32) |
+| `POST /api/cron/exit` | `Authorization: Bearer $CRON_SECRET` | **5 percenként**; egyszerre a kripto gyors kilépés ÉS a részvény day-trading ciklus |
 | `GET /api/analytics` | nincs | csak olvasás, származtatott számok |
 | dashboard oldalak | nincs | személyes használat, publikus URL-en is csak olvasható |
 

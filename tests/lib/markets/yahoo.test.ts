@@ -228,3 +228,27 @@ describe("markets/yahoo – intraday gyertyák", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+describe("markets/yahoo – időkorlát", () => {
+  // Kemény határidő: a day-trading ciklus 5 perces sávban fut, és a nap végi laposra zárás
+  // az ülés utolsó 10 perce. Egy határidő nélküli kérés pont ezt a két esélyt eheti meg.
+  it("minden kérés abort-jelet kap, hogy egy beragadt válasz ne fogja meg a ciklust", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ chart: { result: [], error: null } }),
+    })) as unknown as typeof fetch;
+    await fetchYahooCandles("AAPL", "AAPL", 5, "1d", { now: () => AFTER, fetchImpl });
+    const init = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("megszakított kérés MEGNEVEZETT hálózati hiba, nem néma üres sorozat", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new DOMException("The operation was aborted.", "TimeoutError");
+    }) as unknown as typeof fetch;
+    const res = await fetchYahooCandles("AAPL", "AAPL", 5, "1d", { now: () => AFTER, fetchImpl });
+    expect(res.candles).toEqual([]);
+    expect(res.error?.code).toBe("network");
+  });
+});

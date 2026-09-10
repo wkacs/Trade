@@ -21,7 +21,7 @@ export interface StockFill {
   qty: number;
   amountUsd: number;
   price: number;
-  /** momentum | stop-loss | take-profit | eod-flat | dca — az intent eredete. */
+  /** momentum | stop-loss | take-profit | eod-flat | carry-flat | dca — az intent eredete. */
   origin: string | null;
   executedAt: string;
 }

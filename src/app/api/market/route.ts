@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { collectAllWithOutcomes, type DataCollector } from "@/lib/collectors/base";
+import { pricesFromEvents, type PriceView } from "@/lib/market/price-view";
 import { CoinGeckoCollector } from "@/lib/collectors/coingecko";
 import { FearGreedCollector } from "@/lib/collectors/feargreed";
 import { BinanceOHLCCollector } from "@/lib/collectors/binance";
@@ -34,13 +35,9 @@ export async function GET() {
     const collected = await collectAllWithOutcomes(collectors);
     const events = collected.points;
 
-    // Aktuális ár + 24h változás (CoinGecko).
-    const prices: Record<string, { usd: number; change24hPct: number }> = {};
-    for (const e of events) {
-      if (e.source === "coingecko" && e.kind === "price" && e.price) {
-        prices[e.symbol] = { usd: e.price.usd, change24hPct: e.price.change24hPct };
-      }
-    }
+    // Aktuális ár + 24h változás, forrás-prioritással (CoinGecko, majd Binance-tartalék).
+    // A dashboard P&L-je ezen áll vagy bukik — lásd `market/price-view.ts`.
+    const prices: Record<string, PriceView> = pricesFromEvents(events);
 
     // Fear & Greed.
     const fg = events.find((e) => e.kind === "sentiment" && e.sentiment)?.sentiment ?? null;

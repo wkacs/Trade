@@ -10,6 +10,7 @@ import {
   previousTradingDayKey,
   STOCK_STRATEGY,
   intradayPhaseAt,
+  carriedOverSymbols,
 } from "@/lib/engine/stock-tick";
 import { contiguousTail } from "@/lib/engine/profit-cycle";
 import { etParts, etDateKey, isUsTradingDay } from "@/lib/markets/calendar";
@@ -392,6 +393,98 @@ describe("engine/stock-tick – nap végi laposra zárás", () => {
       phase: "no-new-entries",
     });
     expect(res.actions.filter((a) => a.side === "BUY")).toEqual([]);
+  });
+});
+
+// ── ÁTHOZOTT (bent ragadt) pozíció ─────────────────────────────────────────────
+/**
+ * A day-trading sáv szerződése az, hogy a nap végére lapos. A `flatten` fázis viszont az
+ * ülés utolsó 10 perce — két 5 perces ciklus. Ha az kimarad, a pozíció bent ragad, és
+ * korábban MÁS NEM ZÁRTA: a következő nap `trading` fázisa csak stopot és take-profitot
+ * néz. Ezek a tesztek a pótló zárást őrzik.
+ */
+describe("engine/stock-tick – áthozott pozíció felismerése", () => {
+  const OPEN = Date.parse("2026-02-02T14:30:00Z"); // 09:30 ET
+
+  it("a mai ülés-nyitás UTÁN nyílt pozíció nem áthozott", () => {
+    expect(carriedOverSymbols(["AAPL"], { AAPL: OPEN + 60_000 }, OPEN)).toEqual([]);
+  });
+
+  it("a nyitás ELŐTTI utolsó fill áthozottá teszi", () => {
+    expect(carriedOverSymbols(["AAPL"], { AAPL: OPEN - 60_000 }, OPEN)).toEqual(["AAPL"]);
+  });
+
+  it("ISMERETLEN fill-idő is áthozott (fail-safe: a kitettség drágább, mint egy spread)", () => {
+    expect(carriedOverSymbols(["AAPL", "MSFT"], { MSFT: OPEN + 1 }, OPEN)).toEqual(["AAPL"]);
+  });
+});
+
+describe("engine/stock-tick – áthozott pozíció pótló zárása", () => {
+  const flatCandles = { AAPL: daily([{ o: 100, h: 101, l: 99, c: 100 }]) };
+
+  it("trading fázisban is ZÁR, ha a pozíció egy korábbi ülésről maradt bent", async () => {
+    const res = await runStockCycle({
+      tickId: "carry",
+      now: () => NOW,
+      ledger: ledgerWithPosition("3", "290", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: flatCandles,
+      phase: "trading",
+      carriedOver: new Set(["AAPL"]),
+    });
+    expect(res.actions.find((a) => a.kind === "carry-flat")).toMatchObject({
+      side: "SELL",
+      symbol: "AAPL",
+      qty: 3,
+    });
+    expect(res.carryFlattened).toEqual(["AAPL"]);
+    expect(res.ledger.positions.AAPL).toBeUndefined();
+    expect(res.unflattened).toEqual([]);
+  });
+
+  it("a pótló zárás a NAP VÉGI zárástól megkülönböztethető marad", async () => {
+    const res = await runStockCycle({
+      tickId: "carry-kind",
+      now: () => NOW,
+      ledger: ledgerWithPosition("3", "290", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: flatCandles,
+      phase: "flatten",
+      carriedOver: new Set(["AAPL"]),
+    });
+    // `flatten` fázisban a nap végi zárás a rendes ág — a pótlás nem írja felül.
+    expect(res.actions.find((a) => a.kind === "eod-flat")).toBeDefined();
+    expect(res.carryFlattened).toEqual([]);
+  });
+
+  it("áthozott papírba NEM lép be újra ugyanabban a ciklusban", async () => {
+    const bars = risingTradingDaysEnding(60, "2026-02-02");
+    const res = await runStockCycle({
+      tickId: "carry-noentry",
+      now: () => NOW,
+      ledger: ledgerWithPosition("3", "290", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: { AAPL: bars },
+      phase: "trading",
+      carriedOver: new Set(["AAPL"]),
+    });
+    expect(res.actions.filter((a) => a.side === "BUY")).toEqual([]);
+    expect(res.ledger.positions.AAPL).toBeUndefined();
+  });
+
+  it("ár nélkül (elavult gyertya) NEM talál ki fill-árat — a kitettség incidensként látszik", async () => {
+    const res = await runStockCycle({
+      tickId: "carry-stale",
+      now: () => NOW,
+      ledger: ledgerWithPosition("3", "290", "80"),
+      instruments: [AAPL],
+      candlesBySymbol: {},
+      phase: "trading",
+      carriedOver: new Set(["AAPL"]),
+    });
+    expect(res.carryFlattened).toEqual([]);
+    expect(res.unflattened).toEqual(["AAPL"]);
+    expect(res.ledger.positions.AAPL?.qty).toBe("3");
   });
 });
 

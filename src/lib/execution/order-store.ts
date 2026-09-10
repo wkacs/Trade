@@ -413,3 +413,46 @@ export async function seedLedger(
 
 /** Kényelmi átváltás: number → Dec a régi hívási helyeknek. */
 export const toDec = dec;
+
+/**
+ * Symbolonként a LEGUTOLSÓ elszámolt fill ideje (epoch ms) ebben a hatókörben.
+ *
+ * Miért kell: a ledger pozíciója nem hordoz nyitási időt, a day-trading sávnak viszont
+ * tudnia kell, hogy egy nyitott papír MA nyílt-e, vagy egy korábbi ülésről RAGADT bent
+ * (kimaradt nap végi zárás). A készletet csak fill mozdítja, ezért a legutolsó fill ideje
+ * pontosan megmondja, mikor változott utoljára a pozíció.
+ *
+ * Best-effort: DB nélkül vagy hibánál üres térkép. A hívó ezt „nem tudom" értelemben
+ * kezeli — kitalált nyitási idő helyett inkább nincs kényszerzárás.
+ */
+export async function lastFillTimeBySymbol(
+  scope: LedgerScope,
+  dbOverride?: Db | null,
+): Promise<Record<string, number>> {
+  const db = dbOverride !== undefined ? dbOverride : getDb();
+  if (!db) return {};
+  try {
+    const rows = await db
+      .select({
+        symbol: schema.executionFills.symbol,
+        lastAt: sql<string>`max(${schema.executionFills.executedAt})`,
+      })
+      .from(schema.executionFills)
+      .where(
+        and(
+          eq(schema.executionFills.portfolioId, scope.portfolioId),
+          eq(schema.executionFills.mode, scope.mode),
+        ),
+      )
+      .groupBy(schema.executionFills.symbol);
+    const out: Record<string, number> = {};
+    for (const r of rows) {
+      const ms = new Date(r.lastAt).getTime();
+      if (Number.isFinite(ms)) out[r.symbol] = ms;
+    }
+    return out;
+  } catch (e) {
+    console.error("[order-store] lastFillTimeBySymbol hiba:", e);
+    return {};
+  }
+}

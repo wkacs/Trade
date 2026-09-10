@@ -47,7 +47,7 @@ interface PortfolioApi {
 }
 
 interface MarketApi {
-  prices: Record<string, { usd: number; change24hPct: number }>;
+  prices: Record<string, { usd: number; change24hPct: number; source?: "coingecko" | "binance" }>;
   fearGreed: { value: number; classification: string } | null;
   signals: MlSignalView[];
   weeklyBudgetRemainingUsd: number | null;
@@ -360,6 +360,7 @@ function StockFillList({ fills }: { fills: StockFillApi[] }) {
     "stop-loss": "stop",
     "take-profit": "take-profit",
     "eod-flat": "nap végi zárás",
+    "carry-flat": "pótolt zárás (bent ragadt)",
   };
   return (
     <div className="mb-4 overflow-x-auto">

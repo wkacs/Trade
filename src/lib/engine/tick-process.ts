@@ -1,7 +1,21 @@
 import type { CycleAction } from "@/lib/engine/tick";
 
 /** Egy trade hajtóereje. */
-export type TradeOrigin = "dca" | "stop-loss" | "take-profit" | "momentum" | "ai" | "manual" | "eod-flat";
+export type TradeOrigin =
+  | "dca"
+  | "stop-loss"
+  | "take-profit"
+  | "momentum"
+  | "ai"
+  | "manual"
+  /** Nap végi laposra zárás a day-trading sávon (az ülés utolsó perceiben). */
+  | "eod-flat"
+  /**
+   * PÓTLÓ zárás: egy korábbi ülésről bent ragadt pozíció zárása. Külön eredet, hogy az
+   * auditban megkülönböztethető legyen a rendben lefutott nap végi zárástól — a jelenléte
+   * azt bizonyítja, hogy egy `eod-flat` kimaradt, és a sáv éjszakán át kitett volt.
+   */
+  | "carry-flat";
 
 /**
  * A tickenkénti teljes folyamat pillanatképe (a tick_runs.process JSON alakja).

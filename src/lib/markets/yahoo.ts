@@ -170,6 +170,13 @@ export interface YahooFetchResult {
 }
 
 const YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/";
+
+/**
+ * Meddig várunk EGY Yahoo-kérésre. A day-trading ciklusnak 5 perces sávja és 10 perces
+ * zárási ablaka van; egy határidő nélküli kérés ezt elfogyaszthatja. Inkább nincs adat
+ * (megnevezett hibával), mint beragadt ciklus.
+ */
+const YAHOO_TIMEOUT_MS = 8_000;
 /** A Yahoo kulcs nélkül is válaszol, de böngésző-UA nélkül gyakrabban dob 429-et. */
 const YAHOO_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -210,7 +217,7 @@ export async function fetchYahooCandles(
   symbol: string,
   bars: number,
   timeframe: Timeframe = "1d",
-  opts: { now?: () => number; fetchImpl?: typeof fetch; range?: string } = {},
+  opts: { now?: () => number; fetchImpl?: typeof fetch; range?: string; timeoutMs?: number } = {},
 ): Promise<YahooFetchResult> {
   const now = opts.now ?? (() => Date.now());
   const doFetch = opts.fetchImpl ?? fetch;
@@ -222,7 +229,14 @@ export async function fetchYahooCandles(
   const url = `${YAHOO_BASE}${encodeURIComponent(providerSymbol)}?range=${range}&interval=${interval}`;
 
   try {
-    const res = await doFetch(url, { headers: { "User-Agent": YAHOO_UA, Accept: "application/json" } });
+    // IDŐKORLÁT. Enélkül egy beragadt Yahoo-kérés a hívó ciklusát is megfogja, és a
+    // day-trading sávnak KEMÉNY határideje van: a nap végi laposra zárás az ülés utolsó
+    // 10 perce, mindössze két 5 perces ciklus. Egy határidő nélküli kérés pont ezt a két
+    // esélyt eheti meg — a pozíció pedig bent marad éjszakára.
+    const res = await doFetch(url, {
+      headers: { "User-Agent": YAHOO_UA, Accept: "application/json" },
+      signal: AbortSignal.timeout(opts.timeoutMs ?? YAHOO_TIMEOUT_MS),
+    });
     if (!res.ok) {
       return { candles: [], error: { code: "http_error", message: `Yahoo HTTP ${res.status} (${providerSymbol})` } };
     }

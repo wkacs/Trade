@@ -1,11 +1,12 @@
 import { getDb } from "@/db/client";
 import { cashOf } from "@/lib/portfolio/ledger";
-import { dec } from "@/lib/portfolio/money";
+import { dec, isPositive } from "@/lib/portfolio/money";
 import { activeByClass } from "@/lib/markets/registry";
 import { fetchInstrumentCandles } from "@/lib/markets/data";
 import {
   runStockCycle,
   intradayPhaseAt,
+  carriedOverSymbols,
   previousTradingDayKey,
   STOCK_PORTFOLIO_ID,
   STOCK_QUOTE,
@@ -26,11 +27,12 @@ import {
   recordIntent,
   persistFill,
   persistStopPrice,
+  lastFillTimeBySymbol,
   type LedgerScope,
 } from "@/lib/execution/order-store";
 import { acquireLease, releaseLease, newOwnerId, slotId, type Lease } from "@/lib/engine/run-lease";
 import { persistWarning, unflattenedWarning } from "@/lib/engine/run-scheduled-stock-tick";
-import { etParts, etDateKey, sessionOpenMs } from "@/lib/markets/calendar";
+import { etParts, etDateKey, sessionOpenMs, isUsTradingDay } from "@/lib/markets/calendar";
 import { resolveDayGate } from "@/lib/portfolio/day-equity";
 import { allFractionable } from "@/lib/markets/alpaca";
 import { symbolsWithEarningsOn } from "@/lib/markets/earnings";
@@ -76,6 +78,12 @@ export interface ScheduledStockIntradayResult {
   unflattened?: string[];
   /** Papírok elavult gyertyasorral — ezekbe a ciklus nem nyitott új pozíciót (audit 2.). */
   staleSymbols?: string[];
+  /**
+   * ÁTHOZOTT papírok: egy korábbi ülésről bent ragadt pozíciók, amiket ez a ciklus
+   * kényszerrel zárt. Nem hiba-ág (a ciklus `ok`), de INCIDENS-NYOM: azt jelenti, hogy egy
+   * korábbi nap végi zárás kimaradt, és a sáv éjszakán át kitett volt.
+   */
+  carryFlattened?: string[];
   /** Nem végzetes, de NEM elhallgatható figyelmeztetések (pl. duplikált fill). */
   warnings?: string[];
   lease?: { key: string; owner: string; fencingToken: number };
@@ -157,17 +165,26 @@ export async function executeScheduledStockIntraday(
       return { ok: true, skipped: true, slot, phase, reason: "no_active_stocks", seeded, lease: leaseInfo };
     }
 
+    // PÁRHUZAMOS letöltés. A sorozatos lekérés a papírok számával szorozta az időt, a
+    // ciklusnak viszont kemény határideje van: a nap végi laposra zárás az ülés utolsó 10
+    // perce (két 5 perces ciklus), és a Vercel-függvénynek is 60 másodperce van. Egy lassú
+    // papír így nem eheti meg a többi esélyét sem.
+    const fetched = await Promise.all(
+      instruments.map(async (inst) => ({
+        symbol: inst.symbol,
+        ...(await fetchInstrumentCandles(inst, STOCK_INTRADAY_BARS, {
+          now,
+          timeframe: STOCK_INTRADAY_TF,
+        })),
+      })),
+    );
     const candlesBySymbol: Record<string, Awaited<ReturnType<typeof fetchInstrumentCandles>>["candles"]> = {};
-    for (const inst of instruments) {
-      const { candles, error } = await fetchInstrumentCandles(inst, STOCK_INTRADAY_BARS, {
-        now,
-        timeframe: STOCK_INTRADAY_TF,
-      });
+    for (const { symbol, candles, error } of fetched) {
       if (error) {
-        console.warn(`[stock-intraday] ${inst.symbol} adat-hiba [${error.code}] ${error.message}`);
+        console.warn(`[stock-intraday] ${symbol} adat-hiba [${error.code}] ${error.message}`);
         continue;
       }
-      if (candles.length > 0) candlesBySymbol[inst.symbol] = candles;
+      if (candles.length > 0) candlesBySymbol[symbol] = candles;
     }
     if (Object.keys(candlesBySymbol).length === 0) {
       await releaseLease(key, owner);
@@ -219,6 +236,31 @@ export async function executeScheduledStockIntraday(
       warnings.push(warning);
     }
 
+    // ÁTHOZOTT pozíciók: amiket egy korábbi ülésről ragadtak bent, mert a nap végi zárás
+    // kimaradt (kimaradt cron, hidegindítás, adat-hiba, elutasított fill). A `flatten`
+    // fázis csak az utolsó 10 percben fut — ha az a két ciklus elmarad, MÁS NEM ZÁRJA a
+    // pozíciót, és a day trade némán swinggé válik. Ez a pótló zárás a fázistól függetlenül
+    // fut, tehát az ülés ELSŐ ciklusa leveszi a bent ragadt kitettséget.
+    //
+    // A hivatkozási pont a MAI ülés-nyitása. `force` mellett (kézi próba zárt piacon) a
+    // `sessionOpenMs` egy nem-kereskedési napon nem jelent ülést, ezért ilyenkor nincs
+    // kényszerzárás — a kézi próba nem likvidálhat egy élő pozíciót kitalált ülés-időre.
+    const heldSymbols = Object.values(ledger.positions)
+      .filter((p) => isPositive(p.qty))
+      .map((p) => p.symbol);
+    let carriedOver = new Set<string>();
+    if (heldSymbols.length > 0 && isUsTradingDay(nowMs)) {
+      const lastFillAt = await lastFillTimeBySymbol(scope);
+      carriedOver = new Set(carriedOverSymbols(heldSymbols, lastFillAt, sessionOpenMs(nowMs)));
+      if (carriedOver.size > 0) {
+        const warning =
+          `ÁTHOZOTT pozíció egy korábbi ülésről: ${[...carriedOver].sort().join(", ")} — ` +
+          `a nap végi zárás kimaradt, a ciklus most zárja`;
+        console.error(`[stock-intraday] ${warning}`);
+        warnings.push(warning);
+      }
+    }
+
     const result = await runStockCycle({
       tickId: slot,
       now,
@@ -229,6 +271,7 @@ export async function executeScheduledStockIntraday(
       phase,
       fractional,
       entryBlocked,
+      carriedOver,
       entryShape,
       momentumRanking,
       // NAPI VESZTESÉGKAPU (audit 1. pont). A nap itt a tőzsdei ÜLÉS napja (ET), a
@@ -292,12 +335,17 @@ export async function executeScheduledStockIntraday(
       warnings.push(flattenWarning);
     }
 
+    if (result.carryFlattened.length > 0) {
+      console.log(`[stock-intraday] áthozott pozíció lezárva: ${result.carryFlattened.join(", ")}`);
+    }
+
     return {
       ok: flattenWarning === null,
       ...(result.unflattened.length > 0
         ? { unflattened: result.unflattened, reason: "flatten_incomplete" }
         : {}),
       ...(result.staleSymbols.length > 0 ? { staleSymbols: result.staleSymbols } : {}),
+      ...(result.carryFlattened.length > 0 ? { carryFlattened: result.carryFlattened } : {}),
       slot,
       phase,
       actions: result.actions,

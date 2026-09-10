@@ -27,6 +27,7 @@ async function main() {
   const { TradingWorker, realSleep } = await import("@/lib/engine/worker");
   const { acquireLease, releaseLease, leaseKey, slotId, SLOT_MS } = await import("@/lib/engine/run-lease");
   const { runFastExit } = await import("@/lib/engine/fast-exit");
+  const { executeScheduledStockIntraday } = await import("@/lib/engine/run-scheduled-stock-intraday");
   const { executeScheduledTick } = await import("@/lib/engine/run-scheduled-tick");
   const { loadPortfolioState } = await import("@/lib/portfolio/accounting");
   const { expireStaleReservations, listUnsettledIntents, loadLedgerState, listKnownFillIds, intentIdsByExchangeOrder, persistFill, recordProtectionOrder } = await import("@/lib/execution/order-store");
@@ -94,6 +95,33 @@ async function main() {
         "amíg ezek nincsenek egyeztetve (T25/T27).",
     );
   }
+
+  /**
+   * RÉSZVÉNY day-trading ciklus az 5 perces kilépés-sávban.
+   *
+   * Miért itt: a részvény-sáv ritmusa is 5 perc, és a nap végi laposra zárás CSAK az ülés
+   * utolsó 10 percében fut le — ha ebben a sávban senki nem hívja a ciklust, a pozíció
+   * bent ragad éjszakára. A worker korábban egyáltalán nem indította a részvény-ágat, így
+   * `SCHEDULER=worker` mellett a sáv néma volt: se belépő, se zárás. Ez ugyanaz a párosítás,
+   * amit az éles `/api/cron/exit` route csinál.
+   *
+   * FÜGGETLEN a kripto kilépéstől: saját lease, saját hiba-ág. A részvény hibája nem
+   * ronthatja el a kripto kilépés eredményét, ezért itt nyeljük el és naplózzuk.
+   */
+  const runStockIntraday = async () => {
+    try {
+      const r = await executeScheduledStockIntraday();
+      if (r.skipped) return; // zárt piac / nincs aktív részvény — nem esemény
+      const parts = [`fázis ${r.phase}`, `${r.actions?.length ?? 0} akció`];
+      if (r.carryFlattened?.length) parts.push(`ÁTHOZOTT zárva: ${r.carryFlattened.join(", ")}`);
+      if (r.unflattened?.length) parts.push(`NYITVA MARADT: ${r.unflattened.join(", ")}`);
+      const line = `[worker] stock-intraday ${r.slot}: ${parts.join(", ")}`;
+      if (r.ok) console.log(line);
+      else console.error(`${line}${r.error ? ` — ${r.error}` : ""}`);
+    } catch (e) {
+      console.error("[worker] stock-intraday ciklus kivétel:", e);
+    }
+  };
 
   let worker: InstanceType<typeof TradingWorker>;
   worker = new TradingWorker(
@@ -169,6 +197,7 @@ async function main() {
           `[worker] exit ${slot}: ${r.fills.length} kilépés, ${r.stopUpdatesApplied} stop-frissítés, ` +
             `quote-kor ${r.quotes.maxAgeMs} ms${r.halted ? `, megállt: ${r.halted}` : ""} (${r.durationMs} ms)`,
         );
+        await runStockIntraday();
       },
       runEntry: async (slot, context) => {
         const r = await executeScheduledTick({ owner: context.owner, allowNewBuys: context.allowNewBuys });

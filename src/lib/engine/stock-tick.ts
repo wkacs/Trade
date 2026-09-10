@@ -117,6 +117,37 @@ export function staleSymbolsAt(
   return out.sort();
 }
 
+/**
+ * ÁTHOZOTT (carry-over) pozíciók: amiket egy KORÁBBI ülésről ragadtak bent.
+ *
+ * Miért kell: a day-trading sáv szerződése az, hogy a nap végére lapos. A `flatten` fázis
+ * viszont az ülés utolsó 10 perce — mindössze két 5 perces ciklus. Ha ez a két futás
+ * bármiért kimarad (kimaradt cron, hidegindítás, adat-hiba, elutasított fill), a pozíció
+ * bent ragad, és a KÖVETKEZŐ napon MÁR SENKI NEM ZÁRJA: a `trading` fázis csak stopot és
+ * take-profitot néz, nap végi zárást nem. Így a „day trade" néma swing-pozícióvá válik,
+ * éjszakai gap-kockázattal — pontosan az, amit a sáv kizár.
+ *
+ * A felismerés a fill-időből jön, mert a ledger pozíciója nem hordoz nyitási időt: a
+ * készletet KIZÁRÓLAG fill mozdítja, tehát ha a legutolsó fill a mai ülés-nyitás ELŐTT
+ * volt, a pozíció nem ma nyílt.
+ *
+ * FAIL-SAFE az ismeretlenre: ha egy nyitott papírra NINCS fill-időnk (üres előzmény, DB
+ * hiba, kézzel seedelt sor), az is áthozottnak számít. A tévedés ára itt aszimmetrikus —
+ * egy fölösleges zárás egy spreadbe kerül, egy elmaradt zárás éjszakai kitettség.
+ */
+export function carriedOverSymbols(
+  heldSymbols: string[],
+  lastFillAtBySymbol: Record<string, number>,
+  sessionOpenAtMs: number,
+): string[] {
+  return heldSymbols
+    .filter((symbol) => {
+      const at = lastFillAtBySymbol[symbol];
+      return at === undefined || at < sessionOpenAtMs;
+    })
+    .sort();
+}
+
 export interface StockDayGateState {
   /** Igaz, ha a napi veszteség-latch ma bekapcsolt → nincs ÚJ vétel a nap végéig. */
   latched: boolean;
@@ -436,7 +467,7 @@ export function planStockCycle(input: PlanStockCycleInput): PlanStockCycleResult
 // ── Végrehajtás (INJEKTÁLHATÓ) ───────────────────────────────────────────────────
 
 export interface StockCycleAction {
-  kind: "stop-loss" | "take-profit" | "dca" | "momentum" | "eod-flat";
+  kind: "stop-loss" | "take-profit" | "dca" | "momentum" | "eod-flat" | "carry-flat";
   side: "BUY" | "SELL";
   symbol: string;
   amountUsd: number;
@@ -475,6 +506,12 @@ export interface RunStockCycleDeps {
    * pozíció kezelése (stop / take-profit / nap végi zárás) NEM tiltott — csak a belépő.
    */
   entryBlocked?: ReadonlySet<string>;
+  /**
+   * ÁTHOZOTT pozíciók: egy korábbi ülésről bent ragadt papírok (`carriedOverSymbols`).
+   * Ezeket a ciklus a fázistól FÜGGETLENÜL zárja, amint van rájuk friss ár — a day-trading
+   * sáv nem tarthat éjszakán át nyitott kitettséget. Üresen nincs kényszerzárás.
+   */
+  carriedOver?: ReadonlySet<string>;
   /**
    * Köthető-e TÖRT részvény. Csak akkor igaz, ha az Alpaca MINDEN aktív papírra
    * visszaigazolta a `fractionable` jelzőt; enélkül a fill egész darabra kerekít.
@@ -529,6 +566,12 @@ export interface RunStockCycleResult {
   unflattened: string[];
   /** Papírok elavult gyertyasorral — ezekbe a ciklus nem nyitott új pozíciót. */
   staleSymbols: string[];
+  /**
+   * ÁTHOZOTT pozíciók, amiket EZ a ciklus zárt le (kimaradt nap végi zárás pótlása).
+   * Üres tömb a normális állapot; bármi más azt jelenti, hogy egy korábbi `flatten` fázis
+   * nem érte el a célját, és a sáv éjszakán át kitett volt.
+   */
+  carryFlattened: string[];
 }
 
 /**
@@ -702,11 +745,16 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
 
   // A SELL-ek előbb (a felszabaduló cash a belépőnek hasznosul). Belépő CSAK `trading`
   // fázisban van: zárás előtt (`no-new-entries`, `flatten`) már nem nyitunk újat.
+  //
+  // ÁTHOZOTT papírba szintén nincs belépő: azt a ciklus alább kényszerrel zárja, tehát a
+  // rávásárlás azonnal vissza is fordulna — csak spreadet és díjat fizetnénk érte.
   const blocked = deps.entryBlocked;
+  const noEntry = (symbol: string) =>
+    (blocked?.has(symbol) ?? false) || (deps.carriedOver?.has(symbol) ?? false);
   const ordered = [
     ...planned.plan.orders.filter((o) => o.side === "SELL"),
     ...(phase === "trading"
-      ? planned.plan.orders.filter((o) => o.side === "BUY" && !(blocked?.has(o.symbol) ?? false))
+      ? planned.plan.orders.filter((o) => o.side === "BUY" && !noEntry(o.symbol))
       : []),
   ];
   for (const o of ordered) {
@@ -746,39 +794,60 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
     }
   }
 
-  // NAP VÉGI LAPOSRA ZÁRÁS (day trading): ami a stop/TP után is nyitva maradt, megy.
-  // Ez a day trading lényege — a pozíció nem viheti át az éjszakai gap-kockázatot.
+  // KÉNYSZERZÁRÁS. Két, egymástól független ok teszi kötelezővé egy pozíció zárását:
+  //
+  //  1) `flatten` fázis — a nap végi laposra zárás, a day trading lényege: a pozíció nem
+  //     viheti át az éjszakai gap-kockázatot;
+  //  2) ÁTHOZOTT pozíció — egy korábbi ülésről bent ragadt papír (a `flatten` kimaradt).
+  //     Ezt a fázistól függetlenül zárjuk, az ülés első ciklusában: a kitettség már
+  //     eleve tovább élt, mint szabad lett volna, és a következő `flatten` fázisra várni
+  //     újabb egész napnyi, nem szándékolt swing-kockázat lenne.
+  //
+  // A kettő ugyanazon az úton fut (SELL), de KÜLÖN eredettel (`eod-flat` / `carry-flat`),
+  // így a dashboardon és a fill-naplóban is látszik, melyik zárás volt PÓTLÁS.
+  const forcedClose = new Map<string, "eod-flat" | "carry-flat">();
   if (phase === "flatten") {
     for (const p of Object.values(ledger.positions)) {
-      if (!isPositive(p.qty)) continue;
-      const px = pricesDec[p.symbol];
-      if (!px) continue;
-      const fill = await runIntent({
-        side: "SELL",
-        symbol: p.symbol,
-        baseQty: p.qty,
-        origin: "eod-flat",
-        referencePrice: px,
-      });
-      if (!fill) continue;
-      actions.push({
-        kind: "eod-flat",
-        side: "SELL",
-        symbol: p.symbol,
-        amountUsd: toNumber(fill.grossQuoteAmount),
-        qty: toNumber(fill.filledBaseQty),
-      });
+      if (isPositive(p.qty)) forcedClose.set(p.symbol, "eod-flat");
+    }
+  }
+  for (const symbol of deps.carriedOver ?? []) {
+    if (isPositive(positionQty(ledger, symbol)) && !forcedClose.has(symbol)) {
+      forcedClose.set(symbol, "carry-flat");
     }
   }
 
-  // A zárás UTÁNI tényleges maradék — nem a szándékot, hanem az eredményt nézzük.
-  const unflattened =
-    phase === "flatten"
-      ? Object.values(ledger.positions)
-          .filter((p) => isPositive(p.qty))
-          .map((p) => p.symbol)
-          .sort()
-      : [];
+  const carryFlattened: string[] = [];
+  for (const [symbol, kind] of forcedClose) {
+    const position = ledger.positions[symbol];
+    if (!position || !isPositive(position.qty)) continue;
+    // Elavult gyertya = nincs ár. Kitalált fill-ár helyett a pozíció nyitva marad, és
+    // lentebb `unflattened`-ként incidensként látszik.
+    const px = pricesDec[symbol];
+    if (!px) continue;
+    const fill = await runIntent({
+      side: "SELL",
+      symbol,
+      baseQty: position.qty,
+      origin: kind,
+      referencePrice: px,
+    });
+    if (!fill) continue;
+    actions.push({
+      kind,
+      side: "SELL",
+      symbol,
+      amountUsd: toNumber(fill.grossQuoteAmount),
+      qty: toNumber(fill.filledBaseQty),
+    });
+    if (kind === "carry-flat") carryFlattened.push(symbol);
+  }
+
+  // A zárás UTÁNI tényleges maradék — nem a szándékot, hanem az eredményt nézzük. Az
+  // áthozott papír is idetartozik: ha a pótló zárás sem sikerült, a kitettség TOVÁBB él.
+  const unflattened = [...forcedClose.keys()]
+    .filter((symbol) => isPositive(positionQty(ledger, symbol)))
+    .sort();
 
   return {
     ledger,
@@ -788,5 +857,6 @@ export async function runStockCycle(deps: RunStockCycleDeps): Promise<RunStockCy
     lastClose: planned.lastClose,
     unflattened,
     staleSymbols: planned.staleSymbols,
+    carryFlattened: carryFlattened.sort(),
   };
 }

@@ -20,7 +20,7 @@ amerikai ülés alatt, a nap végére laposra zárva. A két sáv pénztárcája
 | Kereskedési mód | **paper** (`TRADING_MODE=paper`). Live nincs verifikálva, nincs bekapcsolva. |
 | Ütemező | **pontosan egy** a `SCHEDULER` szerint. Alap: `github-actions` (óránként :07). |
 | Belépés | óránként, **lezárt** gyertyán |
-| Kilépés (stop / TP / trailing) | 5 percenként — **csak `SCHEDULER=worker` esetén.** GitHub-ütemezéssel óránként. |
+| Kilépés (stop / TP / trailing) | 5 percenként — **csak `SCHEDULER=worker` esetén, vagy külső 5 perces cronnal a `/api/cron/exit`-en.** GitHub-ütemezéssel óránként. |
 | Phase-1 LLM | `glm-4.7-flash` (ingyenes) — „érdemes-e most dönteni?" |
 | Phase-2 LLM | `glm-5.2` (**fizetős**, egyenleg kell) — strukturált döntés + érvelés |
 | ML-jel | logisztikus regresszió (`src/lib/ml/model.json`). **A modell karanténban van**, amíg nincs újratanítva a `f2-2026-09-05` feature-verzióra. Karanténban nincs ML-jel; a rendszer LLM + kód-alapú szabályokkal fut. |
@@ -34,7 +34,8 @@ amerikai ülés alatt, a nap végére laposra zárva. A két sáv pénztárcája
 | Adat | **Yahoo** chart API, 5 perces gyertya, kulcs nélkül (a Stooq 2026-09-08 óta bot-fal mögött) |
 | Ritmus | **5 percenként**, csak a szabályos ülésben; az utolsó 30 percben nincs új belépő, az utolsó 10 percben **minden zárul** |
 | Belépő | momentum-breakout (SMA 78 / lookback 156 bar), tétel az equity 10%-a, egész részvény |
-| Ütemező | a MEGLÉVŐ 5 perces külső cron (`/api/cron/exit`) indítja a kripto kilépés mellett |
+| Ütemező | 5 perces trigger: a `worker`, VAGY egy külső HTTP-cron a `/api/cron/exit` végponton (a kripto kilépés mellett). **GitHub Actions alatt nem fut** — lásd a runbook 1. és 4. szakaszát |
+| Bent ragadt pozíció | ha a nap végi zárás kimaradt, a következő ülés ELSŐ ciklusa lezárja (`carry-flat` eredettel, láthatóan) |
 | Mérés | `scripts/stock-intraday-backtest.ts` — 60 nap, a live úton. Részletek és őszinte keret: [`docs/2026-09-08-reszveny-day-trading.md`](docs/2026-09-08-reszveny-day-trading.md) |
 
 Az ütemezés, indítás, leállítás, health és rollback részletei:

@@ -37,6 +37,44 @@ describe("CoinGeckoCollector", () => {
     expect(result).toEqual([]);
   });
 
+  // A néma degradáció ITT lett látható hibává. Enélkül a collectAllWithOutcomes
+  // `ok: true, points: 0`-t jelentett: a dashboard „rendben" forrást mutatott, miközben
+  // ár nélkül maradt, és a nyitott pozíció P&L-je belépési áron ragadt.
+  it("a rate limit MEGNEVEZETT hiba, nem néma üres válasz", async () => {
+    (global.fetch as any).mockResolvedValue({ ok: false, status: 429, json: async () => ({}) });
+    const collector = new CoinGeckoCollector(["BTC"]);
+    await collector.collect();
+    expect(collector.lastError()).toContain("429");
+    expect(collector.lastError()).toContain("rate limit");
+  });
+
+  it("hálózati hiba is megnevezett hiba", async () => {
+    (global.fetch as any).mockRejectedValue(new Error("időtúllépés"));
+    const collector = new CoinGeckoCollector(["BTC"]);
+    expect(await collector.collect()).toEqual([]);
+    expect(collector.lastError()).toContain("időtúllépés");
+  });
+
+  it("RÉSZLEGES válasz is hiba: a hiányzó coint megnevezi", async () => {
+    (global.fetch as any).mockResolvedValue({
+      ok: true,
+      json: async () => ({ bitcoin: { usd: 60000, usd_24h_vol: 1, usd_24h_change: 0 } }),
+    });
+    const collector = new CoinGeckoCollector(["BTC", "ETH"]);
+    expect(await collector.collect()).toHaveLength(1);
+    expect(collector.lastError()).toContain("ETH");
+  });
+
+  it("teljes válasz után NINCS hiba (a helyreállás is látszik)", async () => {
+    (global.fetch as any).mockResolvedValue({
+      ok: true,
+      json: async () => ({ bitcoin: { usd: 60000, usd_24h_vol: 1, usd_24h_change: 0 } }),
+    });
+    const collector = new CoinGeckoCollector(["BTC"]);
+    await collector.collect();
+    expect(collector.lastError()).toBeNull();
+  });
+
   it("ismeretlen szimbólumot kihagy", async () => {
     (global.fetch as any).mockResolvedValue({
       ok: true,
